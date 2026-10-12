@@ -33,7 +33,7 @@ CCFLAGS := -g
 endif
 
 # Application metadata
-VERSION ?= v2.63
+VERSION ?= v2.64
 
 # Project files
 SOURCES := loadrom.c 
@@ -42,9 +42,10 @@ OUTFILE := loadrom.exe
 # Firmware assets (generated header embeds the Pico firmware image)
 PICOBIN   := ../pico/loadrom/dist/loadrom.bin
 PICOBIN_H := $(SRCDIR)/loadrom.h
-NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.MasterOnly.ROM
-#NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.ROM
+NEXTOR_SUNRISE := ../resources/Nextor-2.1.4.SunriseIDE.MasterOnly.ROM
 NEXTOR_SUNRISE_H := $(SRCDIR)/nextor_sunrise.h
+NEXTOR3 := ../resources/Nextor-3.0.0-beta2.SunriseIDE.MasterOnly.ROM
+NEXTOR3_H := $(SRCDIR)/nextor3.h
 KEYBOARDBIN   := ../pico/keyboard/dist/keyboard.bin
 KEYBOARDBIN_H := $(SRCDIR)/keyboard.h
 MIDIBIN       := ../pico/midi/dist/midi.bin
@@ -63,7 +64,7 @@ compile: $(BINDIR)/$(OUTFILE)
 
 package: $(DISDIR)/loadrom.exe
 
-$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE) $(KEYBOARDBIN_H) $(KEYBOARDBIN) $(MIDIBIN_H) $(MIDIBIN) $(MIDIPACBIN_H) $(MIDIPACBIN)
+$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE) $(NEXTOR3_H) $(NEXTOR3) $(KEYBOARDBIN_H) $(KEYBOARDBIN) $(MIDIBIN_H) $(MIDIBIN) $(MIDIPACBIN_H) $(MIDIPACBIN)
 	@echo "Compiling $@"
 	$(CC) $(CCFLAGS) -DAPP_VERSION=\"$(VERSION)\" $(SRCDIR)/$(SOURCES) -o $@
 
@@ -73,6 +74,10 @@ $(PICOBIN_H): $(PICOBIN)
 
 $(NEXTOR_SUNRISE_H): $(NEXTOR_SUNRISE)
 	@echo "Embedding Sunrise Nextor ROM into header"
+	$(UTLDIR)/$(XXD) -i $< $@
+
+$(NEXTOR3_H): $(NEXTOR3)
+	@echo "Embedding Sunrise Nextor 3 ROM into header"
 	$(UTLDIR)/$(XXD) -i $< $@
 
 $(KEYBOARDBIN_H): $(KEYBOARDBIN)
@@ -99,6 +104,6 @@ $(DISDIR)/loadrom.exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
 
 clean:
 	@echo "Cleaning ...."
-	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/loadrom.h $(SRCDIR)/nextor_sunrise.h $(SRCDIR)/keyboard.h $(SRCDIR)/midi_fw.h $(SRCDIR)/midipac_fw.h
+	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/loadrom.h $(SRCDIR)/nextor_sunrise.h $(SRCDIR)/nextor3.h $(SRCDIR)/keyboard.h $(SRCDIR)/midi_fw.h $(SRCDIR)/midipac_fw.h
 	$(RM) $(DISDIR)/*
 

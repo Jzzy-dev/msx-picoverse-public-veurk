@@ -392,7 +392,7 @@ void sunrise_sd_set_ide_ctx(sunrise_ide_t *ide)
 
 void sunrise_sd_select_partition(uint8_t partition_number)
 {
-    sd_selected_partition = (partition_number >= 1u && partition_number <= 4u) ? partition_number : 0u;
+    sd_selected_partition = (partition_number >= 1u && partition_number <= SD_PART_WHOLE_DISK) ? partition_number : 0u;
 }
 
 void __not_in_flash_func(sunrise_sd_task)(void)
@@ -407,7 +407,8 @@ void __not_in_flash_func(sunrise_sd_task)(void)
         if (sector_count != 0)
         {
             sunrise_sd_partition_t parts[4];
-            uint8_t part_count = sunrise_sd_list_fat16_partitions(parts, 4);
+            uint8_t part_count = sd_selected_partition == SD_PART_WHOLE_DISK ?
+                                 0u : sunrise_sd_list_fat16_partitions(parts, 4);
             uint8_t chosen = 0xFFu;
 
             for (uint8_t i = 0; i < part_count; i++)

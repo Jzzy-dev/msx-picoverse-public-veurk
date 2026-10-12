@@ -26,7 +26,7 @@
 // Define maximum files per page and screen properties
 #define FILES_PER_PAGE 19   // Maximum files per page on the menu
 #define MAX_FILE_NAME_LENGTH 71     // Maximum size of the ROM name on the 80-column detail screen
-#define ROM_RECORD_SIZE (MAX_FILE_NAME_LENGTH + 1 + sizeof(unsigned long) + sizeof(unsigned long))  // Size of the ROM record in bytes
+#define ROM_RECORD_SIZE (MAX_FILE_NAME_LENGTH + 1 + sizeof(unsigned long) + sizeof(unsigned long))  // Legacy wire record: name, mapper, size, flash offset
 #define MAX_ROM_RECORDS 65535 // Maximum ROM files supported (counter limit)
 #define SD_ROM_MAX_SIZE_KB 4096 // 4 MB PSRAM region capacity for microSD-loaded ROMs
 #define MEMORY_START 0xB900 // Start of the memory area to read the ROM records
@@ -45,6 +45,7 @@
 #define NAME_COL_WIDTH_80 60
 #define MENU_FORCE_40_COLUMNS 0
 #define MENU_KEY_F4_CONFIG 0x04
+#define MENU_KEY_F5_HELP 0x05
 #define CTRL_BASE_ADDR 0xBFF0
 #define CTRL_COUNT_L (CTRL_BASE_ADDR + 0)
 #define CTRL_COUNT_H (CTRL_BASE_ADDR + 1)
@@ -60,6 +61,7 @@
 #define CTRL_PSG_EMULATION (CTRL_BASE_ADDR + 11)
 #define CTRL_WAVEGAME_ROM (CTRL_BASE_ADDR + 12)
 #define CTRL_SD_PARTITION (CTRL_BASE_ADDR + 13)
+#define SD_PART_WHOLE_DISK 5
 #define CTRL_SD_BROWSE_PARTITION (CTRL_BASE_ADDR + 14)
 #define CTRL_AUDIO_VOLUME (CTRL_BASE_ADDR + 15)
 #define CTRL_MAGIC   0xA5
@@ -109,6 +111,8 @@
 // microSD access, so the menu blinks the CAPS LED while the value keeps
 // changing, the same way a disk drive lights its own activity LED.
 #define CTRL_DISK_ACT 0xBFA3
+#define CTRL_FLASH_FREE_KB 0xBFA4
+#define CTRL_FLASH_LARGEST_KB 0xBFA6
 #define MP3_CTRL_BASE      0xBFE0
 #define MP3_CTRL_CMD       (MP3_CTRL_BASE + 0)
 #define MP3_CTRL_STATUS    (MP3_CTRL_BASE + 1)
@@ -150,6 +154,13 @@
 #define CMD_SAVE_LAST_SELECTION 0x0D
 #define CMD_COPY_TO_FLASH 0x0E
 #define CMD_RENAME_ENTRY 0x0F
+#define CMD_PREPARE_FLASH_ROM 0x10
+#define FLASH_COPY_DETECTING 0x7F
+#define FLASH_COPY_NO_SPACE  0x80
+#define FLASH_COPY_TOO_LARGE 0x81
+#define FLASH_COPY_DUPLICATE 0x82
+#define FLASH_COPY_MAPPER    0x83
+#define FLASH_COPY_IO        0x84
 #define CMD_FH_LIST_PAGE 0x40
 #define CMD_FH_DOWNLOAD  0x41
 #define CMD_FH_SEARCH    0x42
@@ -199,45 +210,38 @@
 #define MENU_ROW_FORMAT_80 " %-61.61s %6s %-2s %-5s"
 #define MENU_ROW_FORMAT_40 " %-21.21s %6s %-2s %-5s"
 
-// Structure to represent a ROM record
-// The ROM record will contain the name of the ROM, the mapper code, the size of the ROM and the offset in the flash memory
-// Name: MAX_FILE_NAME_LENGTH bytes
-// Mapper: 1 byte
-// Size: 4 bytes
-// Offset: 4 bytes
+// Local page cache, not the wire record layout. The Pico owns flash offsets;
+// the menu selects entries by index and only needs their display/launch fields.
 typedef struct {
     char Name[MAX_FILE_NAME_LENGTH + 1];
     unsigned char Mapper;
     unsigned long Size;
-    unsigned long Offset;
 } ROMRecord;
 
 
-// Control Variables
-extern int currentPage;    // Current page
+// Pages are 1-based; currentIndex is a 0-based index in the entire filtered list.
+// Access the cached entry with records[currentIndex % FILES_PER_PAGE].
+extern int currentPage;
 extern int totalPages;     // Total pages
 extern int currentIndex;   // Current file index
 extern unsigned int totalFiles;     // Total files
-extern unsigned long totalSize;
 extern ROMRecord records[FILES_PER_PAGE]; // Page buffer for ROM records
 
 // Declare the functions
-unsigned long read_ulong(const unsigned char *ptr);
-int isEndOfData(const unsigned char *memory);
-void readROMData(ROMRecord *records, unsigned int *recordCount, unsigned long *sizeTotal);
 int putchar (int character);
 void invert_chars(unsigned char startChar, unsigned char endChar);
-char* mapper_description(int number);
+const char *mapper_description(int number);
 unsigned char record_mapper_code(unsigned char mapper);
 int record_is_folder(const ROMRecord *record);
 int record_is_mp3(const ROMRecord *record);
+int record_needs_flash(const ROMRecord *record);
 void trim_name_to_buffer(const char *src, char *dst, int max_len);
 int build_sliding_name_window(const char *str, int startPos, char *out, unsigned char width);
 void displayMenu();
 void load_page_records(unsigned int page_index);
 void navigateMenu();
 void helpMenu();
-void loadGame(int index);
+void loadGame(int index, unsigned char quick_run);
 void wait_ctrl_cmd(void);
 unsigned char run_ctrl_cmd(unsigned char cmd);
 void save_last_selection(unsigned int index);
@@ -245,6 +249,3 @@ void launch_wifi_config(void);
 void execute_rst00();
 void main();
 void delay_ms(uint16_t milliseconds);
-
-
-

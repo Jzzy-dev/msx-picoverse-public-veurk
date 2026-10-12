@@ -44,7 +44,7 @@
 
 namespace eval picoverse2350 {
 
-variable version "v2.57"
+variable version "v2.58"
 
 # Flash layout, must match pico/explorer/explorer.c and tool/src/explorer.c.
 # Offsets are relative to the menu ROM (the firmware's flash_rom pointer).
@@ -72,6 +72,7 @@ variable monitor_addr   0xBF7F         ;# ROM select register
 variable part_base      0xBF80         ;# SD partition info / status text
 variable chip_base      0xBFAF
 variable vdp_addr       0xBFA0
+variable flash_info_base 0xBFA4
 variable query_base     0xBFC0
 variable mp3_base       0xBFE0
 variable ctrl_base      0xBFF0
@@ -160,7 +161,21 @@ variable last_index 0xFFFF
 variable restore_pending 0
 variable rename_pending  ""
 variable job        ""      ;# copy to flash job
+variable flash_copy_pending ""
 variable fh_active  0       ;# File Hunter window active
+variable fh_base    "http://msxpico.file-hunter.com"
+variable fh_catalog [list]  ;# File Hunter listing: {name size_kb}
+variable fh_loaded  0       ;# fh_catalog is a real listing (not a message row)
+variable fh_message 0       ;# fh_catalog holds a single message row
+variable fh_message_time 0  ;# when that message was made (ms)
+variable fh_query   ""      ;# search text of the listing
+variable fh_type    0       ;# 0 = ROM catalog, 1 = DSK catalog
+variable fh_net     1       ;# last File Hunter request reached the server
+variable fh_list    ""      ;# response of the listing request being received
+variable fh_list_overflow 0
+variable fh_dl      ""      ;# download in progress (dict)
+variable fh_http    [dict create]   ;# HTTP request in progress
+variable fh_http_after ""           ;# pending tick of that request
 
 user_setting create string picoverse2350_uf2 \
 "PicoVerse 2350 Explorer UF2 loaded when the PicoVerse 2350 extension is
@@ -584,6 +599,10 @@ proc refresh {} {
 	variable current_page
 	variable fh_active
 
+	if {$fh_active} {
+		# Leaving File Hunter: its progress/result registers are not options.
+		foreach k {mapper ack audio} {ctrl_set $k 0}
+	}
 	set fh_active 0
 	set status $magic
 	set folders [list]
@@ -621,7 +640,7 @@ proc refresh {} {
 						set m [expr {$mapper_dsk | $source_flag}]
 					}
 					.ROM {
-						if {$size < 8192 || $size > 0x400000} continue
+						if {$size < 8192 || $size > 0xFFFFFFFF} continue
 						set m [expr {[lindex [tag_info $name] 1] | $source_flag}]
 					}
 					default continue
@@ -651,11 +670,13 @@ proc refresh {} {
 	set recs [concat $folders $system [lsort -index 0 $others]]
 	set recs [lrange $recs 0 [expr {$max_records - 1}]]
 	ctrl_set status $status
-	set_part_info 1 1 [browse_label]
+	# The free space is only shown in the microSD list.
+	set_part_info 1 1 [expr {$browse == 1 ? [browse_label] : [browse_status]}]
 	set query [lrepeat 32 0]
 	apply_filter
 	resolve_last_selection_match
 	resolve_rename_match
+	resolve_flash_copy_match
 	set current_page 0
 	build_page 0
 }
@@ -738,7 +759,9 @@ proc build_page {page} {
 	set pool ""
 	set name_offsets [list]
 	for {set i 0} {$i < $count} {incr i} {
-		set name [string trimright [lindex $recs [lindex $filtered [expr {$start + $i}]] 0]]
+		# The MSX shows bytes: a file name with characters outside Latin-1
+		# (a downloaded or PC file) must not break the whole page.
+		set name [encoding convertto iso8859-1 [string trimright [lindex $recs [lindex $filtered [expr {$start + $i}]] 0]]]
 		if {$max_name && [string length $name] + 1 > $max_name} {
 			set name [string range $name 0 [expr {$max_name - 2}]]
 		}
@@ -802,6 +825,8 @@ proc sync_ctrl {} {
 	variable mp3_status
 	variable mp3_index
 	variable mp3_mode
+	variable flash_info_base
+	variable fh_active
 	dict with ctrl {
 		set block [binary format c16 [list \
 			[expr {$count & 0xFF}] [expr {$count >> 8}] $page $status $cmd \
@@ -811,6 +836,10 @@ proc sync_ctrl {} {
 	}
 	put $ctrl_base $block
 	put $vdp_addr $misc
+	if {!$fh_active} {
+		lassign [flash_capacity] free largest
+		put $flash_info_base [binary format ss $free $largest]
+	}
 	put $mp3_base [binary format c9 [list 0xFF $mp3_status [expr {$mp3_index & 0xFF}] \
 		[expr {$mp3_index >> 8}] 0 0 0 0 $mp3_mode]]
 }
@@ -826,6 +855,64 @@ proc browse_label {} {
 	set name [string toupper [file tail [sd_root]]]
 	if {$name eq ""} {set name "MICROSD"}
 	return $name
+}
+
+# Free bytes on the PC volume that holds the microSD folder ("" when it can't
+# be read). openMSX's Tcl has no free-space command, so ask the OS. The result
+# is cached for a moment: a listing refresh asks for it several times.
+variable free_cache [dict create]
+
+proc free_cache_reset {} {
+	variable free_cache
+	set free_cache [dict create]
+}
+
+proc host_free_bytes {dir} {
+	variable free_cache
+	set now [clock seconds]
+	if {[dict exists $free_cache $dir]} {
+		lassign [dict get $free_cache $dir] when value
+		if {$now - $when < 3} {return $value}
+	}
+	set value ""
+	if {[file isdirectory $dir]} {
+		set native [file nativename [file normalize $dir]]
+		if {$::tcl_platform(platform) eq "windows"} {
+			# The summary line ends with "<n> bytes free" in the language of
+			# the system: take the last number of the last line (/-c drops
+			# the thousands separators).
+			if {![catch {exec cmd /c dir /-c $native} out]} {
+				set last [lindex [split [string trim $out] "\n"] end]
+				set numbers [regexp -all -inline {\d+} $last]
+				if {[llength $numbers]} {set value [scan [lindex $numbers end] %lld]}
+			}
+		} elseif {![catch {exec df -Pk $native} out]} {
+			# Filesystem 1024-blocks Used Available Capacity Mounted on
+			set fields [lindex [split [string trim $out] "\n"] end]
+			set kb [lindex $fields 3]
+			if {[string is integer -strict $kb]} {set value [expr {wide($kb) * 1024}]}
+		}
+	}
+	dict set free_cache $dir [list $now $value]
+	return $value
+}
+
+# Text of the microSD status line (partition label and free space), the way
+# set_browse_partition_status_text() builds it in the firmware:
+# "<label> (<MB>.<tenth>MB FREE)", at most 29 characters.
+proc browse_status {} {
+	set label [browse_label]
+	set free ""
+	if {[sd_available]} {set free [host_free_bytes [sd_root]]}
+	if {$free eq ""} {return $label}
+	set mb [expr {$free / 1048576}]
+	set tenth [expr {($free % 1048576) * 10 / 1048576}]
+	set suffix " ($mb.${tenth}MB FREE)"
+	set room [expr {29 - [string length $suffix]}]
+	if {$room > 0 && [string length $label] > $room} {
+		set label [string range $label 0 [expr {$room - 1}]]
+	}
+	return "$label$suffix"
 }
 
 proc hd_label {} {
@@ -877,8 +964,9 @@ proc load_romdb {} {
 
 proc detect_rom {host} {
 	variable romdb
+	variable flash_size
 	set size [file size $host]
-	if {$size < 8192 || $size > 15 * 1024 * 1024} {return 0}
+	if {$size < 8192 || $size > $flash_size} {return 0}
 	load_romdb
 	if {![catch {sha1sum $host} sha] && [dict exists $romdb [string tolower $sha]]} {
 		return [dict get $romdb [string tolower $sha]]
@@ -951,8 +1039,13 @@ proc pvc_path {rec} {
 }
 
 proc sunrise_partition_info {selected} {
-	ctrl_set sd_part 1
-	set_part_info 1 1 [hd_label]
+	if {$selected == 5} {
+		ctrl_set sd_part 5
+		set_part_info 2 17 "WHOLE DISK"
+	} else {
+		ctrl_set sd_part 1
+		set_part_info 2 17 [hd_label]
+	}
 }
 
 proc load_options {} {
@@ -1219,29 +1312,57 @@ proc flash_append {name mapper size offset} {
 	return 1
 }
 
-# Lowest 4KB aligned gap after the hidden payloads that shares no sector with
-# a live entry (flash_store_find_space), or -1.
-proc flash_find_space {size} {
+proc flash_gaps {} {
 	variable flash_recs
 	variable store_offset
 	variable sector
 	variable flash_size
 	variable menu_pos
-	set span [align_up $size $sector]
+	variable overflow
+	if {$overflow} {return [list]}
 	set used [list]
 	foreach f $flash_recs {
 		lassign $f name mapper fsize offset
 		if {$fsize == 0} continue
 		lappend used [list [expr {$offset / $sector * $sector}] [align_up [expr {$offset + $fsize}] $sector]]
 	}
-	set cursor $store_offset
+	set cursor [align_up $store_offset $sector]
+	set limit [expr {$flash_size - $menu_pos}]
+	set gaps [list]
 	foreach u [lsort -integer -index 0 $used] {
 		lassign $u s e
-		if {$cursor + $span <= $s} break
+		if {$s > $limit} {set s $limit}
+		if {$s > $cursor} {lappend gaps [list $cursor [expr {$s - $cursor}]]}
 		if {$e > $cursor} {set cursor $e}
+		if {$cursor >= $limit} break
 	}
-	if {$cursor + $span > $flash_size - $menu_pos} {return -1}
-	return $cursor
+	if {$cursor < $limit} {lappend gaps [list $cursor [expr {$limit - $cursor}]]}
+	return $gaps
+}
+
+# Allocation and F1 capacity share the same sector-safe free ranges.
+proc flash_find_space {size} {
+	variable sector
+	if {$size <= 0} {return -1}
+	set span [align_up $size $sector]
+	foreach gap [flash_gaps] {
+		lassign $gap start length
+		if {$length >= $span} {return $start}
+	}
+	return -1
+}
+
+proc flash_capacity {} {
+	variable overflow
+	if {$overflow} {return [list 65535 0]}
+	set free 0
+	set largest 0
+	foreach gap [flash_gaps] {
+		set length [lindex $gap 1]
+		incr free $length
+		if {$length > $largest} {set largest $length}
+	}
+	return [list [expr {$free / 1024}] [expr {$largest / 1024}]]
 }
 
 proc flash_name_taken {name {except -1}} {
@@ -1279,12 +1400,70 @@ proc delete_entry {} {
 		set p [pvc_path $rec]
 		if {$p ne ""} {catch {file delete [sd_host $p]}}
 		sd_note
+		free_cache_reset
 	}
 	refresh
 	ctrl_set ack 1
 }
 
-proc copy_to_flash {} {
+proc select_flash_copy {size offset} {
+	variable flash_copy_pending
+	variable browse
+	variable sd_path
+	set flash_copy_pending [list $size $offset]
+	set browse 1
+	set sd_path "/"
+	refresh
+}
+
+proc resolve_flash_copy_match {} {
+	variable flash_copy_pending
+	variable filtered
+	variable recs
+	variable flash_recs
+	variable match
+	variable magic
+	if {$flash_copy_pending eq ""} return
+	lassign $flash_copy_pending size offset
+	set flash_copy_pending ""
+	set match 0xFFFF
+	set i 0
+	foreach idx $filtered {
+		set rec [lindex $recs $idx]
+		if {![rec_is_sd $rec] && [lindex $rec 2] == $size &&
+		    [lindex [lindex $flash_recs [lindex $rec 4]] 3] == $offset} {
+			set match $i
+			ctrl_set ack $magic
+			return
+		}
+		incr i
+	}
+	notify "copied entry missing from refreshed flash list" error
+	ctrl_set mapper 0x84
+	ctrl_set ack 0
+}
+
+proc detect_copied_rom {offset size} {
+	variable image_file
+	set data [read_range $image_file $offset $size]
+	# openMSX's sha1sum hashes files, so give the detector the copied flash bytes.
+	set channel [file tempfile filename]
+	try {
+		fconfigure $channel -translation binary
+		puts -nonewline $channel $data
+		close $channel
+		set channel ""
+		return [detect_rom $filename]
+	} finally {
+		try {
+			if {$channel ne ""} {close $channel}
+		} finally {
+			file delete $filename
+		}
+	}
+}
+
+proc copy_to_flash {{show_details 0}} {
 	variable job
 	variable flash_recs
 	variable max_flash
@@ -1292,37 +1471,82 @@ proc copy_to_flash {} {
 	variable slots_used
 	variable config_slots
 	variable mapper_dsk
+	variable flash_size
+	variable menu_pos
+	variable store_offset
+	variable image_file
 	ctrl_set ack 0
 	ctrl_set mapper 0
 	if {$job ne ""} {ctrl_set cmd 0; return}
 	set rec [filtered_rec [query_index]]
 	lassign $rec name mapper size path
 	if {$rec eq "" || ![rec_is_sd $rec] || [rec_is_folder $rec] || [rec_is_mp3 $rec] || $path eq "" ||
-	    $size < 8192 || $size > 0x400000 || [llength $flash_recs] >= $max_flash || $overflow ||
-	    [flash_name_taken $name]} {
+	    $size < 8192} {
+		ctrl_set mapper 0x83
+		ctrl_set cmd 0
+		return
+	}
+	if {$size > $flash_size - $menu_pos - $store_offset} {
+		ctrl_set mapper 0x81
 		ctrl_set cmd 0
 		return
 	}
 	set host [sd_host $path]
 	set code [code_of $mapper]
-	if {$code == 0} {set code [lindex [tag_info [file tail $host]] 1]}
-	if {$code == 0} {set code [detect_rom $host]}
-	if {$code == 0 || $code == $mapper_dsk || [is_system_code $code] ||
-	    ($slots_used >= $config_slots && ![flash_compact])} {
+	if {$code == $mapper_dsk} {
+		ctrl_set mapper 0x83
+		ctrl_set cmd 0
+		return
+	}
+	if {[catch {set data [read_binary $host]} err]} {
+		notify "flash copy read failed: $err" error
+		ctrl_set mapper 0x84
+		ctrl_set cmd 0
+		return
+	}
+	if {[string length $data] != $size} {
+		ctrl_set mapper 0x84
+		ctrl_set cmd 0
+		return
+	}
+	foreach f $flash_recs {
+		if {![string equal -nocase [lindex $f 0] $name]} continue
+		set matches 0
+		if {$show_details && [lindex $f 2] == $size} {
+			if {[catch {set stored [read_range $image_file [lindex $f 3] $size]} err]} {
+				notify "flash verification read failed: $err" error
+				ctrl_set mapper 0x84
+				ctrl_set cmd 0
+				return
+			}
+			set matches [expr {$stored eq $data}]
+		}
+		if {$matches} {
+			ctrl_set mapper 100
+			select_flash_copy $size [lindex $f 3]
+		} else {
+			ctrl_set mapper 0x82
+		}
 		ctrl_set cmd 0
 		return
 	}
 	set addr [flash_find_space $size]
-	if {$addr < 0 || [catch {set data [read_binary $host]}]} {
+	if {$addr < 0 || [llength $flash_recs] >= $max_flash || $overflow} {
+		ctrl_set mapper 0x80
+		ctrl_set cmd 0
+		return
+	}
+	if {$slots_used >= $config_slots && ![flash_compact]} {
+		ctrl_set mapper 0x84
 		ctrl_set cmd 0
 		return
 	}
 	sd_note
-	# Erasing and programming take a while on the cartridge (about 200KB/s);
-	# report the percentage in CTRL_MAPPER like the firmware does.
+	# This is a progress simulation, not a cartridge timing benchmark.
 	set steps [expr {$size / 20480 > 15 ? $size / 20480 : 15}]
 	set job [dict create name $name mapper $code size $size addr $addr data $data \
-		pvc [pvc_path $rec] step 0 steps $steps]
+		filename [file tail $host] pvc [pvc_path $rec] show_details $show_details \
+		phase copy step 0 steps $steps]
 	after time 0.1 picoverse2350::copy_step
 }
 
@@ -1335,28 +1559,78 @@ proc copy_step {} {
 		set job ""
 		return
 	}
-	dict incr job step
-	dict with job {
-		if {$step < $steps} {
-			ctrl_set mapper [expr {$step * 100 / $steps}]
-			sd_note
+	if {[dict get $job phase] eq "copy"} {
+		dict incr job step
+		dict with job {
+			if {$step < $steps} {
+				ctrl_set mapper [expr {$step * 100 / $steps}]
+				sd_note
+				sync_ctrl
+				after time 0.1 picoverse2350::copy_step
+				return
+			}
+		}
+		if {[catch {
+			patch_file $image_file $addr $data
+			if {[read_range $image_file $addr $size] ne $data} {error "flash verification failed"}
+		} err]} {
+			notify "flash copy write failed: $err" error
+			set job ""
+			ctrl_set mapper 0x84
+			ctrl_set ack 0
+			ctrl_set cmd 0
 			sync_ctrl
-			after time 0.1 picoverse2350::copy_step
 			return
 		}
+		dict set job phase detect
+		ctrl_set mapper 0x7F
+		sync_ctrl
+		after time 0.1 picoverse2350::copy_step
+		return
 	}
 	set j $job
 	set job ""
 	dict with j {
-		patch_file $image_file $addr $data
-		set ok [flash_append $name $mapper $size $addr]
+		if {[catch {
+			if {$mapper == 0} {set mapper [lindex [tag_info $filename] 1]}
+			if {$mapper == 0} {set mapper [detect_copied_rom $addr $size]}
+		} err]} {
+			notify "copied flash mapper check failed: $err" error
+			ctrl_set mapper 0x84
+			ctrl_set ack 0
+			ctrl_set cmd 0
+			sync_ctrl
+			return
+		}
+		if {$mapper == 0 || [is_system_code $mapper]} {
+			notify "copied flash image has an unsupported mapper" warning
+			ctrl_set mapper 0x83
+			ctrl_set ack 0
+			ctrl_set cmd 0
+			sync_ctrl
+			return
+		}
+		if {[catch {set ok [flash_append $name $mapper $size $addr]} err]} {
+			notify "flash entry write failed: $err" error
+			ctrl_set mapper 0x84
+			ctrl_set ack 0
+			ctrl_set cmd 0
+			sync_ctrl
+			return
+		}
 		if {$ok && $pvc ne "" && [file isfile [sd_host $pvc]]} {
-			catch {file copy -force [sd_host $pvc] [sd_host "/$name.flash.PVC"]}
+			if {[catch {file copy -force [sd_host $pvc] [sd_host "/$name.flash.PVC"]} err]} {
+				notify "flash ROM stored, but options copy failed: $err" warning
+			}
 		}
 	}
-	ctrl_set mapper 100
-	refresh
-	ctrl_set ack $ok
+	ctrl_set mapper [expr {$ok ? 100 : 0x84}]
+	if {$ok && [dict get $j show_details]} {
+		select_flash_copy [dict get $j size] [dict get $j addr]
+	} else {
+		refresh
+		ctrl_set ack $ok
+	}
 	ctrl_set cmd 0
 	sync_ctrl
 }
@@ -1514,6 +1788,7 @@ proc command {cmd} {
 	variable browse
 	variable sd_path
 	ctrl_set cmd $cmd
+	set async 0
 	switch -- $cmd {
 		1 {
 			lset query 31 0
@@ -1539,25 +1814,663 @@ proc command {cmd} {
 		13 {save_last_selection}
 		14 {copy_to_flash}
 		15 {rename_entry}
-		64 - 66 - 65 {fh_offline}
-		67 {ctrl_set net 0}
+		16 {copy_to_flash 1}
+		64 - 65 - 66 - 67 {set async [fh_command $cmd]}
 	}
-	if {$cmd != 14} {ctrl_set cmd 0}
+	if {!$async && $cmd != 14 && $cmd != 16} {ctrl_set cmd 0}
 }
 
-# File Hunter needs the WiFi module: answer like the firmware does when the
-# network is offline, with a single "Offline" message record.
-proc fh_offline {} {
-	variable fh_active
-	variable data_base
-	variable data_size
+# ---------------------------------------------------------------------------
+# File Hunter: the online catalog of ROM and DSK files (F3)
+#
+# The cartridge reaches File Hunter through its ESP-01 WiFi module. openMSX
+# uses the PC's network instead, so the ESP-01 / serial protocol is not
+# emulated: the same HTTP requests are made from here, with a non-blocking
+# socket that is polled from realtime events. The emulated MSX keeps running
+# while the data arrives, so the menu shows the real "Download: NN%" progress.
+# The command and register protocol with the menu follows handle_menu_fh_command()
+# and the File Hunter code of the firmware.
+# ---------------------------------------------------------------------------
+
+proc fh_noop {args} {}
+
+# Days since 1970-01-01 of a proleptic Gregorian date.
+proc days_from_civil {y m d} {
+	if {$m <= 2} {incr y -1}
+	set era [expr {($y >= 0 ? $y : $y - 399) / 400}]
+	set yoe [expr {$y - $era * 400}]
+	set doy [expr {(153 * ($m + ($m > 2 ? -3 : 9)) + 2) / 5 + $d - 1}]
+	set doe [expr {$yoe * 365 + $yoe / 4 - $yoe / 100 + $doy}]
+	expr {$era * 146097 + $doe - 719468}
+}
+
+# Unix time of an HTTP date ("Mon, 12 Oct 2026 23:01:02 GMT"), or "".
+proc http_time {value} {
+	if {![regexp {^[A-Za-z]+, +([0-9]+) ([A-Za-z]+) ([0-9]+) ([0-9]+):([0-9]+):([0-9]+)} $value -> d mon y hh mm ss]} {
+		return ""
+	}
+	set m [lsearch -exact {jan feb mar apr may jun jul aug sep oct nov dec} [string tolower [string range $mon 0 2]]]
+	foreach v {d y hh mm ss} {scan [set $v] %d $v}
+	if {$m < 0 || $y < 1980} {return ""}
+	expr {[days_from_civil $y [expr {$m + 1}] $d] * 86400 + $hh * 3600 + $mm * 60 + $ss}
+}
+
+# --- HTTP client ------------------------------------------------------------
+
+proc http_cancel {} {
+	variable fh_http
+	variable fh_http_after
+	if {$fh_http_after ne ""} {
+		catch {after cancel $fh_http_after}
+		set fh_http_after ""
+	}
+	if {[dict exists $fh_http sock]} {catch {close [dict get $fh_http sock]}}
+	set fh_http [dict create]
+}
+
+# Start an HTTP GET without blocking. cb_headers is called with {status
+# headers-dict}, cb_data with each piece of the body (it returns 0 to abort),
+# and cb_done with {ok message} exactly once. The callbacks always run from a
+# later event, never from this call. idle_ms is the time without data after
+# which the transfer fails.
+proc http_get {url idle_ms cb_headers cb_data cb_done {depth 0}} {
+	variable fh_http
+	variable fh_http_after
+	http_cancel
+	set now [clock milliseconds]
+	set fh_http [dict create phase connecting started $now activity $now idle $idle_ms \
+		depth $depth hdr $cb_headers data $cb_data done $cb_done \
+		buf "" length -1 chunked 0 chunk_left 0 chunk_state size]
+	if {![regexp {^http://([^/:?#]+)(?::([0-9]+))?(/[^#]*)?$} $url -> host port path]} {
+		dict set fh_http phase failed
+		dict set fh_http error [expr {[string match -nocase https://* $url] ? "https not supported" : "bad URL"}]
+	} else {
+		if {$port eq ""} {set port 80}
+		if {$path eq ""} {set path /}
+		dict set fh_http host $host
+		dict set fh_http port $port
+		dict set fh_http path $path
+		if {[catch {socket -async $host $port} sock]} {
+			dict set fh_http phase failed
+			dict set fh_http error $sock
+		} else {
+			fconfigure $sock -blocking 0 -translation binary -buffering none
+			dict set fh_http sock $sock
+		}
+	}
+	set fh_http_after [after realtime 0 picoverse2350::http_tick]
+}
+
+proc http_finish {ok msg} {
+	variable fh_http
+	set cb [dict get $fh_http done]
+	http_cancel
+	{*}$cb $ok $msg
+}
+
+proc http_tick {} {
+	variable fh_http
+	variable fh_http_after
+	variable state
+	set fh_http_after ""
+	if {![dict size $fh_http]} return
+	if {$state ne "menu"} {
+		fh_abort
+		return
+	}
+	if {[catch {http_step} err]} {
+		if {[dict size $fh_http]} {http_finish 0 "error: $err"}
+		return
+	}
+	# A redirect starts a new request, which schedules its own tick.
+	if {[dict size $fh_http] && $fh_http_after eq ""} {
+		set fh_http_after [after realtime 0.02 picoverse2350::http_tick]
+	}
+}
+
+proc http_step {} {
+	variable fh_http
+	set phase [dict get $fh_http phase]
+	if {$phase eq "failed"} {
+		http_finish 0 [dict get $fh_http error]
+		return
+	}
+	set sock [dict get $fh_http sock]
+	set now [clock milliseconds]
+
+	if {$phase eq "connecting"} {
+		if {[fconfigure $sock -connecting]} {
+			if {$now - [dict get $fh_http started] > 10000} {http_finish 0 "connect timeout"}
+			return
+		}
+		set err [fconfigure $sock -error]
+		if {$err ne ""} {
+			http_finish 0 $err
+			return
+		}
+		set host [dict get $fh_http host]
+		if {[dict get $fh_http port] != 80} {append host :[dict get $fh_http port]}
+		puts -nonewline $sock "GET [dict get $fh_http path] HTTP/1.1\r\nHost: $host\r\nUser-Agent: FHBrowser (MSX PicoVerse)\r\nConnection: close\r\n\r\n"
+		flush $sock
+		dict set fh_http phase headers
+		dict set fh_http activity $now
+		return
+	}
+
+	set data [read $sock]
+	set eof [eof $sock]
+	if {$data ne ""} {
+		dict set fh_http activity $now
+	} elseif {!$eof && $now - [dict get $fh_http activity] > [dict get $fh_http idle]} {
+		http_finish 0 timeout
+		return
+	}
+
+	if {$phase eq "headers"} {
+		dict append fh_http buf $data
+		set buf [dict get $fh_http buf]
+		set end [string first "\r\n\r\n" $buf]
+		if {$end < 0} {
+			if {$eof} {http_finish 0 "no response"}
+			return
+		}
+		set lines [split [string range $buf 0 [expr {$end - 1}]] "\n"]
+		set data [string range $buf [expr {$end + 4}] end]
+		dict set fh_http buf ""
+		if {![regexp {^HTTP/[0-9.]+ ([0-9]+)} [lindex $lines 0] -> status]} {
+			http_finish 0 "bad response"
+			return
+		}
+		set hdrs [dict create]
+		foreach line [lrange $lines 1 end] {
+			set line [string trimright $line "\r"]
+			set colon [string first ":" $line]
+			if {$colon > 0} {
+				dict set hdrs [string tolower [string trim [string range $line 0 [expr {$colon - 1}]]]] \
+					[string trim [string range $line [expr {$colon + 1}] end]]
+			}
+		}
+		if {$status >= 300 && $status < 400 && [dict exists $hdrs location] && [dict get $fh_http depth] < 4} {
+			set url [dict get $hdrs location]
+			if {[string index $url 0] eq "/"} {
+				set base "http://[dict get $fh_http host]"
+				if {[dict get $fh_http port] != 80} {append base :[dict get $fh_http port]}
+				set url $base$url
+			}
+			http_get $url [dict get $fh_http idle] [dict get $fh_http hdr] [dict get $fh_http data] \
+				[dict get $fh_http done] [expr {[dict get $fh_http depth] + 1}]
+			return
+		}
+		if {$status >= 400} {
+			http_finish 0 "HTTP $status"
+			return
+		}
+		{*}[dict get $fh_http hdr] $status $hdrs
+		set chunked [expr {[dict exists $hdrs transfer-encoding] &&
+			[string match -nocase *chunked* [dict get $hdrs transfer-encoding]]}]
+		dict set fh_http chunked $chunked
+		if {!$chunked && [dict exists $hdrs content-length] && [string is integer -strict [dict get $hdrs content-length]]} {
+			dict set fh_http length [dict get $hdrs content-length]
+		}
+		dict set fh_http phase body
+	}
+
+	switch -- [http_feed $data] {
+		done  {http_finish 1 ""}
+		abort {http_finish 0 aborted}
+		default {
+			if {$eof} {
+				if {[dict get $fh_http chunked] || [dict get $fh_http length] >= 0} {
+					http_finish 0 "connection closed"
+				} else {
+					http_finish 1 ""
+				}
+			}
+		}
+	}
+}
+
+# Hand body bytes to the data callback, decoding chunked transfer encoding.
+# Returns done (the body is complete), abort (the callback refused) or more.
+proc http_feed {data} {
+	variable fh_http
+	set cb [dict get $fh_http data]
+	if {[dict get $fh_http chunked]} {
+		dict append fh_http buf $data
+		while {1} {
+			set buf [dict get $fh_http buf]
+			switch -- [dict get $fh_http chunk_state] {
+				size {
+					set eol [string first "\r\n" $buf]
+					if {$eol < 0} {return more}
+					set hex [string trim [lindex [split [string range $buf 0 [expr {$eol - 1}]] ";"] 0]]
+					if {[scan $hex %x n] != 1 || $n < 0} {return abort}
+					dict set fh_http buf [string range $buf [expr {$eol + 2}] end]
+					if {$n == 0} {return done}
+					dict set fh_http chunk_left $n
+					dict set fh_http chunk_state data
+				}
+				data {
+					set have [string length $buf]
+					if {$have == 0} {return more}
+					set left [dict get $fh_http chunk_left]
+					set take [expr {$have < $left ? $have : $left}]
+					dict set fh_http buf [string range $buf $take end]
+					dict set fh_http chunk_left [expr {$left - $take}]
+					if {$take == $left} {dict set fh_http chunk_state crlf}
+					if {![{*}$cb [string range $buf 0 [expr {$take - 1}]]]} {return abort}
+				}
+				crlf {
+					if {[string length $buf] < 2} {return more}
+					dict set fh_http buf [string range $buf 2 end]
+					dict set fh_http chunk_state size
+				}
+			}
+		}
+	}
+	set length [dict get $fh_http length]
+	if {$length >= 0} {
+		set have [string length $data]
+		if {$have > $length} {
+			set data [string range $data 0 [expr {$length - 1}]]
+			set have $length
+		}
+		dict set fh_http length [expr {$length - $have}]
+		if {$have > 0 && ![{*}$cb $data]} {return abort}
+		return [expr {$length - $have == 0 ? "done" : "more"}]
+	}
+	if {$data ne "" && ![{*}$cb $data]} {return abort}
+	return more
+}
+
+# --- File Hunter requests and menu protocol ---------------------------------
+
+# Request path, like fh_build_http_path(): an empty query asks for the latest
+# releases, anything else for the name-filtered catalog.
+proc fh_path {query type index} {
+	set t [expr {$type == 1 ? "dsk" : "rom"}]
+	if {$query eq ""} {
+		set path "/new-pico.php?base=1BA0&type=$t"
+	} else {
+		set path "/picoverse.php?base=1BA0&type=$t&msx=&char="
+		foreach ch [split $query ""] {
+			if {[regexp {^[A-Za-z0-9_.-]$} $ch]} {
+				append path $ch
+			} elseif {$ch eq " "} {
+				append path +
+			}
+		}
+	}
+	append path "&download=" [expr {$index >= 0 ? $index : ""}]
+}
+
+# Text served at 0xBF80 in the File Hunter window. The firmware's texts end
+# before 0xBFA0, where the control registers continue.
+proc fh_text {text} {
 	variable part_base
-	set fh_active 1
-	set rec "[binary format a71 Offline][binary format cs 0x80 0]"
-	put $data_base "$rec[string repeat \xFF [expr {$data_size - [string length $rec]}]]"
-	put $part_base [binary format a64 "WiFi not emulated"]
-	ctrl_set count 1
-	ctrl_set audio 0
+	put $part_base [binary format a32 [string range $text 0 30]]
+}
+
+proc fh_enter {} {
+	variable fh_active
+	if {!$fh_active} {
+		set fh_active 1
+		fh_text ""
+		foreach k {mapper ack audio} {ctrl_set $k 0}
+	}
+}
+
+# Leave the File Hunter window and drop a transfer in progress.
+proc fh_abort {} {
+	variable fh_dl
+	http_cancel
+	if {$fh_dl ne ""} {
+		catch {close [dict get $fh_dl chan]}
+		catch {file delete [dict get $fh_dl tmp]}
+		set fh_dl ""
+	}
+}
+
+proc fh_set_message {text} {
+	variable fh_catalog
+	variable fh_loaded
+	variable fh_message
+	variable fh_message_time
+	set fh_catalog [list [list [string range $text 0 70] 0]]
+	set fh_loaded 0
+	set fh_message 1
+	set fh_message_time [clock milliseconds]
+}
+
+# The listing page the menu asked for (CTRL_PAGE): records of name(71), flags
+# (0x80 = message row) and the size in KB.
+proc fh_build_page {} {
+	variable fh_catalog
+	variable fh_message
+	variable data_base
+	variable files_per_page
+	set start [expr {[ctrl_get page] * $files_per_page}]
+	set buf ""
+	for {set row 0} {$row < $files_per_page} {incr row} {
+		set i [expr {$start + $row}]
+		if {$i < [llength $fh_catalog]} {
+			lassign [lindex $fh_catalog $i] name kb
+			append buf [binary format "a71 c s" $name [expr {$fh_message ? 0x80 : 0}] $kb]
+		} else {
+			append buf [string repeat "\x00" 74]
+		}
+	}
+	put $data_base $buf
+	ctrl_set count [llength $fh_catalog]
+}
+
+# Decode the listing: 7-byte records {name pointer, size KB, flag} up to a zero
+# pointer, then the names. Returns a list of {name size_kb}, or -1 when the
+# data is not a listing.
+proc fh_parse {data} {
+	set len [string length $data]
+	if {$len < 4} {return -1}
+	set pos 0
+	set raw 0
+	while {$pos + 4 <= $len} {
+		binary scan $data "@${pos}iu" ptr
+		if {$ptr == 0} break
+		if {$pos + 7 > $len} {return -1}
+		incr raw
+		incr pos 7
+	}
+	if {$pos + 4 > $len} {return -1}
+	set result [list]
+	if {$raw == 0} {return $result}
+	binary scan $data iu base
+	set names [expr {$pos + 4}]
+	for {set i 0; set pos 0} {$i < $raw && [llength $result] < 384} {incr i; incr pos 7} {
+		binary scan $data "@${pos}iusu" ptr kb
+		if {$ptr < $base} continue
+		set off [expr {$names + $ptr - $base}]
+		if {$off >= $len} continue
+		set nul [string first "\x00" $data $off]
+		set end [expr {$nul < 0 ? $len : $nul}]
+		if {$end > $off + 71} {set end [expr {$off + 71}]}
+		set name [string range $data $off [expr {$end - 1}]]
+		if {$name ne ""} {lappend result [list $name $kb]}
+	}
+	return $result
+}
+
+# Run a File Hunter command of the menu. Returns 1 when it keeps running after
+# the write (CTRL_CMD stays busy until the transfer ends).
+proc fh_command {cmd} {
+	variable fh_loaded
+	variable fh_message
+	variable fh_message_time
+	variable fh_net
+	variable query
+	variable fh_catalog
+	variable magic
+	fh_enter
+	ctrl_set status 0x5A
+	set async 0
+	switch -- $cmd {
+		64 - 66 {
+			# 64 = list page, 66 = search. The firmware fetches again for a page
+			# request while the listing is only a message row; here that is
+			# skipped for a message made a moment ago (the menu always follows a
+			# search with a page request, and a failed connection can take
+			# seconds to report on a PC).
+			set recent [expr {$fh_message && [clock milliseconds] - $fh_message_time < 10000}]
+			if {$cmd == 66 || (!$fh_loaded && !$recent)} {
+				fh_start_list [bytes_to_string [lrange $query 0 30]] [expr {[lindex $query 31] == 1 ? 1 : 0}]
+				set async 1
+			} else {
+				fh_build_page
+				ctrl_set audio [expr {[llength $fh_catalog] ? 1 : 0}]
+			}
+		}
+		65 {set async [fh_start_download]}
+		67 {
+			ctrl_set net $fh_net
+			ctrl_set audio 1
+		}
+	}
+	if {!$async} {ctrl_set status $magic}
+	return $async
+}
+
+proc fh_start_list {text type} {
+	variable fh_base
+	variable fh_query
+	variable fh_type
+	variable fh_list
+	variable fh_list_overflow
+	set fh_query $text
+	set fh_type $type
+	set fh_list ""
+	set fh_list_overflow 0
+	http_get "$fh_base[fh_path $text $type -1]" 3000 picoverse2350::fh_noop \
+		picoverse2350::fh_list_data picoverse2350::fh_list_done
+}
+
+# The firmware keeps the listing in a 256KB buffer.
+proc fh_list_data {piece} {
+	variable fh_list
+	variable fh_list_overflow
+	if {[string length $fh_list] + [string length $piece] > 262144} {
+		set fh_list_overflow 1
+		return 0
+	}
+	append fh_list $piece
+	return 1
+}
+
+proc fh_list_done {ok msg} {
+	variable fh_list
+	variable fh_list_overflow
+	variable fh_catalog
+	variable fh_loaded
+	variable fh_message
+	variable fh_type
+	variable fh_net
+	variable magic
+	set list -1
+	if {$ok} {set list [fh_parse $fh_list]}
+	set fh_list ""
+	set fh_net 1
+	if {$fh_list_overflow} {
+		fh_set_message "Too many results. Refine search"
+	} elseif {$list eq "-1"} {
+		set fh_net 0
+		fh_set_message "Offline or File Hunter unavailable"
+	} elseif {[llength $list] == 0} {
+		fh_set_message [expr {$fh_type == 1 ? "No File Hunter DSKs found" : "No File Hunter ROMs found"}]
+	} else {
+		set fh_catalog $list
+		set fh_loaded 1
+		set fh_message 0
+	}
+	ctrl_set net $fh_net
+	fh_build_page
+	ctrl_set audio [expr {[llength $fh_catalog] ? 1 : 0}]
+	ctrl_set status $magic
+	ctrl_set cmd 0
+	sync_ctrl
+}
+
+# File name of a download on the microSD card, like fh_build_download_path().
+proc fh_download_name {name type} {
+	set name [encoding convertfrom utf-8 $name]
+	set out ""
+	foreach ch [split $name ""] {
+		scan $ch %c c
+		if {$c < 32 || [string first $ch "/\\:*?\"<>|"] >= 0} {set ch _}
+		append out $ch
+	}
+	set out [string trimright [string range $out 0 74] " ."]
+	if {$out eq ""} {set out FILEHUNT}
+	set ext [expr {$type == 1 ? ".DSK" : ".ROM"}]
+	if {![string equal -nocase [string range $out end-3 end] $ext] && [string length $out] + 4 < 76} {
+		append out $ext
+	}
+	return $out
+}
+
+proc fh_start_download {} {
+	variable fh_base
+	variable fh_catalog
+	variable fh_message
+	variable fh_query
+	variable fh_type
+	variable fh_dl
+	variable magic
+	fh_text ""
+	foreach k {mapper ack audio} {ctrl_set $k 0}
+	set index [query_index]
+	if {$index >= [llength $fh_catalog] || $fh_message} {
+		fh_text "Invalid download selection"
+		return 0
+	}
+	if {![sd_available]} {
+		fh_text "No microSD card. Press key."
+		return 0
+	}
+	lassign [lindex $fh_catalog $index] name kb
+	set dest [sd_host "/[fh_download_name $name $fh_type]"]
+	set fh_dl [dict create dest $dest tmp "$dest.part" chan "" meta 0 line "" exact 0 \
+		expected 0 written 0 fallback [expr {$kb * 1024}] percent 0 error "" time ""]
+	http_get "$fh_base[fh_path $fh_query $fh_type $index]" 20000 picoverse2350::fh_dl_headers \
+		picoverse2350::fh_dl_data picoverse2350::fh_dl_done
+	return 1
+}
+
+# The file's own date, else the server's clock, like the firmware.
+proc fh_dl_headers {status hdrs} {
+	variable fh_dl
+	set t ""
+	if {[dict exists $hdrs last-modified]} {set t [http_time [dict get $hdrs last-modified]]}
+	if {$t eq "" && [dict exists $hdrs date]} {set t [http_time [dict get $hdrs date]]}
+	dict set fh_dl time $t
+}
+
+proc fh_dl_fail {text} {
+	variable fh_dl
+	dict set fh_dl error $text
+	return 0
+}
+
+# The body starts with a metadata line ("type:,start:,size:<bytes>,name:...")
+# and is followed by the file; see fh_sd_download_body_callback().
+proc fh_dl_data {piece} {
+	variable fh_dl
+	if {![dict get $fh_dl meta]} {
+		set nl [string first "\n" $piece]
+		if {$nl < 0} {
+			dict append fh_dl line [string map [list "\r" ""] $piece]
+			if {[string length [dict get $fh_dl line]] >= 127} {return [fh_dl_fail "Download failed: metadata"]}
+			return 1
+		}
+		dict append fh_dl line [string map [list "\r" ""] [string range $piece 0 [expr {$nl - 1}]]]
+		set piece [string range $piece [expr {$nl + 1}] end]
+		set line [dict get $fh_dl line]
+		if {[string length $line] >= 127} {return [fh_dl_fail "Download failed: metadata"]}
+		if {[set at [string first "size:" $line]] >= 0} {
+			if {![regexp {^[ \t]*([0-9]+)} [string range $line [expr {$at + 5}] end] -> n]} {
+				return [fh_dl_fail "Download failed: invalid size"]
+			}
+			dict set fh_dl exact 1
+			dict set fh_dl expected [expr {wide($n)}]
+		} else {
+			dict set fh_dl expected [dict get $fh_dl fallback]
+		}
+		if {[catch {
+			set chan [open [dict get $fh_dl tmp] w]
+			fconfigure $chan -translation binary -buffering full -buffersize 65536
+		}]} {
+			return [fh_dl_fail "Save open failed"]
+		}
+		dict set fh_dl chan $chan
+		dict set fh_dl meta 1
+	}
+	set len [string length $piece]
+	if {$len == 0} {return 1}
+	if {[dict get $fh_dl exact] && [dict get $fh_dl written] + $len > [dict get $fh_dl expected]} {
+		return [fh_dl_fail "Download exceeds file size"]
+	}
+	if {[catch {puts -nonewline [dict get $fh_dl chan] $piece} err]} {
+		return [fh_dl_fail [expr {[string match -nocase *space* $err] ? "microSD full. Press key." : "Save write failed"}]]
+	}
+	sd_note
+	dict incr fh_dl written $len
+	set expected [dict get $fh_dl expected]
+	set percent [expr {$expected > 0 ? ([dict get $fh_dl written] >= $expected ? 100 : [dict get $fh_dl written] * 100 / $expected) : 0}]
+	if {$percent != [dict get $fh_dl percent]} {
+		dict set fh_dl percent $percent
+		ctrl_set mapper $percent
+		sync_ctrl
+	}
+	return 1
+}
+
+proc fh_short_error {msg} {
+	switch -glob -- $msg {
+		timeout {return timeout}
+		"connect timeout" {return connect}
+		"HTTP *" {return $msg}
+		"connection closed" {return closed}
+	}
+	return network
+}
+
+proc fh_dl_done {ok msg} {
+	variable fh_dl
+	variable fh_type
+	variable magic
+	set dl $fh_dl
+	set fh_dl ""
+	set written [dict get $dl written]
+	set error [dict get $dl error]
+	set good [expr {$ok && [dict get $dl meta] && $error eq "" && $written != 0 &&
+		(![dict get $dl exact] || $written == [dict get $dl expected])}]
+	if {!$good && $error eq ""} {
+		if {!$ok} {
+			set error "Download failed: [fh_short_error $msg] [dict get $dl percent]%"
+		} elseif {![dict get $dl meta]} {
+			set error "Download failed: no metadata"
+		} else {
+			set error "Download failed: incomplete"
+		}
+	}
+	if {$good && $fh_type == 1 && ($written % 368640 != 0 || $written > 0x400000 - 1024)} {
+		set error "Bad DSK size. Press key."
+		set good 0
+	}
+	if {[dict get $dl chan] ne ""} {
+		if {[catch {close [dict get $dl chan]}] && $good} {
+			set error "Save close failed"
+			set good 0
+		}
+	}
+	if {$good} {
+		# Replace an existing file only once the new one is complete.
+		if {[catch {file rename -force [dict get $dl tmp] [dict get $dl dest]}]} {
+			set error "Save rename failed"
+			set good 0
+		} elseif {[dict get $dl time] ne ""} {
+			catch {file mtime [dict get $dl dest] [dict get $dl time]}
+		}
+	}
+	if {!$good} {catch {file delete [dict get $dl tmp]}}
+	free_cache_reset
+	if {$good} {
+		ctrl_set mapper 100
+		fh_text "Saved to microSD. Press key."
+	} else {
+		fh_text $error
+	}
+	ctrl_set ack 0
+	ctrl_set audio [expr {$good ? 1 : 0}]
+	ctrl_set status $magic
+	ctrl_set cmd 0
+	sync_ctrl
 }
 
 proc handle_write {addr value} {
@@ -1592,7 +2505,6 @@ proc handle_write {addr value} {
 		BFFA {ctrl_set wifi [expr {$value ? 1 : 0}]}
 		BFFB {ctrl_set psg [expr {$value ? 1 : 0}]}
 		BFFD {
-			ctrl_set sd_part [expr {$value >= 1 && $value <= 4 ? $value : 0}]
 			sunrise_partition_info $value
 		}
 		BFFF {ctrl_set volume [expr {$value <= 200 ? $value : 100}]}
@@ -1651,6 +2563,10 @@ proc on_select {value} {
 	if {$last_index != 0xFFFF && ($last_index & 0xFF) == $value} {set idx $last_index}
 	set rec [filtered_rec $idx]
 	if {$rec eq "" || [rec_is_folder $rec] || [rec_is_mp3 $rec]} return
+	if {[rec_is_sd $rec] && [lindex $rec 2] > 0x400000} {
+		notify "large ROM must be selected from the flash list" error
+		return
+	}
 	set opts [dict create]
 	foreach k {audio psg wifi sd_part volume vdp cpu} {dict set opts $k [ctrl_get $k]}
 	set pending 1
@@ -2042,6 +2958,8 @@ proc reset_pico {} {
 	variable last_index
 	variable last_source
 	variable last_path
+	variable flash_copy_pending
+	fh_abort
 	set browse 0
 	set sd_path "/"
 	set query [lrepeat 32 0]
@@ -2051,6 +2969,7 @@ proc reset_pico {} {
 	set mp3_index 0
 	set mp3_mode 0
 	set job ""
+	set flash_copy_pending ""
 	set restore_pending 0
 	set rename_pending ""
 	set last_index 0xFFFF
@@ -2123,6 +3042,13 @@ proc on_boot {} {
 	if {$state eq "rom"} {
 		after realtime 0 picoverse2350::restore_menu
 	} elseif {$state in {menu placeholder}} {
+		# The menu restarts: a File Hunter transfer in progress is dropped.
+		variable fh_active
+		fh_abort
+		if {$state eq "menu" && $fh_active} {
+			ctrl_set cmd 0
+			refresh
+		}
 		serve_window
 	}
 }
@@ -2162,6 +3088,7 @@ proc on_machine_switch {} {
 	variable job
 
 	after machine_switch picoverse2350::on_machine_switch
+	fh_abort
 	set wp_id ""
 	set pending 0
 	set own_boot 0
@@ -2301,6 +3228,7 @@ proc cmd_info {} {
 
 proc cmd_eject {} {
 	variable state
+	fh_abort
 	remove_watchpoint
 	remove_current
 	set state "idle"

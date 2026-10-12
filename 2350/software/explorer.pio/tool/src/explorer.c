@@ -202,11 +202,11 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 // Print usage information
 static void print_usage(const char *prog_name) {
 
-    printf("Usage: %s [-h] [-a] [-r] [-s1] [-m1] [-c1] [-r1] [-s2] [-m2] [-c2] [-r2] [-s3] [-o <filename>]\n", prog_name);
+    printf("Usage: %s [-h] [-a] [-r] [-s1] [-m1] [-c1] [-r1] [-s2] [-m2] [-c2] [-r2] [-s3] [-m3] [-o <filename>]\n", prog_name);
     printf("  without options, the tool scans the current directory for .ROM files to include in the Explorer image\n");
     printf("Options:\n");
     printf("  -h   Show this help message\n");
-    printf("  -a, --allnextor  Include all embedded Nextor system ROM options (-s1 to -r2 and -s3)\n");
+    printf("  -a, --allnextor  Include all embedded Nextor system ROM options (-s1 to -r2, -s3 and -m3)\n");
     printf("  -r, --megaram    Include standalone 1MB MegaRAM without Nextor or memory mapper\n");
     printf("  -s1, --sunrise-sd  Include " NEXTOR_SUNRISE_LABEL " (microSD card)\n");
     printf("  -m1, --mapper-sd   Include " NEXTOR_SUNRISE_LABEL " + 1MB mapper (microSD card)\n");
@@ -217,7 +217,8 @@ static void print_usage(const char *prog_name) {
     printf("  -c2, --carnivore2-usb Include " NEXTOR_SUNRISE_LABEL " + 1MB mapper + Carnivore2 RAM (USB pendrive)\n");
     printf("  -r2, --megaram-usb Include " NEXTOR_SUNRISE_LABEL " + 1MB mapper + 1MB MegaRAM (USB pendrive)\n");
     printf("  -s3, --sunrise3-sd Include " NEXTOR3_SUNRISE_LABEL " (microSD card) for testing\n");
-    printf("  Options -s1, -m1, -c1, -r1, -s2, -m2, -c2, -r2, -s3 can be combined to add multiple Nextor entries\n");
+    printf("  -m3, --mapper3-sd  Include " NEXTOR3_SUNRISE_LABEL " + 1MB mapper (microSD card) for testing\n");
+    printf("  Options -s1, -m1, -c1, -r1, -s2, -m2, -c2, -r2, -s3, -m3 can be combined to add multiple Nextor entries\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
@@ -322,6 +323,7 @@ int main(int argc, char *argv[])
     bool use_c2_usb = false;
     bool use_megaram_usb = false;
     bool use_sunrise3_sd = false;
+    bool use_mapper3_sd = false;
     const char *bad_option = NULL;
     const char *missing_output_option = NULL;
     char uf2_output_filename[MAX_UF2_FILENAME_LENGTH];
@@ -343,6 +345,7 @@ int main(int argc, char *argv[])
             use_c2_usb = true;
             use_megaram_usb = true;
             use_sunrise3_sd = true;
+            use_mapper3_sd = true;
         } else if ((strcmp(argv[i], "-s1") == 0) || (strcmp(argv[i], "--sunrise-sd") == 0)) {
             use_sunrise_sd = true;
         } else if ((strcmp(argv[i], "-m1") == 0) || (strcmp(argv[i], "--mapper-sd") == 0)) {
@@ -363,6 +366,8 @@ int main(int argc, char *argv[])
             use_megaram_usb = true;
         } else if ((strcmp(argv[i], "-s3") == 0) || (strcmp(argv[i], "--sunrise3-sd") == 0)) {
             use_sunrise3_sd = true;
+        } else if ((strcmp(argv[i], "-m3") == 0) || (strcmp(argv[i], "--mapper3-sd") == 0)) {
+            use_mapper3_sd = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
             if (i + 1 >= argc) {
                 missing_output_option = argv[i];
@@ -398,7 +403,7 @@ int main(int argc, char *argv[])
 
     bool include_nextor = use_sunrise_sd || use_mapper_sd || use_c2_sd || use_megaram_sd ||
                           use_sunrise_usb || use_mapper_usb || use_c2_usb || use_megaram_usb ||
-                          use_sunrise3_sd;
+                          use_sunrise3_sd || use_mapper3_sd;
     struct {
         bool enabled;
         uint8_t mapper;
@@ -415,6 +420,7 @@ int main(int argc, char *argv[])
         { use_c2_usb,      ROM_TYPE_C2_USB,            NEXTOR_SUNRISE_LABEL " + 1MB Mapper + C2 RAM (USB)",   NEXTOR_ROM,  sizeof(NEXTOR_ROM) },
         { use_megaram_usb, ROM_TYPE_MEGARAM_USB,       NEXTOR_SUNRISE_LABEL " + 1MB Mapper + 1MB MegaRAM (USB)", NEXTOR_ROM, sizeof(NEXTOR_ROM) },
         { use_sunrise3_sd, ROM_TYPE_SUNRISE_SD,        NEXTOR3_SUNRISE_LABEL " (SD)",                         NEXTOR3_ROM, sizeof(NEXTOR3_ROM) },
+        { use_mapper3_sd,  ROM_TYPE_SUNRISE_MAPPER_SD, NEXTOR3_SUNRISE_LABEL " + 1MB Mapper (SD)",            NEXTOR3_ROM, sizeof(NEXTOR3_ROM) },
     };
 
     // Standard Explorer build mode

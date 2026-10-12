@@ -41,7 +41,7 @@ if ($menu -notmatch "memcpy\(\(void \*\)MEMORY_START, name, strlen\(name\) \+ 1\
 $handler = [regex]::Match($firmware, "(?s)static inline void __not_in_flash_func\(handle_menu_write_explorer\)\(.*?\n\}")
 if (!$handler.Success -or $handler.Value -notmatch "addr >= DATA_BASE_ADDR && addr < \(DATA_BASE_ADDR \+ sizeof\(rename_buf\)\)" -or
     $handler.Value -notmatch "data == CMD_RENAME_ENTRY\)\s*\{\s*process_rename_request\(\);" -or
-    $handler.Value -notmatch "data != CMD_COPY_TO_FLASH && data != CMD_RENAME_ENTRY\)") {
+    $handler.Value -notmatch "data != CMD_COPY_TO_FLASH && data != CMD_RENAME_ENTRY\b") {
     throw "handle_menu_write_explorer no longer captures the name, dispatches CMD_RENAME_ENTRY or keeps it busy until the refresh"
 }
 # The menu write handler runs from SRAM; an inlined rename handler overflowed it.
@@ -66,7 +66,9 @@ if ((Get-CFunction $firmware "flash_store_rename_entry") -notmatch "(?s)flash_na
     throw "flash_store_rename_entry must check names case-insensitively and the save before writing"
 }
 # Enter without an edit must not rename: the field can shorten a long name.
-if ($menu -notmatch 'menu_ui_read_line\("Name: ", name, MAX_FILE_NAME_LENGTH - 1\) != 1') {
+$renameCommand = Get-CFunction $menu "run_record_command"
+if ($renameCommand -notmatch 'edit_result = menu_ui_read_line\("Name: ", name, MAX_FILE_NAME_LENGTH - 1\);' -or
+    $renameCommand -notmatch 'if \(edit_result != 1 \|\| !name\[0\]\)') {
     throw "The menu sends a rename for an unedited (possibly shortened) name"
 }
 

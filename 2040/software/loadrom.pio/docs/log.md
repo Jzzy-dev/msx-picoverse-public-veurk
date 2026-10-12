@@ -1,5 +1,14 @@
 # Change Log
 
+## PicoVerse 2040 Loadrom v2.64
+
+- Version bumped to v2.64 (top-level and tool Makefiles).
+- Added the `-s3` / `--sunrise3` and `-m3` / `--mapper3` tool options for testing Nextor 3, modelled on the 2350 Explorer/LoadROM `-s3` implementation. They build `Nextor Sunrise 3.0.0 Beta 2` and `Nextor Sunrise 3.0.0 Beta 2+Mapper` system images with Konamiman's Nextor 3.0.0 beta 2 Sunrise IDE MasterOnly kernel (128 KB, SunriseIDE-Nextor-driver `v0.1.8-blueMSX-v0.1.5-Nextor-3.0-beta.2` release, same ROM as the 2350 projects). They reuse the existing Sunrise (10) and Sunrise+Mapper (11, 192KB mapper) types, so the RP2040 firmware is unchanged; the beta 2 driver sends the same ATA commands as 2.1.4. Booting beta 2 on hardware is not yet validated.
+- `-s`, `-m`, `-s3` and `-m3` are now mutually exclusive, and `-k`, `-i`, `-p`, `-j` reject all four. The Nextor modes still reject an external ROM file. The tool refuses to build a Nextor image whose embedded kernel is not 128 KB. The `-h` help text lists the new options and labels `-s`/`-m` as Nextor 2.1.4.
+- Renamed `nextor/kernel/` to `resources/`, which now holds both `Nextor-2.1.4.SunriseIDE.MasterOnly.ROM` and `Nextor-3.0.0-beta2.SunriseIDE.MasterOnly.ROM`. `tool/Makefile` embeds them from there as `tool/src/nextor_sunrise.h` (symbol now `___resources_Nextor_2_1_4_...`) and the new `tool/src/nextor3.h`, and cleans both headers. Removed the stale commented-out non-MasterOnly kernel path.
+- Fixed `create_uf2_file()` copying a fixed 50 bytes from the ROM name, which read past the short Nextor name literals and filled the rest of the config-record name field with unrelated strings. The name is now copied up to its terminator into the zero-filled record. A regular ROM UF2 is byte-identical to v2.63's.
+- Checked `-s`, `-m`, `-s3` and `-m3` UF2s: firmware, record type (10/11), size, offset and the embedded kernel bytes match the expected 2.1.4 or 3.0.0 beta 2 ROM. Rebuilt `tool/dist/loadrom.exe`.
+- Docs: 2040 LoadROM tool manual (option matrix, options, Nextor 3 workflow, limitations), the 2040 Sunrise Nextor implementation notes (embedded kernels and record names) and the public README.
 ## PicoVerse 2040 Loadrom v2.63
 
 - Version bumped to v2.63 (top-level and tool Makefiles).

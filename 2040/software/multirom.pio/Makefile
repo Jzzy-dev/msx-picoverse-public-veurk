@@ -8,11 +8,10 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.66
+VERSION ?= v2.67
 
 # Sub-project locations
 MSX_DIR     := msx
-NEXTOR_DIR  := nextor
 PICO_DIR    := pico/multirom
 PICO_BUILD  := $(PICO_DIR)/build
 PICO_CONFIG := $(PICO_BUILD)/CMakeCache.txt

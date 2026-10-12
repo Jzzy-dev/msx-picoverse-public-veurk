@@ -11,10 +11,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define __noinline
+#define __not_in_flash_func(name) name
+#define __no_inline_not_in_flash_func(name) name
 #include "flash-store-types.h"
+#define MAPPER_DETECT_MAX_ROM_SIZE PICO_FLASH_SIZE_BYTES
+#include "mapper_detect.h"
 
 #define FLASH_PAGE_SIZE   256u
 #define FLASH_SECTOR_SIZE 4096u
+#define FA_READ 1u
 #define XIP_BASE          ((uintptr_t)sim_flash)
 
 typedef unsigned int UINT;
@@ -41,23 +47,90 @@ static ROMRecord flash_records[MAX_FLASH_RECORDS];
 static uint16_t flash_record_count;
 static uint8_t flash_record_slot[MAX_FLASH_RECORDS];
 static uint16_t flash_slots_used;
+static uint16_t flash_free_kb, flash_largest_kb;
+static uint16_t total_record_count, full_record_count;
+static uint16_t filtered_indices[MAX_FLASH_RECORDS];
+static uint16_t sd_path_offsets[MAX_FLASH_RECORDS];
+static char sd_path_buffer[SD_PATH_MAX];
+static FIL sd_source_file;
 static volatile uint8_t ctrl_mapper_value;
 static volatile uint8_t ctrl_ack_value;
 static volatile uint8_t ctrl_cmd_state;
+static uint8_t browse_source_mode;
+static uint16_t match_index;
+static char sd_current_path[SD_PATH_MAX];
 static volatile bool refresh_requested;
 static psram_region_t sd_rom_region;
 static uint8_t psram_stage[64 * 1024];
+static uint8_t menu_image[MENU_ROM_SIZE], page_buffer[DATA_BUFFER_SIZE];
+static uint8_t *rom_sram = menu_image;
+static uint8_t current_page, ctrl_status_value, ctrl_audio_selection, ctrl_wifi_support;
+static uint8_t ctrl_psg_emulation, ctrl_wavegame_rom, ctrl_sd_partition, sd_browse_partition;
+static uint8_t ctrl_audio_volume, ctrl_vdp_frequency, ctrl_cpu_mode, esp_net_status, sd_activity_counter;
+static uint8_t ctrl_sd_partition_info[CTRL_SD_PARTITION_INFO_SIZE];
+static char pico_chip_id[CTRL_CHIP_ID_SIZE];
+static bool fh_menu_window_active;
+static uint16_t fh_catalog_count, fh_selected_index, fh_progress_percent, mp3_selected_index;
+static uint8_t fh_page_index, fh_status, fh_result, mp3_play_mode;
+static char fh_wifi_status_text[FH_STATUS_TEXT_SIZE];
+static struct { unsigned pio, sm_read; } msx_bus = {1, 2};
+static uint16_t pio_reads[16], pio_results[16];
+static unsigned pio_count, pio_read_pos, pio_result_count;
+static uint32_t test_now;
 
 static unsigned erase_4k_ops, erase_64k_ops, program_pages, unlink_count, options_copied;
+static unsigned image_program_calls, sd_read_calls, mapper_tag_calls;
 static char last_unlink[SD_PATH_MAX];
 // Ranges a flash operation may touch, set by each scenario.
 static uint32_t allow_lo, allow_hi;
 static bool allow_config;
+static bool corrupt_next_image_program;
 
 static bool psram_bring_up_once(void) { return true; }
 static void quiesce_mp3_core1_before_sd_work(void) {}
 static bool sd_mount_card(void) { return true; }
 static void sd_activity_note(void) {}
+static void cancel_refresh_work(void) {}
+static void set_root_path(void) { strcpy(sd_current_path, "/"); }
+static uint16_t query_filtered_index(void) { return 0; }
+static uint8_t mapper_code_from_record_byte(uint8_t mapper) { return mapper & 0x1Fu; }
+static uint8_t mapper_number_from_filename(const char *name) {
+    mapper_tag_calls++;
+    return strstr(name, ".NEO-16.ROM") ? 9 : 0;
+}
+static bool is_system_mapper(uint8_t mapper) { return mapper == 10 || mapper == 11 || (mapper >= 15 && mapper <= 21); }
+static bool is_dsk_record(const ROMRecord *record) {
+    return (record->Mapper & (FOLDER_FLAG | MP3_FLAG)) == 0 && mapper_code_from_record_byte(record->Mapper) == MAPPER_DSK;
+}
+static uint16_t mp3_get_elapsed_seconds(void) { return 0x1234; }
+static uint16_t mp3_get_total_seconds(void) { return 0x5678; }
+static uint8_t mp3_get_status(void) { return 0x40; }
+static uint32_t time_us_32(void) { return test_now; }
+static bool pio_sm_is_rx_fifo_empty(unsigned pio, unsigned sm) {
+    assert(pio == msx_bus.pio && sm == msx_bus.sm_read);
+    return pio_read_pos >= pio_count;
+}
+static uint32_t pio_sm_get(unsigned pio, unsigned sm) {
+    assert(!pio_sm_is_rx_fifo_empty(pio, sm));
+    return pio_reads[pio_read_pos++];
+}
+static void pio_sm_put_blocking(unsigned pio, unsigned sm, uint32_t token) {
+    assert(pio == msx_bus.pio && sm == msx_bus.sm_read);
+    assert(pio_result_count < pio_count);
+    pio_results[pio_result_count++] = (uint16_t)token;
+}
+static const char *basename_from_path(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+static FRESULT f_open(FIL *file, const char *path, unsigned mode) {
+    (void)path;
+    assert(mode == FA_READ);
+    *file = sd_source_file;
+    file->pos = 0;
+    return FR_OK;
+}
+static uint32_t f_size(const FIL *file) { return file->size; }
 
 static bool build_pvc_options_path(uint16_t record_index, char *out, size_t out_size) {
     int written = snprintf(out, out_size, "/%s.flash.PVC", records[record_index].Name);
@@ -71,6 +144,7 @@ static FRESULT f_unlink(const char *path) {
 }
 
 static FRESULT f_read(FIL *file, void *buffer, UINT count, UINT *read) {
+    sd_read_calls++;
     if (file->fail_at && file->pos + count > file->fail_at) {
         *read = 0;
         return FR_DISK_ERR;
@@ -144,6 +218,11 @@ static void flash_store_op(uint32_t addr, const uint8_t *data, uint32_t len) {
             sim_flash[addr + i] &= data[i];
         }
         program_pages += len / FLASH_PAGE_SIZE;
+        if (in_image) image_program_calls++;
+        if (in_image && corrupt_next_image_program) {
+            sim_flash[addr] ^= 0x80u;
+            corrupt_next_image_program = false;
+        }
         return;
     }
     assert(addr % FLASH_SECTOR_SIZE == 0 && len % FLASH_SECTOR_SIZE == 0);
@@ -270,6 +349,7 @@ static void check_all_data(uint32_t extra_seed, const char *extra_name) {
 // Runs the copy job the way core1_bg_work() does once flash_job_start() has
 // picked the destination, then commits the entry.
 static bool copy_rom(const char *name, uint8_t mapper, const uint8_t *data, uint32_t size, uint32_t fail_at) {
+    flash_job_show_details = false;
     memset(&flash_job_entry, 0, sizeof(flash_job_entry));
     strncpy(flash_job_entry.Name, name, ROM_NAME_MAX - 1);
     flash_job_entry.Mapper = mapper;
@@ -281,25 +361,170 @@ static bool copy_rom(const char *name, uint8_t mapper, const uint8_t *data, uint
     flash_job_span = flash_store_align_up(size, FLASH_SECTOR_SIZE);
     flash_job_erased = 0;
     flash_job_written = 0;
+    flash_job_record = 0;
+    sd_path_offsets[0] = 0;
+    strcpy(sd_path_buffer, "/large.ROM");
     flash_job_file = (FIL){.data = data, .size = size, .pos = 0, .fail_at = fail_at};
     flash_job_file_open = true;
     flash_job_state = FLASH_JOB_WRITE;
+    flash_job_resume_us = test_now = 0;
+    ctrl_ack_value = 0;
+    ctrl_mapper_value = 0;
+    ctrl_cmd_state = 0x0E;
     allow_lo = flash_job_addr;
     allow_hi = flash_job_addr + flash_job_span;
     unsigned steps = 0;
+    unsigned reads_before = sd_read_calls;
+    unsigned programs_before = image_program_calls;
+    unsigned tags_before = mapper_tag_calls;
     while (flash_job_state == FLASH_JOB_WRITE) {
-        if (!flash_job_write_step()) {
-            flash_job_finish(false);
+        test_now = flash_job_resume_us;
+        flash_job_background_work();
+        if (flash_job_state == FLASH_JOB_IDLE) {
             allow_lo = allow_hi = 0;
             return false;
         }
         assert(++steps < 100000);
     }
-    assert(flash_job_state == FLASH_JOB_COMMIT && ctrl_mapper_value == 100);
-    bool ok = flash_job_commit();
-    flash_job_finish(ok);
+    assert(flash_job_state == FLASH_JOB_DETECT && ctrl_mapper_value == FLASH_COPY_DETECTING);
+    assert(mapper_tag_calls == tags_before);
+    if (size >= 4u * 1024u * 1024u) {
+        unsigned batches = (size + 2047u) / 2048u;
+        assert(sd_read_calls - reads_before == batches);
+        assert(image_program_calls - programs_before == batches);
+        assert(steps * FLASH_JOB_YIELD_US <= (size / 4096u + size / 65536u + 32u) * 1000u);
+        printf("PERF: %lu-byte copy: %u SD reads/program calls (was %lu); scheduled pauses %luus (was %luus)\n",
+               (unsigned long)size, batches, (unsigned long)((size + 255u) / 256u),
+               (unsigned long)(steps * FLASH_JOB_YIELD_US), (unsigned long)(steps * 3000u));
+    }
+    unsigned reads_after_copy = sd_read_calls;
+    test_now = flash_job_resume_us;
+    flash_job_background_work();
+    assert(sd_read_calls == reads_after_copy);
+    bool ok = flash_job_state == FLASH_JOB_COMMIT;
+    if (ok) {
+        assert(ctrl_mapper_value == 100);
+        test_now = flash_job_resume_us;
+        flash_job_background_work();
+    }
+    assert(flash_job_state == FLASH_JOB_IDLE);
     allow_lo = allow_hi = 0;
     return ok;
+}
+
+static void check_menu_reader(void) {
+    bool mapped;
+    memset(menu_image, 0x31, sizeof(menu_image));
+    memset(page_buffer, 0x52, sizeof(page_buffer));
+    fh_menu_window_active = false;
+    ctrl_cmd_state = 0x10;
+    ctrl_mapper_value = FLASH_COPY_DETECTING;
+    ctrl_status_value = CTRL_MAGIC;
+    total_record_count = 0x123;
+    ctrl_ack_value = 0;
+    assert(menu_read_byte(0x4100, &mapped) == 0x31 && mapped);
+    assert(menu_read_byte(DATA_BASE_ADDR, &mapped) == 0x52 && mapped);
+    assert(menu_read_byte(CTRL_CMD, &mapped) == 0x10 && mapped);
+    assert(menu_read_byte(CTRL_MAPPER, &mapped) == FLASH_COPY_DETECTING && mapped);
+    assert(menu_read_byte(CTRL_COUNT_L, &mapped) == 0x23 && mapped);
+    assert(menu_read_byte(CTRL_COUNT_H, &mapped) == 1 && mapped);
+    assert(menu_read_byte(CTRL_STATUS, &mapped) == CTRL_MAGIC && mapped);
+    assert(menu_read_byte(MP3_CTRL_ELAPSED_L, &mapped) == 0x34 && mapped);
+    assert(menu_read_byte(MP3_CTRL_TOTAL_H, &mapped) == 0x56 && mapped);
+    flash_free_kb = 0x2345;
+    assert(menu_read_byte(CTRL_FLASH_FREE_KB, &mapped) == 0x45 && mapped);
+    ctrl_sd_partition_info[2] = 'V';
+    assert(menu_read_byte(CTRL_SD_PARTITION_INFO_BASE + 2u, &mapped) == 'V' && mapped);
+    assert(menu_read_byte(0x2000, &mapped) == 0xFF && !mapped);
+    fh_menu_window_active = true;
+    fh_catalog_count = 0x345;
+    fh_progress_percent = 99;
+    fh_result = 1;
+    fh_wifi_status_text[0] = 'S';
+    assert(menu_read_byte(CTRL_COUNT_L, &mapped) == 0x45 && mapped);
+    assert(menu_read_byte(CTRL_MAPPER, &mapped) == 99 && mapped);
+    assert(menu_read_byte(CTRL_AUDIO, &mapped) == 1 && mapped);
+    assert(menu_read_byte(FH_STATUS_TEXT_BASE, &mapped) == 'S' && mapped);
+    fh_menu_window_active = false;
+}
+
+static void prepare_sd_record(const char *name, const uint8_t *data, uint32_t size) {
+    memset(records, 0, sizeof(records));
+    snprintf(records[0].Name, sizeof(records[0].Name), "%s", name);
+    records[0].Mapper = SOURCE_SD_FLAG | 8u;
+    records[0].Size = size;
+    total_record_count = full_record_count = 1;
+    filtered_indices[0] = sd_path_offsets[0] = 0;
+    strcpy(sd_path_buffer, "/large.ROM");
+    sd_source_file = (FIL){.data = data, .size = size};
+    ctrl_cmd_state = 0x10;
+    browse_source_mode = SOURCE_MODE_SD;
+    strcpy(sd_current_path, "/games");
+    refresh_requested = false;
+    process_copy_to_flash_request(true);
+}
+
+static void finish_copy_refresh(void) {
+    assert(refresh_requested && flash_job_show_details && ctrl_cmd_state == 0x10);
+    assert(browse_source_mode == SOURCE_MODE_FLASH && strcmp(sd_current_path, "/") == 0);
+    ROMRecord sd_duplicate = records[0];
+    memcpy(records, flash_records, sizeof(records));
+    assert(flash_record_count < MAX_FLASH_RECORDS);
+    records[flash_record_count] = sd_duplicate;
+    records[flash_record_count].Offset = flash_job_entry.Offset;
+    filtered_indices[0] = flash_record_count;
+    for (uint16_t i = 0; i < flash_record_count; i++) {
+        filtered_indices[i + 1u] = (uint16_t)(flash_record_count - i - 1u);
+    }
+    total_record_count = full_record_count = (uint16_t)(flash_record_count + 1u);
+    resolve_flash_copy_match();
+    assert(!flash_job_show_details && ctrl_ack_value == CTRL_MAGIC);
+    assert(match_index > 0 && match_index < total_record_count);
+    const ROMRecord *selected = &records[filtered_indices[match_index]];
+    assert((selected->Mapper & SOURCE_SD_FLAG) == 0 && selected->Offset == flash_job_entry.Offset);
+    assert(selected->Size == flash_job_entry.Size);
+    ctrl_cmd_state = 0; // The background refresh clears the command only after selecting the entry.
+    refresh_requested = false;
+}
+
+static void check_capacity(void) {
+    uint32_t first = flash_store_align_up(sim_base() + FLASH_ROM_AREA_OFFSET, FLASH_SECTOR_SIZE);
+    uint32_t capacity = PICO_FLASH_SIZE_BYTES - first;
+    uint32_t mb = 1024u * 1024u;
+    assert(capacity >= 10u * mb);
+    memset(flash_records, 0, sizeof(flash_records));
+    flash_record_count = 2;
+    flash_store_overflow = false;
+    flash_records[0].Offset = first - sim_base() + 2u * mb;
+    flash_records[0].Size = mb;
+    flash_records[1].Offset = first - sim_base() + 7u * mb;
+    flash_records[1].Size = mb;
+    flash_store_update_space();
+    assert(flash_free_kb == (capacity - 2u * mb) / 1024u);
+    uint32_t largest = capacity - 8u * mb;
+    if (largest < 4u * mb) largest = 4u * mb;
+    assert(flash_largest_kb == largest / 1024u);
+    assert(flash_free_kb >= 8192u && flash_largest_kb < 8192u);
+    uint32_t addr;
+    assert(!flash_store_find_space(8u * mb, &addr));
+    assert(flash_store_find_space(2u * mb, &addr) && addr == first);
+    assert(!flash_store_find_space(UINT32_MAX, &addr));
+    assert(!flash_store_find_space(0, &addr));
+
+    // Unaligned and overlapping images consume the union of their sectors.
+    flash_records[0].Offset = first - sim_base() + 4097u;
+    flash_records[0].Size = 4097u;
+    flash_records[1] = flash_records[0];
+    flash_store_update_space();
+    assert(flash_free_kb == (capacity - 8192u) / 1024u);
+    assert(flash_largest_kb == (capacity - 12288u) / 1024u);
+    assert(flash_store_find_space(4096u, &addr) && addr == first);
+    assert(flash_store_find_space(8192u, &addr) && addr == first + 12288u);
+    flash_store_overflow = true;
+    flash_store_update_space();
+    assert(flash_free_kb == UINT16_MAX && flash_largest_kb == 0);
+    assert(!flash_store_find_space(4096u, &addr));
+    flash_store_load_records();
 }
 
 static void reload(void) {
@@ -330,6 +555,7 @@ static void check(const char *uf2, uint32_t firmware_size) {
         assert(sim_flash[pad] == 0xFF);
     }
     sd_rom_region = (psram_region_t){.offset = 0, .size = sizeof(psram_stage), .ptr = psram_stage};
+    check_menu_reader();
 
     // Tool image: Nextor (-s1), standalone MegaRAM (-r, no data), three ROMs.
     flash_store_load_records();
@@ -445,12 +671,18 @@ static void check(const char *uf2, uint32_t firmware_size) {
     check_static_regions();
     check_all_data(99, "Gap Filler");
 
-    // A 4 MB ROM (the microSD maximum) lands after the image, over stale data,
+    // An 8 MB ROM lands after the image, over stale data,
     // using 64 KB block erases where aligned.
-    uint32_t big_size = 4u * 1024u * 1024u;
+    uint32_t big_size = 8u * 1024u * 1024u;
     uint8_t *big_rom = make_data(7, big_size);
+    prepare_sd_record("Big One", big_rom, big_size);
+    records[0].Mapper = SOURCE_SD_FLAG;
+    assert(flash_job_start() && flash_job_entry.Size == big_size);
+    assert(flash_job_entry.Mapper == 0);
+    assert(flash_job_state == FLASH_JOB_START);
+    flash_job_finish(false); // Preflight only; the copy below exercises writes.
     erase_64k_ops = 0;
-    assert(copy_rom("Big One", 14, big_rom, big_size, 0));
+    assert(copy_rom("Big One", 8, big_rom, big_size, 0));
     int big = find_loaded("Big One");
     assert(big >= 0 && sim_base() + (uint32_t)flash_records[big].Offset == flash_store_align_up(rom_end, FLASH_SECTOR_SIZE));
     assert(erase_64k_ops >= big_size / 65536u - 1u);
@@ -458,6 +690,96 @@ static void check(const char *uf2, uint32_t firmware_size) {
     check_static_regions();
     check_all_data(99, "Gap Filler");
     check_data("Big One", 7);
+
+    check_capacity();
+    unsigned unchanged_pages = program_pages;
+    unsigned unchanged_erases = erase_4k_ops + erase_64k_ops;
+    uint16_t unchanged_slots = flash_slots_used;
+    prepare_sd_record("Big One", big_rom, big_size);
+    assert(flash_job_start() && flash_job_state == FLASH_JOB_MATCH);
+    while (flash_job_written < big_size) assert(flash_job_match_step());
+    flash_job_finish(true);
+    assert(ctrl_ack_value == 0 && ctrl_cmd_state == 0x10 && refresh_requested);
+    assert(records[0].Mapper == (SOURCE_SD_FLAG | 8u));
+    finish_copy_refresh();
+    assert(records[filtered_indices[match_index]].Offset == flash_records[big].Offset);
+    assert(program_pages == unchanged_pages && erase_4k_ops + erase_64k_ops == unchanged_erases);
+    assert(flash_slots_used == unchanged_slots);
+
+    big_rom[big_size - 1u] ^= 1u;
+    prepare_sd_record("Big One", big_rom, big_size);
+    assert(flash_job_start() && flash_job_state == FLASH_JOB_MATCH);
+    bool matches = true;
+    while (matches && flash_job_written < big_size) matches = flash_job_match_step();
+    assert(!matches && ctrl_mapper_value == FLASH_COPY_DUPLICATE);
+    flash_job_finish(false);
+    assert(ctrl_ack_value == 0 && !flash_job_show_details);
+    assert(browse_source_mode == SOURCE_MODE_SD && strcmp(sd_current_path, "/games") == 0);
+    big_rom[big_size - 1u] ^= 1u;
+    assert(program_pages == unchanged_pages && erase_4k_ops + erase_64k_ops == unchanged_erases);
+
+    prepare_sd_record("Too Big", big_rom, PICO_FLASH_SIZE_BYTES);
+    assert(!flash_job_start() && ctrl_mapper_value == FLASH_COPY_TOO_LARGE);
+    flash_job_finish(false);
+    prepare_sd_record("New Large ROM", big_rom, big_size);
+    flash_record_count = MAX_FLASH_RECORDS;
+    assert(!flash_job_start() && ctrl_mapper_value == FLASH_COPY_NO_SPACE);
+    flash_job_finish(false);
+    flash_store_load_records();
+
+    // Copying is allowed before choosing compatible mapper/audio settings on the flash screen.
+    prepare_sd_record("Writable", big_rom, 5u * 1024u * 1024u);
+    records[0].Mapper = SOURCE_SD_FLAG | MAPPER_ASCII16X_FR;
+    assert(flash_job_start() && flash_job_entry.Mapper == MAPPER_ASCII16X_FR);
+    flash_job_finish(false);
+
+    uint32_t stored_offset = (uint32_t)flash_job_entry.Offset;
+    flash_job_entry.Offset = UINT32_MAX;
+    flash_job_show_details = true;
+    resolve_flash_copy_match();
+    assert(ctrl_ack_value == 0 && ctrl_mapper_value == FLASH_COPY_IO && match_index == 0xFFFF);
+    flash_job_entry.Offset = stored_offset;
+
+    uint32_t untyped_size = 1024u * 1024u + 37u;
+    uint8_t *untyped_rom = make_data(17, untyped_size);
+    untyped_rom[0] = 'A';
+    untyped_rom[1] = 'B';
+    memcpy(untyped_rom + 16, "ROM_NEO8", 8);
+    pio_reads[0] = CTRL_CMD;
+    pio_reads[1] = CTRL_MAPPER;
+    pio_reads[2] = 0x4100;
+    pio_reads[3] = DATA_BASE_ADDR;
+    pio_count = 4;
+    pio_read_pos = pio_result_count = 0;
+    assert(copy_rom("Untyped", 0, untyped_rom, untyped_size, 0));
+    int untyped = find_loaded("Untyped");
+    assert(untyped >= 0 && flash_records[untyped].Mapper == MAPPER_DETECT_NEO8);
+    assert(memcmp(sim_flash + sim_base() + flash_records[untyped].Offset, untyped_rom, untyped_size) == 0);
+    for (uint32_t i = untyped_size; i < flash_store_align_up(untyped_size, FLASH_PAGE_SIZE); i++) {
+        assert(sim_flash[sim_base() + flash_records[untyped].Offset + i] == 0xFFu);
+    }
+    assert(pio_result_count == 4);
+    assert(pio_results[0] == (0xFF00u | 0x0Eu));
+    assert(pio_results[1] == (0xFF00u | FLASH_COPY_DETECTING));
+    assert(pio_results[2] == (0xFF00u | 0x31u));
+    assert(pio_results[3] == (0xFF00u | 0x52u));
+    memcpy(records, flash_records, sizeof(records));
+    assert(flash_store_delete_entry((uint16_t)untyped));
+    free(untyped_rom);
+
+    uint8_t *unsupported_rom = calloc(MIN_ROM_SIZE, 1);
+    assert(unsupported_rom);
+    uint16_t before_count = flash_record_count, before_slots = flash_slots_used;
+    assert(!copy_rom("Unsupported", 0, unsupported_rom, MIN_ROM_SIZE, 0));
+    assert(flash_job_written == MIN_ROM_SIZE && ctrl_mapper_value == FLASH_COPY_MAPPER);
+    assert(flash_record_count == before_count && flash_slots_used == before_slots);
+    assert(find_loaded("Unsupported") < 0 && !flash_job_file_open);
+    corrupt_next_image_program = true;
+    assert(!copy_rom("Corrupted", 1, unsupported_rom, MIN_ROM_SIZE, 0));
+    assert(!corrupt_next_image_program && ctrl_mapper_value == FLASH_COPY_IO);
+    assert(flash_record_count == before_count && flash_slots_used == before_slots);
+    assert(find_loaded("Corrupted") < 0 && !flash_job_file_open);
+    free(unsupported_rom);
 
     // A failed read leaves no entry, consumes no slot and reports the failure.
     uint16_t count = flash_record_count;
@@ -562,7 +884,7 @@ static void check(const char *uf2, uint32_t firmware_size) {
     free(gap_rom);
     free(orig_flash);
     free(sim_flash);
-    printf("PASS: flash store load/delete/copy/rename/gap reuse/4 MB image/read failure/compaction "
+    printf("PASS: flash store batching/deferred flash detection/menu servicing, 8 MB import/reuse, capacity, failures and compaction "
            "(%u sector erases, %u block erases, %u pages programmed)\n",
            erase_4k_ops, erase_64k_ops, program_pages);
 }

@@ -6,6 +6,9 @@
 //
 // This work is licensed  under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 // License". https://creativecommons.org/licenses/by-nc-sa/4.0/
+//
+// Rows are zero-based: row 22 holds options and row 23 holds status/input.
+// Complete-row VRAM transfers avoid CHPUT scrolling when the last row fills.
 
 #include <string.h>
 #include <stdint.h>
@@ -20,9 +23,11 @@ __at (BIOS_RG4SAV) unsigned char vdp_reg4;
 #define MENU_UI_HLINE_SOURCE_CHAR 0x17
 #define MENU_UI_HLINE_PRINT_CHAR  0x7E
 
-static unsigned char menu_ui_render_shortcuts(unsigned char content_width);
-static unsigned char menu_ui_shortcuts_length(void);
+static unsigned char menu_ui_listing; // Detail/help screens omit list metadata.
+static char menu_ui_sd_text[32];
 
+// Clear [start_row, end_row). Naked wrappers read SDCC stack arguments after
+// the return address; CALSLT reaches the BIOS slot and IX must be preserved.
 static void clear_rows_vram(unsigned char start_row, unsigned char end_row, unsigned char width) __naked
 {
     (void)start_row;
@@ -167,6 +172,7 @@ void menu_ui_set_text_mode(int enable_80) {
     pop    ix
     __endasm;
 
+    // Copy the BIOS line glyph to a printable character for frame delimiters.
     menu_ui_copy_char_pattern(MENU_UI_HLINE_SOURCE_CHAR, MENU_UI_HLINE_PRINT_CHAR);
 }
 
@@ -182,6 +188,8 @@ void invert_chars(unsigned char startChar, unsigned char endChar)
     unsigned char i, c;
     unsigned int base = ((unsigned int)vdp_reg4) << 11;
 
+    // Text mode has no per-character inverse attribute. Store complemented
+    // glyphs 96 character codes higher; renderers select them by adding 96.
     for (c = startChar; c <= endChar; c++)
     {
         srcAddress  = base + ((unsigned int)c * 8);
@@ -226,7 +234,7 @@ void menu_ui_clear_rows(unsigned char start_row, unsigned char end_row) {
     clear_rows_vram(start_row, end_row, menu_ui_row_width());
 }
 
-void menu_ui_print_title_line(void) {
+static void menu_ui_print_title_line(void) {
     if (use_80_columns) {
         printf("MSX PICOVERSE 2350%44s[EXPLORER %s]", "", EXPLORER_VERSION);
     } else {
@@ -234,7 +242,7 @@ void menu_ui_print_title_line(void) {
     }
 }
 
-void menu_ui_print_delimiter_line(void) {
+static void menu_ui_print_delimiter_line(void) {
     unsigned char width = use_80_columns ? 78 : 38;
     for (unsigned char i = 0; i < width; i++) {
         PrintChar(MENU_UI_HLINE_PRINT_CHAR);
@@ -247,190 +255,180 @@ const char *menu_ui_fh_type_label(void) {
     return fh_catalog_type == CTRL_FH_TYPE_DSK ? " DSK" : " ROM";
 }
 
-void menu_ui_print_footer_line(void) {
+void menu_ui_print_footer_line(unsigned char selected) {
+    static const char options_40[] = "F1 FL\0F2 SD\0F3 FH\0F4 WIFI\0F5 HELP";
+    static const char options_80[] = "F1 FLASH\0F2 SD CARD\0F3 FILE HUNTER\0F4 WIFI\0F5 HELP";
+    menu_ui_render_footer(use_80_columns ? options_80 : options_40, 5, selected);
+}
+
+// NUL-separated ROM labels avoid pointer tables. Callers supply at least two
+// labels that fit with one blank between them; host tests check these tables.
+void menu_ui_render_footer(const char *options, unsigned char count, unsigned char selected) {
     unsigned char width = menu_ui_row_width();
-    unsigned char content_width = (unsigned char)(width - 2);
-    unsigned char footer_len = menu_ui_shortcuts_length();
-    unsigned char col = 11;
-    const char *fmt = "Page: %02d/%02d%s";
-    const char *label = "";
+    unsigned char inset = use_80_columns ? 1 : 0;
+    unsigned char bracket_width = inset * 2;
+    // Keep two screen columns unused, plus a blank at each end for highlighting.
+    unsigned char space = width - 4;
+    const char *label = options;
+    for (unsigned char item = 0; item < count; item++) {
+        unsigned char label_len = (unsigned char)strlen(label);
+        space -= label_len + bracket_width;
+        label += label_len + 1;
+    }
+    unsigned char gaps = count - 1;
+    unsigned char gap_width = space / gaps;
+    // Give remainder columns to the first gaps; widths differ by at most one.
+    unsigned char extra = space - gap_width * gaps;
+    unsigned char start = 1;
+    char row[80];
 
-    if (menu_shortcut_selection == MENU_SHORTCUT_FILEHUNTER) {
-        /* File Hunter: name the catalog being listed after the page counter. */
-        if (use_80_columns) {
-            fmt = "Page: %02d/%02d  Listing:%s";
-            col = 25;
-        } else {
-            fmt = "Page:%02d/%02d%s";
-            col = 14;
+    memset(row, ' ', width);
+    for (unsigned char i = 0; i < count; i++) {
+        unsigned char len = (unsigned char)strlen(options);
+        if (inset) {
+            row[start] = '[';
+            row[start + len + 1] = ']';
         }
-        label = menu_ui_fh_type_label();
-    }
-    printf(fmt, currentPage, totalPages, label);
-
-    while (col < content_width && (unsigned char)(content_width - col) > footer_len) {
-        PrintChar(' ');
-        col++;
-    }
-
-    col = (unsigned char)(col + menu_ui_render_shortcuts((unsigned char)(content_width - col)));
-
-    while (col < content_width) {
-        PrintChar(' ');
-        col++;
-    }
-}
-
-static unsigned char menu_ui_print_shortcut_token(const char *token, int selected) {
-    unsigned char len = (unsigned char)strlen(token);
-
-    for (unsigned char i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)token[i];
-        if (selected) {
-            ch = (unsigned char)(ch + 96);
-        }
-        PrintChar(ch);
-    }
-
-    return len;
-}
-
-static const char *menu_ui_shortcut_token(unsigned char index) {
-    if (use_80_columns) {
-        switch (index) {
-            case 0:  return "[F1 - Flash]";
-            case 1:  return "[F2 - MicroSD]";
-            default: return "[F3 - File Hunter]";
-        }
-    }
-    switch (index) {
-        case 0:  return "[F1-FL]";
-        case 1:  return "[F2-SD]";
-        default: return "[F3-FH]";
-    }
-}
-
-static unsigned char menu_ui_shortcuts_length(void) {
-    unsigned char total_len = 0;
-
-    for (unsigned char i = 0; i < 3; i++) {
-        total_len = (unsigned char)(total_len + (unsigned char)strlen(menu_ui_shortcut_token(i)));
-    }
-
-    return (unsigned char)(total_len + 2);
-}
-
-static unsigned char menu_ui_render_shortcuts(unsigned char content_width) {
-    unsigned char total_len = 0;
-    unsigned char col = 0;
-
-    total_len = menu_ui_shortcuts_length();
-
-    if (total_len > content_width) {
-        total_len = content_width;
-    }
-
-    for (unsigned char i = 0; i < 3 && col < content_width; i++) {
-        unsigned char token_len = menu_ui_print_shortcut_token(menu_ui_shortcut_token(i), menu_shortcut_selection == (unsigned char)(i + 1));
-        col = (unsigned char)(col + token_len);
-        if (i < 2 && col < content_width) {
-            PrintChar(' ');
-            col++;
-        }
-    }
-
-    return total_len;
-}
-
-static void menu_ui_render_last_line(const char *left_text) {
-    unsigned char width = menu_ui_row_width();
-    unsigned char content_width = (unsigned char)(width - 2);
-    const char *actions;
-    char stop_char = 0;
-    unsigned char right_len;
-    unsigned char right_start = 0;
-    unsigned char col = 0;
-
- 
-    actions = use_80_columns ?
-            "[/ - Search] [  H - Help  ] [F4 - WiFi Config]" :
-            "[/-Fnd] [H-Hlp] [F4-WF]";
-    if (!left_text && menu_shortcut_selection == MENU_SHORTCUT_MICROSD) {
-        left_text = (const char *)(CTRL_SD_PARTITION_INFO_BASE + 2);
-        if (!use_80_columns) {
-            const char *free_text = left_text;
-            while (*free_text && *free_text != '(') {
-                free_text++;
+        memcpy(row + start + inset, options, len);
+        options += len + 1;
+        len += bracket_width;
+        if (selected == (unsigned char)(i + 1)) {
+            char *highlight = row + start - 1;
+            for (unsigned char remaining = len + 2; remaining; remaining--) {
+                *highlight = (char)(*highlight + 96);
+                highlight++;
             }
-            if (*free_text == '(' && (*((volatile unsigned char *)JIFFY) & 0x80)) {
-                left_text = free_text + 1;
-                stop_char = ')';
+        }
+        start += len + gap_width;
+        if (i < extra) {
+            start++;
+        }
+    }
+    blit_row_vram(22, row, width);
+}
+
+// Capture the browsing summary before ROM options/File Hunter reuse the window.
+// The last parenthesis starts free space even if the partition label has "(...)".
+void menu_ui_capture_sd_status(void) {
+    const char *info = (const char *)(CTRL_SD_PARTITION_INFO_BASE + 2);
+    const char *free_text = 0;
+    unsigned char len = 0;
+    unsigned char whole_len;
+
+    while (*info) {
+        if (*info == '(') {
+            free_text = info + 1;
+        }
+        info++;
+    }
+    while (free_text && len < 10 && free_text[len] >= '0' && free_text[len] <= '9') {
+        len++;
+    }
+    whole_len = len;
+    if (len && free_text[len] == '.' && free_text[len + 1] >= '0' && free_text[len + 1] <= '9') {
+        len += 2;
+    }
+    if (Peek(CTRL_STATUS) == CTRL_STATUS_SD_MISSING) {
+        strcpy(menu_ui_sd_text, "No microSD card");
+    } else if (!whole_len || strncmp(free_text + len, "MB FREE)", 8)) {
+        strcpy(menu_ui_sd_text, "Available: unknown");
+    } else {
+        strcpy(menu_ui_sd_text, "Available: ");
+        memcpy(menu_ui_sd_text + 11, free_text, len);
+        strcpy(menu_ui_sd_text + 11 + len, len == whole_len ? ".0 MB" : " MB");
+    }
+}
+
+static void menu_ui_render_last_line(const char *text) {
+    unsigned char width = menu_ui_row_width();
+    unsigned char col = 0;
+    unsigned char summary_len = 0;
+    const char *summary = 0;
+    char row[81];
+    static char summary_text[32];
+
+    if (menu_ui_listing) {
+        sprintf(row, "Page %02d/%02d", currentPage, totalPages);
+        col = (unsigned char)strlen(row);
+        if (menu_shortcut_selection == MENU_SHORTCUT_FLASH) {
+            unsigned int free_kb = *(volatile unsigned int *)CTRL_FLASH_FREE_KB;
+            if (free_kb == 0xFFFFU) {
+                strcpy(summary_text, "Flash list full");
             } else {
-                stop_char = '(';
+                // Fixed-point MB tenths round down without linking float support.
+                sprintf(summary_text, "Available: %u.%u MB", free_kb >> 10, ((free_kb & 1023U) * 10U) >> 10);
+            }
+            summary = summary_text;
+        } else if (menu_shortcut_selection == MENU_SHORTCUT_MICROSD) {
+            summary = menu_ui_sd_text;
+        } else if (menu_shortcut_selection == MENU_SHORTCUT_FILEHUNTER) {
+            sprintf(summary_text, "Listing:%s", menu_ui_fh_type_label());
+            summary = summary_text;
+        }
+        summary_len = summary ? (unsigned char)strlen(summary) : 0;
+        // NULL requests normal status; "" hides only the blinking message.
+        if (!text && menu_shortcut_selection == MENU_SHORTCUT_FILEHUNTER) {
+            const char *network = Peek(CTRL_NET_STATUS) == NET_STATUS_ONLINE ? "Net: Online" : "Net: Offline";
+            if (col + summary_len + strlen(network) + 6 <= width) {
+                text = network;
+            }
+        }
+        // A message takes priority over source metadata, never the page prefix.
+        // Six columns account for the separators on both sides of the summary.
+        if (summary_len && (!text || !*text || col + summary_len + strlen(text) + 6 <= width)) {
+            memcpy(row + col, " | ", 3);
+            col += 3;
+            for (unsigned char i = 0; i < summary_len && col < width; i++) {
+                row[col++] = summary[i];
             }
         }
     }
-    
-
-    right_len = (unsigned char)strlen(actions);
-
-    Locate(0, 23);
-
-    if (right_len < content_width) {
-        right_start = (unsigned char)(content_width - right_len);
-    }
-
-    while (left_text && *left_text && *left_text != stop_char && col < right_start) {
-        if (stop_char == '(' && *left_text == ' ' && left_text[1] == '(') {
-            break;
+    if (text && *text) {
+        if (col && col + 3 <= width) {
+            memcpy(row + col, " | ", 3);
+            col += 3;
         }
-        PrintChar((unsigned char)*left_text++);
-        col++;
+        while (*text && col < width) {
+            row[col++] = *text++;
+        }
     }
-
-    while (col < right_start) {
-        PrintChar(' ');
-        col++;
-    }
-
-    while (*actions && col < content_width) {
-        PrintChar((unsigned char)*actions++);
-        col++;
-    }
-
-    while (col < content_width) {
-        PrintChar(' ');
-        col++;
-    }
+    unsigned char padding = (width - col) / 2;
+    // memmove handles overlap while shifting the composed text into the center.
+    memmove(row + padding, row, col);
+    memset(row, ' ', padding);
+    memset(row + padding + col, ' ', width - padding - col);
+    blit_row_vram(23, row, width);
 }
 
-void menu_ui_render_menu_frame(void) {
+static void menu_ui_render_frame(unsigned char listing) {
+    menu_ui_listing = listing;
+    if (!listing) {
+        menu_ui_clear_rows(2, 23);
+    }
     Locate(0, 0);
     menu_ui_print_title_line();
     Locate(0, 1);
     menu_ui_print_delimiter_line();
     Locate(0, 21);
     menu_ui_print_delimiter_line();
-    Locate(0, 22);
-    menu_ui_print_footer_line();
+    if (listing) {
+        menu_ui_print_footer_line(menu_shortcut_selection);
+    }
     menu_ui_render_last_line(0);
+}
+
+void menu_ui_render_menu_frame(void) {
+    menu_ui_render_frame(1);
     frame_rendered = 1;
 }
 
 void menu_ui_render_detail_frame(void) {
-    Locate(0, 0);
-    menu_ui_print_title_line();
-    Locate(0, 1);
-    menu_ui_print_delimiter_line();
-    menu_ui_clear_rows(2, 21);
-    Locate(0, 21);
-    menu_ui_print_delimiter_line();
-    menu_ui_clear_rows(23, 24);
+    menu_ui_render_frame(0);
 }
 
-void menu_ui_update_footer_page(void) {
-    Locate(0, 22);
-    menu_ui_print_footer_line();
+void menu_ui_update_list_footer(void) {
+    menu_ui_print_footer_line(menu_shortcut_selection);
+    menu_ui_clear_last_line();
 }
 
 void menu_ui_clear_last_line(void) {
@@ -439,6 +437,12 @@ void menu_ui_clear_last_line(void) {
 
 void menu_ui_print_last_line_text(const char *text) {
     menu_ui_render_last_line(text);
+}
+
+void menu_ui_print_progress(const char *action, unsigned int percent) {
+    char text[32];
+    sprintf(text, "%s: %u%%", action, percent);
+    menu_ui_print_last_line_text(text);
 }
 
 void menu_ui_blink_last_line(const char *text, unsigned char *visible, unsigned char *tick, unsigned char period) {
@@ -469,7 +473,7 @@ void menu_ui_wait_key_with_blinking_status(const char *text) {
 // prompt on the last line. buffer must hold max_len + 1 bytes; the field is
 // also limited to the room left on the line, which can shorten the starting
 // text. Returns 1 on Enter after an edit, 2 on Enter with the text untouched,
-// 0 on ESC and -1 on F4.
+// 0 on ESC, -1 on F4 and -2 on F5.
 int menu_ui_read_line(const char *prompt, char *buffer, unsigned char max_len)
 {
     unsigned char width = (unsigned char)(menu_ui_row_width() - 2);
@@ -478,12 +482,15 @@ int menu_ui_read_line(const char *prompt, char *buffer, unsigned char max_len)
     unsigned char i;
     unsigned char edited = 0;
     char ch;
+    int result = 0;
 
     if (max_len > (unsigned char)(width - col)) {
         max_len = (unsigned char)(width - col);
     }
     buffer[max_len] = '\0';
+    // A shortened initial value is not an edit; Enter must not rename it.
     len = (unsigned char)strlen(buffer);
+    menu_ui_clear_rows(23, 24);
     Locate(0, 23);
     printf("%s%s", prompt, buffer);
     for (i = (unsigned char)(col + len); i < width; i++) {
@@ -494,13 +501,15 @@ int menu_ui_read_line(const char *prompt, char *buffer, unsigned char max_len)
         Locate((unsigned char)(col + len), 23);
         ch = (char)bios_chget();
         if (ch == 13) {
-            return edited ? 1 : 2;
+            result = edited ? 1 : 2;
+            break;
         }
         if (ch == 27) {
-            return 0;
+            break;
         }
-        if (ch == MENU_KEY_F4_CONFIG) {
-            return -1;
+        if (ch == MENU_KEY_F4_CONFIG || ch == MENU_KEY_F5_HELP) {
+            result = ch == MENU_KEY_F4_CONFIG ? -1 : -2;
+            break;
         }
         if (ch == 8 || ch == 127) {
             if (len > 0) {
@@ -516,6 +525,8 @@ int menu_ui_read_line(const char *prompt, char *buffer, unsigned char max_len)
             edited = 1;
         }
     }
+    menu_ui_clear_last_line();
+    return result;
 }
 
 void menu_ui_print_str_inverted_width(const char *str, unsigned char width)

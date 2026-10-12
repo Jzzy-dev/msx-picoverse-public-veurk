@@ -26,6 +26,7 @@
 #include "uf2format.h"
 #include "loadrom.h"
 #include "nextor_sunrise.h"
+#include "nextor3.h"
 #include "keyboard.h"
 #include "midi_fw.h"
 #include "midipac_fw.h"
@@ -83,6 +84,11 @@ static const char *rom_types[] = {
 #define ROM_TYPE_ASCII16X 12
 #define ROM_TYPE_PLANAR64 13
 #define ROM_TYPE_MANBOW2 14
+
+#define NEXTOR_ROM               ___resources_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM
+#define NEXTOR3_ROM              ___resources_Nextor_3_0_0_beta2_SunriseIDE_MasterOnly_ROM
+#define NEXTOR3_SUNRISE_LABEL    "Nextor Sunrise 3.0.0 Beta 2"
+#define NEXTOR_KERNEL_ROM_SIZE   (128u * 1024u)
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
@@ -392,12 +398,15 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s] [-m] [-k] [-i] [-p] [-j] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s] [-m] [-s3] [-m3] [-k] [-i] [-p] [-j] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help     Show this help message\n");
-    printf("  -s, --sunrise  Build UF2 with embedded Sunrise IDE Nextor ROM\n");
-    printf("  -m, --mapper   Build UF2 with Sunrise IDE Nextor ROM + 192KB memory mapper\n");
+    printf("  -s, --sunrise  Build UF2 with embedded Sunrise IDE Nextor 2.1.4 ROM\n");
+    printf("  -m, --mapper   Build UF2 with Sunrise IDE Nextor 2.1.4 ROM + 192KB memory mapper\n");
+    printf("  -s3, --sunrise3 Build UF2 with " NEXTOR3_SUNRISE_LABEL " Sunrise IDE ROM for testing\n");
+    printf("  -m3, --mapper3 Build UF2 with " NEXTOR3_SUNRISE_LABEL " Sunrise IDE ROM + 192KB memory mapper for testing\n");
+    printf("                 Options -s, -m, -s3 and -m3 are mutually exclusive\n");
     printf("  -k, --keyboard Build UF2 with USB keyboard firmware (dedicated keyboard cartridge)\n");
     printf("  -i, --midi     Build UF2 with USB MIDI firmware (MSX-MIDI interface via USB cable)\n");
     printf("  -p, --midipac  Build UF2 with MIDI-PAC firmware (PSG-to-MIDI via USB cable)\n");
@@ -442,7 +451,8 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
     uint8_t config_record[CONFIG_RECORD_SIZE] = {0};
 
     size_t cursor = 0;
-    memcpy(config_record + cursor, rom_name, MAX_FILE_NAME_LENGTH);
+    size_t name_length = strnlen(rom_name, MAX_FILE_NAME_LENGTH - 1);
+    memcpy(config_record + cursor, rom_name, name_length);
     cursor += MAX_FILE_NAME_LENGTH;
     memcpy(config_record + cursor, &rom_type, sizeof(rom_type));
     cursor += sizeof(rom_type);
@@ -563,6 +573,8 @@ int main(int argc, char *argv[])
     const char *rom_filename = NULL;
     bool use_sunrise = false;
     bool use_mapper = false;
+    bool use_sunrise3 = false;
+    bool use_mapper3 = false;
     bool use_keyboard = false;
     bool use_midi = false;
     bool use_midipac = false;
@@ -576,6 +588,10 @@ int main(int argc, char *argv[])
             use_sunrise = true;
         } else if ((strcmp(argv[i], "-m") == 0) || (strcmp(argv[i], "--mapper") == 0)) {
             use_mapper = true;
+        } else if ((strcmp(argv[i], "-s3") == 0) || (strcmp(argv[i], "--sunrise3") == 0)) {
+            use_sunrise3 = true;
+        } else if ((strcmp(argv[i], "-m3") == 0) || (strcmp(argv[i], "--mapper3") == 0)) {
+            use_mapper3 = true;
         } else if ((strcmp(argv[i], "-k") == 0) || (strcmp(argv[i], "--keyboard") == 0)) {
             use_keyboard = true;
         } else if ((strcmp(argv[i], "-i") == 0) || (strcmp(argv[i], "--midi") == 0)) {
@@ -601,28 +617,31 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (use_sunrise && use_mapper) {
-        printf("Options -s and -m are mutually exclusive. Use -m for Sunrise IDE + mapper.\n");
+    const int nextor_mode_count = (int)use_sunrise + (int)use_mapper + (int)use_sunrise3 + (int)use_mapper3;
+    const bool use_nextor = nextor_mode_count > 0;
+
+    if (nextor_mode_count > 1) {
+        printf("Options -s, -m, -s3 and -m3 are mutually exclusive. Use -m or -m3 for Sunrise IDE + mapper.\n");
         return 1;
     }
 
-    if (use_keyboard && (use_sunrise || use_mapper || use_midi || use_midipac || use_joystick || rom_filename)) {
-        printf("Option -k is standalone and cannot be combined with -s, -m, -i, -p, -j, or a ROM file.\n");
+    if (use_keyboard && (use_nextor || use_midi || use_midipac || use_joystick || rom_filename)) {
+        printf("Option -k is standalone and cannot be combined with -s, -m, -s3, -m3, -i, -p, -j, or a ROM file.\n");
         return 1;
     }
 
-    if (use_midi && (use_sunrise || use_mapper || use_keyboard || use_midipac || use_joystick || rom_filename)) {
-        printf("Option -i is standalone and cannot be combined with -s, -m, -k, -p, -j, or a ROM file.\n");
+    if (use_midi && (use_nextor || use_keyboard || use_midipac || use_joystick || rom_filename)) {
+        printf("Option -i is standalone and cannot be combined with -s, -m, -s3, -m3, -k, -p, -j, or a ROM file.\n");
         return 1;
     }
 
-    if (use_midipac && (use_sunrise || use_mapper || use_keyboard || use_midi || use_joystick || rom_filename)) {
-        printf("Option -p is standalone and cannot be combined with -s, -m, -k, -i, -j, or a ROM file.\n");
+    if (use_midipac && (use_nextor || use_keyboard || use_midi || use_joystick || rom_filename)) {
+        printf("Option -p is standalone and cannot be combined with -s, -m, -s3, -m3, -k, -i, -j, or a ROM file.\n");
         return 1;
     }
 
-    if (use_joystick && (use_sunrise || use_mapper || use_keyboard || use_midi || use_midipac || rom_filename)) {
-        printf("Option -j is standalone and cannot be combined with -s, -m, -k, -i, -p, or a ROM file.\n");
+    if (use_joystick && (use_nextor || use_keyboard || use_midi || use_midipac || rom_filename)) {
+        printf("Option -j is standalone and cannot be combined with -s, -m, -s3, -m3, -k, -i, -p, or a ROM file.\n");
         return 1;
     }
 
@@ -818,20 +837,29 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    if (use_sunrise || use_mapper) {
+    if (use_nextor) {
         if (rom_filename) {
-            printf("The -s/--sunrise and -m/--mapper options do not accept an external ROM file.\n");
+            printf("The -s/--sunrise, -m/--mapper, -s3/--sunrise3 and -m3/--mapper3 options do not accept an external ROM file.\n");
             return 1;
         }
 
-        const uint8_t *sunrise_rom = ___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM;
-        uint32_t sunrise_rom_size = (uint32_t)___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM_len;
-        uint8_t rom_type = use_mapper ? ROM_TYPE_SUNRISE_MAPPER : ROM_TYPE_SUNRISE;
+        const bool nextor3 = use_sunrise3 || use_mapper3;
+        const bool with_mapper = use_mapper || use_mapper3;
+        const uint8_t *sunrise_rom = nextor3 ? NEXTOR3_ROM : NEXTOR_ROM;
+        uint32_t sunrise_rom_size = nextor3 ? (uint32_t)sizeof(NEXTOR3_ROM) : (uint32_t)sizeof(NEXTOR_ROM);
+        uint8_t rom_type = with_mapper ? ROM_TYPE_SUNRISE_MAPPER : ROM_TYPE_SUNRISE;
         uint32_t base_offset = CONFIG_RECORD_SIZE;
-        const char *sunrise_name = use_mapper ? "Nextor Sunrise+Mapper" : "Nextor Sunrise IDE";
+        const char *sunrise_name;
+        if (nextor3) {
+            // Nextor 3 beta kernel on the same Sunrise IDE (USB) loaders as -s/-m.
+            sunrise_name = with_mapper ? NEXTOR3_SUNRISE_LABEL "+Mapper" : NEXTOR3_SUNRISE_LABEL;
+        } else {
+            sunrise_name = with_mapper ? "Nextor Sunrise+Mapper" : "Nextor Sunrise IDE";
+        }
 
-        if (sunrise_rom_size == 0) {
-            printf("Embedded Sunrise IDE Nextor ROM payload is empty.\n");
+        if (sunrise_rom_size != NEXTOR_KERNEL_ROM_SIZE) {
+            printf("Embedded Sunrise IDE Nextor ROM must be %u bytes (found %u).\n",
+                   (unsigned)NEXTOR_KERNEL_ROM_SIZE, (unsigned)sunrise_rom_size);
             return 1;
         }
 

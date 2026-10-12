@@ -24,6 +24,7 @@
 #include "multirom.h"
 #include "menu.h"
 #include "nextor_sunrise.h"
+#include "nextor3.h"
 #include "sha1.h"
 #include "romdb.h"
 
@@ -52,6 +53,13 @@ static const char *MAPPER_DESCRIPTIONS[] = {
 #define ROM_TYPE_ASCII16X 12
 #define ROM_TYPE_PLANAR64 13
 #define ROM_TYPE_MANBOW2  14
+
+#define ROM_TYPE_SUNRISE         10
+#define ROM_TYPE_SUNRISE_MAPPER  11
+#define NEXTOR_ROM               ___resources_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM
+#define NEXTOR3_ROM              ___resources_Nextor_3_0_0_beta2_SunriseIDE_MasterOnly_ROM
+#define NEXTOR_KERNEL_ROM_SIZE   (128u * 1024u)
+#define MAX_NEXTOR_ENTRIES       4
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
@@ -389,12 +397,15 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 // Print usage information
 static void print_usage(const char *prog_name) {
 
-    printf("Usage: %s [-h|-s|-m|-o <filename>]\n", prog_name);
+    printf("Usage: %s [-h|-s|-m|-s3|-m3|-o <filename>]\n", prog_name);
     printf("  without options, the tool scans the current directory for .ROM files to include in the MultiROM image\n");
     printf("Options:\n");
     printf("  -h   Show this help message\n");
-    printf("  -s, --sunrise  Include embedded Sunrise IDE Nextor ROM in the MultiROM image\n");
-    printf("  -m, --mapper   Include embedded Sunrise IDE Nextor ROM + 192KB Mapper in the MultiROM image\n");
+    printf("  -s, --sunrise    Include embedded Sunrise IDE Nextor 2.1.4 ROM in the MultiROM image\n");
+    printf("  -m, --mapper     Include embedded Sunrise IDE Nextor 2.1.4 ROM + 192KB Mapper in the MultiROM image\n");
+    printf("  -s3, --sunrise3  Include embedded Sunrise IDE Nextor 3.0.0 Beta 2 ROM in the MultiROM image (testing)\n");
+    printf("  -m3, --mapper3   Include embedded Sunrise IDE Nextor 3.0.0 Beta 2 ROM + 192KB Mapper in the MultiROM image (testing)\n");
+    printf("  Options -s, -m, -s3, -m3 can be combined to add multiple Nextor entries\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
@@ -548,6 +559,8 @@ int main(int argc, char *argv[])
 
     bool include_sunrise = false;
     bool include_mapper = false;
+    bool include_sunrise3 = false;
+    bool include_mapper3 = false;
     bool show_help = false;
     const char *bad_option = NULL;
     BuildMode build_mode = BUILD_MODE_STANDARD;
@@ -563,6 +576,10 @@ int main(int argc, char *argv[])
             include_sunrise = true;
         } else if ((strcmp(argv[i], "-m") == 0) || (strcmp(argv[i], "--mapper") == 0)) {
             include_mapper = true;
+        } else if ((strcmp(argv[i], "-s3") == 0) || (strcmp(argv[i], "--sunrise3") == 0)) {
+            include_sunrise3 = true;
+        } else if ((strcmp(argv[i], "-m3") == 0) || (strcmp(argv[i], "--mapper3") == 0)) {
+            include_mapper3 = true;
         } else if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
             show_help = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
@@ -617,21 +634,49 @@ int main(int argc, char *argv[])
     }
     memset(config_buffer, 0xFF, CONFIG_AREA_SIZE); // Initialize config area to 0xFF
 
-    // Include embedded Sunrise IDE Nextor ROM if requested
-    if (include_sunrise) {
+    // Embedded Nextor entries, listed first in the menu in this order. Each
+    // entry carries its own kernel so Nextor versions can be mixed in one UF2.
+    const struct {
+        bool enabled;
+        uint8_t mapper;
+        const char *name;
+        const uint8_t *rom;
+        uint32_t rom_size;
+    } nextor_entries[MAX_NEXTOR_ENTRIES] = {
+        { include_sunrise,  ROM_TYPE_SUNRISE,        "Nextor 2.1.4 Sunrise IDE",                       NEXTOR_ROM,  sizeof(NEXTOR_ROM)  },
+        { include_mapper,   ROM_TYPE_SUNRISE_MAPPER, "Nextor 2.1.4 Sunrise IDE + 192KB Mapper",        NEXTOR_ROM,  sizeof(NEXTOR_ROM)  },
+        { include_sunrise3, ROM_TYPE_SUNRISE,        "Nextor 3.0.0 Beta 2 Sunrise IDE",                NEXTOR3_ROM, sizeof(NEXTOR3_ROM) },
+        { include_mapper3,  ROM_TYPE_SUNRISE_MAPPER, "Nextor 3.0.0 Beta 2 Sunrise IDE + 192KB Mapper", NEXTOR3_ROM, sizeof(NEXTOR3_ROM) },
+    };
+    const uint8_t *nextor_payload[MAX_NEXTOR_ENTRIES];
+    int nextor_count = 0;
+
+    for (int ne = 0; ne < MAX_NEXTOR_ENTRIES; ne++) {
+        if (!nextor_entries[ne].enabled) {
+            continue;
+        }
+
+        uint32_t nextor_size = nextor_entries[ne].rom_size;
+        if (nextor_size != NEXTOR_KERNEL_ROM_SIZE) {
+            printf("Embedded Nextor ROM for '%s' must be %u bytes (found %u)\n",
+                   nextor_entries[ne].name, (unsigned)NEXTOR_KERNEL_ROM_SIZE, (unsigned)nextor_size);
+            free(config_buffer);
+            return 1;
+        }
+
         char nextor_rom_name[MAX_FILE_NAME_LENGTH] = {0};
-        strncpy(nextor_rom_name, "Nextor Sunrise IDE", MAX_FILE_NAME_LENGTH);
+        strncpy(nextor_rom_name, nextor_entries[ne].name, MAX_FILE_NAME_LENGTH - 1);
         memcpy(config_buffer + config_offset, nextor_rom_name, MAX_FILE_NAME_LENGTH);
         config_offset += MAX_FILE_NAME_LENGTH;
-        config_buffer[config_offset++] = 10;
-        uint32_t nextor_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
+        config_buffer[config_offset++] = nextor_entries[ne].mapper;
         memcpy(config_buffer + config_offset, &nextor_size, sizeof(nextor_size));
         config_offset += sizeof(nextor_size);
         uint32_t nextor_offset = base_offset;
         memcpy(config_buffer + config_offset, &nextor_offset, sizeof(nextor_offset));
         config_offset += sizeof(nextor_offset);
         printf("File %02d: Name = %-50s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
-               file_index, "Nextor Sunrise IDE", nextor_size, nextor_offset, mapper_description(10));
+               file_index, nextor_entries[ne].name, nextor_size, nextor_offset,
+               mapper_description(nextor_entries[ne].mapper));
         total_rom_size += nextor_size;
         if (total_rom_size > MAX_TOTAL_ROM_SIZE) {
             printf("Total ROM data exceeds maximum supported size of %u bytes.\n", (unsigned)MAX_TOTAL_ROM_SIZE);
@@ -639,35 +684,11 @@ int main(int argc, char *argv[])
             return 1;
         }
 
+        nextor_payload[nextor_count++] = nextor_entries[ne].rom;
         file_index++;
         base_offset += nextor_size;
     }
-
-    // Include embedded Sunrise IDE Nextor ROM + 192KB Mapper if requested
-    if (include_mapper) {
-        char mapper_rom_name[MAX_FILE_NAME_LENGTH] = {0};
-        strncpy(mapper_rom_name, "Nextor Sunrise IDE + 192KB Mapper", MAX_FILE_NAME_LENGTH);
-        memcpy(config_buffer + config_offset, mapper_rom_name, MAX_FILE_NAME_LENGTH);
-        config_offset += MAX_FILE_NAME_LENGTH;
-        config_buffer[config_offset++] = 11;
-        uint32_t nextor_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
-        memcpy(config_buffer + config_offset, &nextor_size, sizeof(nextor_size));
-        config_offset += sizeof(nextor_size);
-        uint32_t nextor_offset = base_offset;
-        memcpy(config_buffer + config_offset, &nextor_offset, sizeof(nextor_offset));
-        config_offset += sizeof(nextor_offset);
-        printf("File %02d: Name = %-50s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
-               file_index, "Nextor Sunrise IDE + 192KB Mapper", nextor_size, nextor_offset, mapper_description(11));
-        total_rom_size += nextor_size;
-        if (total_rom_size > MAX_TOTAL_ROM_SIZE) {
-            printf("Total ROM data exceeds maximum supported size of %u bytes.\n", (unsigned)MAX_TOTAL_ROM_SIZE);
-            free(config_buffer);
-            return 1;
-        }
-
-        file_index++;
-        base_offset += nextor_size;
-    }
+    const bool include_nextor = nextor_count > 0;
 
     // Scan the current directory for .ROM files
     dir = opendir(".");
@@ -705,7 +726,7 @@ int main(int argc, char *argv[])
 
     // Handle case of no ROM files found
     if (rom_count == 0) {
-        if (include_sunrise || include_mapper) {
+        if (include_nextor) {
             printf("No external ROM files found; generating image with embedded Nextor only.\n");
         } else {
             printf("No ROM files found in the current directory.\n\n");
@@ -778,7 +799,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (file_count == 0 && !include_sunrise && !include_mapper) {
+    if (file_count == 0 && !include_nextor) {
         printf("No valid ROM files found in the current directory.\n\n");
         print_usage(argv[0] ? argv[0] : "multirom");
         free(config_buffer);
@@ -797,14 +818,6 @@ int main(int argc, char *argv[])
     const size_t menu_rom_size = sizeof(___msx_dist_menu_rom);
     if (menu_rom_size < MENU_COPY_SIZE) {
         printf("Embedded menu ROM is smaller than the expected %d bytes\n", MENU_COPY_SIZE);
-        free(config_buffer);
-        return 1;
-    }
-
-    // Sanity check embedded Sunrise IDE Nextor ROM size
-    const size_t nextor_rom_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
-    if ((include_sunrise || include_mapper) && nextor_rom_size == 0) {
-        printf("Embedded Sunrise IDE Nextor ROM payload is empty\n");
         free(config_buffer);
         return 1;
     }
@@ -852,14 +865,9 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    if (include_sunrise) {
-        memcpy(combined_buffer + offset, ___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM, nextor_rom_size);
-        offset += nextor_rom_size;
-    }
-
-    if (include_mapper) {
-        memcpy(combined_buffer + offset, ___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM, nextor_rom_size);
-        offset += nextor_rom_size;
+    for (int ne = 0; ne < nextor_count; ne++) {
+        memcpy(combined_buffer + offset, nextor_payload[ne], NEXTOR_KERNEL_ROM_SIZE);
+        offset += NEXTOR_KERNEL_ROM_SIZE;
     }
 
     uint8_t io_buffer[4096];

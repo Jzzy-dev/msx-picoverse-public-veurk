@@ -21,11 +21,13 @@ Use the Explorer tool when you want a menu that loads ROMs from flash, microSD, 
 
 - Flash ROM entries created by the tool: up to 128 files. ROMs copied from the microSD card with `F` count toward the same 128-entry list.
 - Combined Explorer menu limit: 1024 entries per folder view (folders + ROMs + MP3s; the root view also includes ROM files stored directly on the flash memory).
-- Total flash ROM payload size: ~14 MB combined.
-- Supported ROM size range on the flash: 8 KB to ~14 MB.
+- The cartridge has 16 MB of flash shared by the firmware, menu, hidden BIOS payloads and ROMs. The `F1` status line shows actual usable free space.
+- The PC tool caps the combined visible ROM payload at 12 MB. Runtime microSD imports can use additional free flash, provided each ROM fits a sector-aligned contiguous block and the 128-entry list has room.
+- ROMs must be at least 8 KB to appear in the microSD list; its size field supports files up to 4 GB minus one byte. ROM execution is limited by the available PSRAM or cartridge flash, not by File Hunter's download limit.
 - ROM names in the menu are limited to 60 characters (longer names are truncated).
 - File Hunter search text is limited to 24 characters.
 - File Hunter downloads are saved as `.ROM` or `.DSK` files directly in the root of the microSD card.
+- File Hunter ROM downloads have no Explorer-imposed size cap and do not need to fit in PSRAM or flash. The selected microSD filesystem's file-size limit and available space still apply. `.DSK` boot-size restrictions remain unchanged.
 
 ## Basic workflow
 
@@ -58,7 +60,7 @@ explorer.exe [options]
 
 - `-h`, `--help` : Show usage help and exit.
 - `-o <filename>`, `--output <filename>` : Set UF2 output filename (default is `explorer.uf2`).
-- `-a`, `--allnextor` : Include every embedded Nextor SYSTEM entry listed below (the eight Nextor Sunrise 2.1.4 entries `-s1` to `-r2`, plus the Nextor 3 beta entry `-s3`) while still scanning and appending `.ROM` files from the current folder.
+- `-a`, `--allnextor` : Include every embedded Nextor SYSTEM entry listed below (the eight Nextor Sunrise 2.1.4 entries `-s1` to `-r2`, plus the Nextor 3 beta entries `-s3` and `-m3`) while still scanning and appending `.ROM` files from the current folder.
 - `-s1`, `--sunrise-sd` : Include Nextor Sunrise 2.1.4 using the on-board microSD card slot.
 - `-m1`, `--mapper-sd` : Include Nextor Sunrise 2.1.4 on microSD plus the 1MB PSRAM-backed MSX memory mapper.
 - `-c1`, `--carnivore2-sd` : Include Nextor Sunrise 2.1.4 on microSD plus the 1MB mapper and Carnivore2-compatible RAM-mode target for `SROM.COM /D15`.
@@ -68,8 +70,9 @@ explorer.exe [options]
 - `-c2`, `--carnivore2-usb` : Include Nextor Sunrise 2.1.4 on USB plus the 1MB mapper and Carnivore2-compatible RAM-mode target for `SROM.COM /D15`.
 - `-r2`, `--megaram-usb` : Include Nextor Sunrise 2.1.4 on USB plus the 1MB mapper and a separate 1MB MegaRAM subslot.
 - `-s3`, `--sunrise3-sd` : Include Nextor Sunrise 3.0.0 Beta 2 using the on-board microSD card slot, for testing the upcoming Nextor 3. It uses the Sunrise IDE MasterOnly kernel from Konamiman's [SunriseIDE Nextor driver](https://github.com/Konamiman/SunriseIDE-Nextor-driver/releases/tag/v0.1.8-blueMSX-v0.1.5-Nextor-3.0-beta.2) release and behaves like `-s1` otherwise. This is a beta kernel, so keep backups of the microSD card.
+- `-m3`, `--mapper3-sd` : Include the same Nextor Sunrise 3.0.0 Beta 2 microSD kernel as `-s3`, plus the 1MB PSRAM-backed MSX memory mapper, following the `-m1` layout.
 
-The Sunrise Nextor options can be combined. Each selected option creates a separate SYSTEM entry in the Explorer flash list, followed by any `.ROM` files found in the current folder. Use `-a` / `--allnextor` when you want all nine Nextor entries (eight Nextor 2.1.4 plus the Nextor 3 beta) in one UF2.
+The Sunrise Nextor options can be combined. Each selected option creates a separate SYSTEM entry in the Explorer flash list, followed by any `.ROM` files found in the current folder. Use `-a` / `--allnextor` when you want all ten Nextor entries (eight Nextor 2.1.4 plus two Nextor 3 beta variants) in one UF2. The hidden Nextor 2.1.4 kernel used to boot `.DSK` images is unchanged.
 
 Nextor entries always show the Nextor version in the Explorer menu:
 
@@ -84,6 +87,7 @@ Nextor entries always show the Nextor version in the Explorer menu:
 | `-c2` | `Nextor Sunrise 2.1.4 + 1MB Mapper + C2 RAM (USB)` |
 | `-r2` | `Nextor Sunrise 2.1.4 + 1MB Mapper + 1MB MegaRAM (USB)` |
 | `-s3` | `Nextor Sunrise 3.0.0 Beta 2 (SD)` |
+| `-m3` | `Nextor Sunrise 3.0.0 Beta 2 + 1MB Mapper (SD)` |
 
 Per-entry options (audio profile, PSG Mirror, WiFi, SD partition) are saved in a `.PVC` file named after the menu entry, so options saved by a UF2 that used the older names (`Nextor Sunrise IDE ...`) are not picked up and the entries start with default options.
 
@@ -112,6 +116,12 @@ explorer.exe -s1 -s3 -o explorer_nextor3.uf2
 ```
 
 This includes Nextor 2.1.4 and the Nextor 3.0.0 Beta 2 microSD entries side by side, so both kernels can be tested on the same card.
+
+```
+explorer.exe -m1 -m3 -o explorer_nextor3_mapper.uf2
+```
+
+This includes both Nextor versions with the 1MB mapper, as separate microSD SYSTEM entries.
 
 ## ROM mapper detection and tags
 
@@ -156,7 +166,7 @@ The flash contents are mirrored to a file named after the ROM in the root of the
 The file has no header: it is a byte exact image of the cartridge flash, so it can be copied off the card and inspected, or used as a ROM image. It is matched to the running cartridge by name and size.
 
 Notes:
-- The image is created in full the first time the cartridge runs with a card that has no matching `.FLA`, while the MSX is still held at boot. Restoring an existing image happens at the same point, and the ROM screen shows "Preparing FlashROM image, please wait..." while either runs.
+- The image is created in full the first time the cartridge runs with a card that has no matching `.FLA`, while the MSX is still held at boot. Restoring an existing image happens at the same point, and line 24 shows "Preparing FlashROM image..." while either runs.
 - Write-back runs on Core 0 during gaps in cartridge access, so saving works with every audio profile. The MSX may stutter briefly while a save is being written to the card.
 - Without a usable microSD card the flash is still emulated, but its contents are lost at power off.
 - The emulated device is sized to the next power of two at or above the ROM size, up to 8 MB (the full size the ASCII-X XL cartridges provide). When the MSX-MUSIC audio profile is active the bank cache has to live in PSRAM alongside the array, which lowers the ceiling to 4 MB.
@@ -180,9 +190,13 @@ Explorer can load ROMs from a microSD card in addition to flash. ROMs on SD are 
 
 ### Sunrise Nextor SD partitions in Explorer
 
-Sunrise Nextor SYSTEM entries use stricter partition rules than the normal `F2` microSD browser. Nextor SD storage is offered only for FAT16 microSD partitions up to 4 GB. FAT32 and exFAT partitions remain usable for Explorer file browsing, ROM loading, MP3/WAV playback, and File Hunter downloads, but they are not offered to Sunrise Nextor SYSTEM ROMs.
+For Sunrise Nextor SD SYSTEM entries, use Left/Right on the ROM screen's `SD Part` option to choose **WHOLE DISK** or a compatible primary FAT16 partition up to 4 GB. This applies to both Nextor 2.1.4 and Nextor 3 beta entries.
 
-When a Sunrise Nextor SYSTEM entry is opened in the ROM screen, Explorer shows the compatible FAT16 partition label in the `SD Part` option. If more than one compatible FAT16 partition exists, use Left/Right on `SD Part` to choose the partition before running. The selected partition is saved in that ROM's `.PVC` options file, so each Sunrise Nextor SYSTEM entry can remember its own storage partition.
+- **WHOLE DISK** exposes the microSD card as one raw block device, starting at physical sector zero and reporting the card's sector count. Nextor can read the MBR/extended partition chain and map multiple FAT12/FAT16 partitions to drives using its native tools, including `CALL FDISK` and `MAPDRV`. There is no need to remove primary partitions beforehand. The 4 GB FAT16 limit is per partition, not per card; the existing 28-bit ATA interface does not fully address cards larger than 128 GiB.
+- **A partition label** exposes only that primary FAT16 partition as the device. Existing saved selections and automatic/default selection remain unchanged: the first compatible primary FAT16 partition is used unless another choice was saved. If none exists, the option shows `WHOLE DISK`.
+- The choice is saved in that ROM's `.PVC` options file on the Explorer browsing filesystem. An inserted blank/unmountable card still offers `WHOLE DISK` for initialization, but cannot save options until a supported filesystem is available.
+
+Explorer's `F2` / `P` browsing selection and `/PICOVERSE.PVC` persistence remain independent. FAT32 and exFAT partitions remain available for browsing, ROM loading, MP3/WAV playback, and File Hunter downloads; whole-card access does not add those filesystems to Nextor. Back up the card before partitioning with FDISK, which can remove existing browsing partitions and files, and restart Explorer afterward so it rescans the new layout.
 
 ### Running .DSK disk images
 
@@ -230,19 +244,31 @@ Current limitations:
 ### microSD limitations
 
 - The combined list is capped at 1024 entries per folder view (folders + ROMs + MP3s; the root view can also include flash entries).
-- microSD ROM files are limited to 4 MB each. ROMs are streamed into the cartridge's 8 MB external PSRAM (QMI CS1, 52.5 MHz QPI) and executed from there; the first 256 KB are mirrored into the PSRAM ROM cache for mapper access. ROMs larger than 4 MB are skipped during enumeration.
-- Unsupported or invalid ROMs are skipped (same mapper and size rules as flash).
+- ROMs up to 4 MB keep the normal PSRAM loading path. They are streamed into the cartridge's 8 MB external PSRAM (QMI CS1, 52.5 MHz QPI) and executed from its 4 MB ROM staging region.
+- Larger ROMs are listed too. Selecting one with **Enter** or **Space** immediately asks `ROM>4MB: Copy to flash? Y/N` on line 24, instead of scanning the ROM first. `N` cancels without loading options or detecting the mapper. After `Y`, Explorer installs or verifies/reuses the ROM in flash, switches to `F1` and opens that flash entry's ROM screen (`Source: FL`). The ROM does **not** execute automatically: choose mapper, audio and other options, then select **Run**. **Esc** returns to the flash list and keeps the installed ROM. The original file stays on microSD.
+- If an entry of the same name and size is already in flash, Explorer compares all its bytes with the SD ROM and opens that flash entry's options without erasing or programming flash or overwriting its saved options. New copies inherit the SD `.PVC` options when present; later changes are saved to `/<name>.flash.PVC`. A different image with the same name is refused; rename the SD ROM or remove the conflicting flash entry before retrying.
+- If there is no suitable contiguous block, or the flash list is full, line 24 says `Clean flash in F1, then retry.` Delete selected flash entries with `D`, then return to `F2` and retry. Explorer never deletes other ROMs automatically. A ROM bigger than the cartridge's entire usable ROM area instead reports `ROM exceeds flash capacity.`
+- Execution still requires a supported mapper and compatible audio/memory configuration. For example, the writable `ASC16X-FR` array still needs PSRAM: selecting **Run** rejects images above 8 MB, or above 4 MB with MSX-MUSIC, rather than running a truncated writable array. Copying does not apply this launch restriction, so the flash ROM screen remains available to choose a compatible audio profile or the read-only `ASC16X` mapper.
 
 ### Copying microSD ROMs to flash
 
-Press `F` on a ROM in the `F2` microSD screen and answer `Y` to copy it into the cartridge's 16 MB flash. The bottom line shows the progress as a percentage, and when the copy is done the ROM appears in the `F1` flash list next to the ROMs added by the tool. To remove a flash entry again, press `D` on it in the `F1` screen.
+Press `F` on a ROM in the `F2` microSD screen and answer `Y` to copy it into the cartridge's 16 MB flash. Line 24 shows `Copying to flash: XX%` in 80 columns or compact `Flash: XX%` in 40 columns. When the copy is done the ROM appears in the `F1` flash list next to the ROMs added by the tool. To remove a flash entry again, press `D` on it in the `F1` screen.
 
-- The copy keeps the ROM's mapper (detected, tagged in the file name, or chosen on the ROM screen in this session) and copies its `.PVC` options file, so audio and other saved settings carry over.
+- The copy preserves saved/selected mapper overrides and filename tags, and copies its `.PVC` options file so audio and other settings carry over. Unknown mappers are detected from the verified flash image **after** copying, without a full SD scan before the transfer. Line 24 shows `Mapper...` during this final check; the menu remains responsive while the detector reads flash.
 - Each copy goes into the first free 4 KB aligned space after the ROMs and hidden payloads written by the tool. Space freed by `D` is reused by later copies. The flash list holds up to 128 entries, including the ones made by the tool.
-- Only ROMs can be copied (up to 4 MB, the microSD ROM limit). Folders, `.DSK` images and MP3/WAV files are not supported, and a ROM whose name is already in the flash list is refused. `Failed` is shown when the copy is not possible: no free space, a full flash list, unknown mapper, duplicate name, or a read error.
-- A 1 MB ROM takes several seconds. While each flash block is erased the MSX waits for the cartridge, so the progress counter moves in steps. Switching the MSX off during a copy only loses that copy; the entry is written after the ROM image has been programmed and verified.
+- Only ROMs can be copied, including ROMs above 4 MB that fit the flash. Folders, `.DSK` images and MP3/WAV files are not supported. Manual `F` imports still refuse duplicate names; a large-ROM launch can reuse a byte-identical existing image. Line 24 distinguishes cleanup, total-capacity, mapper/audio, duplicate-name and read/write failures.
+- Transfers use 2 KB SRAM batches for SD reads and flash programming, instead of individual 256-byte calls. Programming is still split into 4 KB steps, with a 1 ms menu time slice between steps rather than 3 ms. An 8 MB image needs 4,096 data read/program calls instead of 32,768; scheduled time slices drop from roughly 6.5 to 2.2 seconds, in addition to the flash chip's erase/program time. These are code-path counts, not a measured cartridge speed guarantee.
+- While each flash block is erased the MSX waits for the cartridge, so progress can still move in steps. Every programmed batch is verified, and the entry is published only after the image and mapper checks succeed. A rejected mapper or read/write/verification failure leaves no new entry, and its unindexed space can be reused by later copies. Existing flash entries are never erased to make room automatically.
 - `D` on a flash entry only marks its slot as deleted. After about 200 copy/delete operations the flash list is rewritten once to reclaim the deleted slots, which takes a fraction of a second.
 - Writing a new UF2 with the tool replaces the flash list: ROMs copied from the microSD card have to be copied again.
+
+### Flash capacity and the status line
+
+The centered line-24 status in both `F1` and `F2` uses `Page XX/YY | Available: X.X MB`. `F1` reports usable flash space and `F2` reports the selected microSD browsing partition's free space. Both use one decimal place, rounded down with integer arithmetic so capacity is not overstated; `KB` and `MB` throughout the menu use 1024-byte units. There is no alternating `Max` value or partition-name display.
+
+Total free space does not guarantee a ROM will fit: the copy still needs one contiguous, 4 KB sector-safe block. For example, two separate 4 MB gaps cannot hold one 8 MB ROM. Deleting entries reclaims their unshared sectors for later imports; Explorer does not move existing ROMs to defragment flash. If a UF2 contains more live entries than the 128-entry runtime list can hold, capacity is shown as `Flash list full` until enough entries are deleted.
+
+Questions, flash-copy/check progress, download progress, failures and download-completion prompts use the same centered line-24 renderer. Each item is separated by ` | `: for example, `Page XX/YY | Available: X.X MB | message`. Longer messages temporarily replace the source information, but keep `Page XX/YY | message`. Empty items have no separator. Detail screens use the full line for messages without a page counter. The normal source information returns after the interaction.
 
 ### Renaming ROMs and disk images
 
@@ -273,14 +299,21 @@ For the best experience with very large ROM collections, consider organizing ROM
 - **F1**: Switch the Explorer list to flash ROMs.
 - **F2**: Switch the Explorer list to microSD files and folders.
 - **F3**: Open the integrated File Hunter browser.
-- **F4**: Open WiFi configuration.
-- **H**: Show help screen.
+- **F4**: Open WiFi configuration from a list or the Help screen.
+- **F5**: Show the help screen.
 - **P**: In the `F2` microSD screen, cycle through supported FAT16, FAT32, and exFAT partitions. The selected browsing partition is saved in `/PICOVERSE.PVC`.
 - **D**: Delete the selected entry after a `Y/N` confirmation. In the `F2` microSD screen it deletes the file (folders are protected); in the `F1` flash screen it removes the flash entry. In both cases the entry's `.PVC` options file is removed too.
 - **F**: In the `F2` microSD screen, copy the selected ROM into the cartridge flash after a `Y/N` confirmation. See [Copying microSD ROMs to flash](#copying-microsd-roms-to-flash).
 - **R**: Rename the selected ROM or `.DSK` file on the microSD card, or the selected flash entry. See [Renaming ROMs and disk images](#renaming-roms-and-disk-images).
-- **/**: Search ROM names. Type a partial name and press Enter to jump to the first matching ROM.
+- **/**: Search ROM names on line 24. Type a partial name and press Enter to jump to the first matching ROM; Esc cancels and restores the current page and source status.
 - **C**: Toggle between 40-column and 80-column layouts when your MSX supports it (auto-detects 80-column capable machines and defaults to 80 columns unless forced otherwise).
+
+### Standard bottom rows
+
+- **Line 23** evenly distributes the gaps between list options. In 80 columns every footer label is enclosed in brackets: `[F1 FLASH]`, `[F2 SD CARD]`, `[F3 FILE HUNTER]`, `[F4 WIFI]`, and `[F5 HELP]`; this also applies to Help and detail-screen controls. The 40-column labels remain unbracketed and unchanged. Gaps differ by at most one character. The selected source stays highlighted while navigating, searching, or displaying messages, with exactly one inverted space before and after its complete label (including brackets in 80 columns). The bar reserves the final two screen columns.
+- **Line 24** centers the complete status text, beginning with `Page XX/YY` on every list. `F1` and `F2` add ` | Available: X.X MB`; `F3` adds ` | Listing: ROM` or ` | Listing: DSK`, then ` | Net: Online/Offline` when it fits. The microSD summary remains available after returning from ROM/DSK options. Unavailable capacity is reported as `Available: unknown`, not as zero.
+- ROM/DSK option screens show context-specific controls on line 23: Esc to go back, Left/Right to change a value, Up/Down to choose an option, and F5 for help. In 80 columns the hints expand to `[L/R Change value]`, `[U/D Select option]`, and `[ENTER Run]`. The player includes option selection, Enter action, and (in All/Random modes) `[N Next]` / `[P Previous]`; its six bracketed controls use the shorter `[U/D Options]` hint to fit. The 40-column player retains its existing compact hints. F1-F4 are not active on detail screens.
+- Search and rename input temporarily use line 24, left-aligned for typing. Esc restores the centered basic list status; F5 cancels the input and opens help. Help keeps the full F1-F5 bar on line 23 with F5 highlighted, and shows only the centered chip ID on line 24. F1/F2/F3 switch to their lists, F4 opens WiFi setup, and F5 or Esc returns to the previous screen, including from ROM/DSK details and the player.
 
 ### Folder navigation workflow
 
@@ -294,7 +327,7 @@ For the best experience with very large ROM collections, consider organizing ROM
 
 ## File Hunter browser
 
-Explorer includes an integrated File Hunter browser for PicoVerse 2350 cartridges fitted with an ESP-01 / ESP8266 module. The browser talks directly from the Pico firmware to the ESP module, queries the public File Hunter service, downloads the selected ROM or `.DSK` disk image into PSRAM, and then saves it as a `.ROM` or `.DSK` file in the root of the microSD card.
+Explorer includes an integrated File Hunter browser for PicoVerse 2350 cartridges fitted with an ESP-01 / ESP8266 module. The browser talks directly from the Pico firmware to the ESP module, queries the public File Hunter service, and streams the selected ROM or `.DSK` disk image directly into a temporary file in the microSD root. It does not buffer the whole download in PSRAM.
 
 The File Hunter integration is inspired by NataliaPC's MSX File Hunter Browser project and uses the public File Hunter catalog endpoint. See the external reference section near the end of this document for the upstream project link.
 
@@ -303,7 +336,7 @@ The File Hunter integration is inspired by NataliaPC's MSX File Hunter Browser p
 - Install an ESP-01 / ESP8266 module on the PicoVerse 2350 WiFi header.
 - Use ESP firmware compatible with the ESP8266P / memio command protocol used by PicoVerse.
 - Insert a FAT16, FAT32, or exFAT microSD browsing partition. File Hunter downloads are saved to the selected Explorer partition root.
-- If the card has not been mounted in the current session, press `F2` once to open the microSD list before downloading from File Hunter.
+- Explorer mounts the selected microSD browsing partition when the download starts; opening `F2` first is not required.
 - Configure WiFi from the Explorer menu if the ESP module has not already been configured for your network.
 
 ### Opening File Hunter
@@ -325,9 +358,7 @@ Each result row shows:
 
 In 40-column mode, long selected names slide horizontally while the cursor remains on the row. In 80-column mode, longer names fit directly in the wider row.
 
-The footer shows which catalog is listed after the page counter: "Page: 01/05  Listing: ROM" / "Listing: DSK" in 80-column mode, or "Page:01/05 ROM" / "Page:01/05 DSK" in 40-column mode.
-
-The network state appears in the lower-left status area as "Network: Online" / "Network: Offline" in 80-column mode or "Net: Online" / "Net: Offline" in 40-column mode. The standard command hints stay on the right side of the last line.
+Line 23 uses the same evenly spaced F-key options as the flash and microSD lists, with F3 highlighted throughout the File Hunter session. Line 24 shows `Page 01/05 | Listing: ROM` or `Page 01/05 | Listing: DSK`, followed by ` | Net: Online` or ` | Net: Offline` when it fits. Fetch/search messages use the same line; longer messages keep the page counter and temporarily replace the catalog/network summary.
 
 ### File Hunter controls
 
@@ -341,6 +372,7 @@ The network state appears in the lower-left status area as "Network: Online" / "
 - **F2**: Leave File Hunter and return to the microSD list.
 - **F3**: File Hunter is already selected; pressing it again has no effect.
 - **F4**: Open WiFi configuration.
+- **F5**: Show help, then return to the File Hunter list.
 - **C**: Toggle 40/80-column mode when supported.
 - **Esc**: Exit File Hunter and return to the normal Explorer menu.
 
@@ -359,11 +391,11 @@ Selecting a File Hunter result opens a detail screen showing:
 - Source: `FH`.
 - Action: Download.
 
-The footer shows only the detail actions (`[ESC - BACK] [ENTER - DOWNLOAD]`); the page counter and `F1`/`F2`/`F3` source shortcuts are hidden on this screen.
+Line 23 shows only the relevant detail controls: `ESC Back`, `ENTER Save`, and `F5 Help`. The page counter and F1-F4 source/configuration options are hidden and inactive on this screen.
 
-Press Enter or Space on the detail screen to download the selected file. Explorer first downloads it from File Hunter into PSRAM. The status line shows a `Download: NN%` counter from 0% to 100% while the download is active. After the download completes, the Pico saves the file from PSRAM to the root of the microSD card using the same filename shown by File Hunter, with a `.ROM` or `.DSK` extension.
+Press Enter or Space on the detail screen to download the selected file. Explorer streams received chunks directly to microSD, so ROM downloads are no longer limited to 4 MB or the PSRAM capacity. Line 24 shows `Download: NN%`, followed by `Finalizing microSD file...` while the completed file is closed and published with File Hunter's filename and a `.ROM` or `.DSK` extension.
 
-When the save succeeds, the detail screen shows "Saved to microSD. Press key." Press any key to return to the File Hunter list. The Explorer root microSD list is refreshed after a successful save, so returning to the microSD root with `F2` lets you search for and launch the newly downloaded file as a normal SD ROM or `.DSK` entry.
+When the save succeeds, line 24 shows "Saved to microSD. Press key." Failures and cleanup warnings appear in the same status area, not in the main detail screen. Press any key to return to the File Hunter list. The Explorer root microSD list is refreshed after a successful save, so returning to `F2` lets you find the downloaded file and run it through the normal PSRAM or confirmed flash-copy path.
 
 A `.DSK` download is saved only if Explorer can boot it: its size must be a multiple of 360 KB and at most 4 MB minus 1 KB (see [Running .DSK disk images](#running-dsk-disk-images)). Other disk images, such as 180 KB single-sided disks, are rejected after the download with "Unsupported DSK size" and are not written to the card.
 
@@ -372,6 +404,8 @@ A `.DSK` download is saved only if Explorer can boot it: its size must be a mult
 - File Hunter requires a working ESP-01 / ESP8266 module and WiFi connection.
 - A microSD card must be present because downloads are saved directly to the card root.
 - Downloaded files use File Hunter's filename. If a file with the same name already exists in the microSD root, it is replaced.
+- Downloads are independent of free cartridge flash space: a ROM can be saved to microSD even when it cannot currently be executed.
+- A `.part` file is published only after a complete transfer and successful close. Failed transfers leave an existing complete ROM untouched. Replacement temporarily preserves the old file as `.bak` and restores it if publication fails. A power interruption or failed cleanup can leave `.part`/`.bak` files; recover or remove those files on a PC before retrying a blocked replacement.
 - Download and save speed depends on WiFi quality, the ESP module firmware, File Hunter response time, and microSD card performance.
 - File Hunter entries are online catalog results, not flash entries. After saving, they become SD ROM or `.DSK` entries.
 - File Hunter lists each disk of a multi-disk game as a separate entry, so each disk is downloaded as its own `.DSK`. To swap disks with the number keys, join them into one `.DSK` on a PC (see [Running .DSK disk images](#running-dsk-disk-images)).
@@ -379,7 +413,7 @@ A `.DSK` download is saved only if Explorer can boot it: its size must be a mult
 ## Known limitations
 
 - Flash ROMs packaged by the tool must be in the root of the source folder (no subfolders in the flashing process, though SD folders are fully supported in the menu).
-- Embedded Sunrise Nextor entries require the matching storage device at runtime: FAT16 microSD partitions up to 4 GB for `-s1`/`-m1`/`-c1`/`-r1`/`-s3`, or USB mass storage for `-s2`/`-m2`/`-c2`/`-r2`.
+- Embedded Sunrise Nextor entries require the matching storage device at runtime: microSD for `-s1`/`-m1`/`-c1`/`-r1`/`-s3`/`-m3`, or USB mass storage for `-s2`/`-m2`/`-c2`/`-r2`. SD entries offer primary FAT16 partitions up to 4 GB or `WHOLE DISK` for native FAT12/FAT16 partition management and blank-card initialization; whole-card access retains the 128 GiB ATA addressing limit.
 - ROMs with unknown or unsupported mappers are skipped unless you force a mapper tag.
 - Very deep folder nesting (more than 10+ levels) is supported but may have perception of slowness due to repeated folder scans.
 - File Hunter browsing is unavailable without an ESP-01 / ESP8266 module, compatible ESP firmware, and a configured WiFi network.

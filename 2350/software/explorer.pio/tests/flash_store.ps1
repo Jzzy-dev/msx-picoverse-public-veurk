@@ -29,8 +29,10 @@ if ($cmake -notmatch 'PICO_FLASH_SIZE_BYTES=\$\{EXPLORER_FLASH_SIZE_BYTES\}') {
 }
 
 # Layout constants and the record type come straight from the firmware.
-$names = 'ROM_NAME_MAX|MAX_FLASH_RECORDS|ROM_RECORD_SIZE|MENU_ROM_SIZE|CONFIG_AREA_SIZE|WIFI_(?:CONFIG|BIOS)_(?:FLASH_OFFSET|ROM_SIZE)|(?:FMPAC|SFG)_BIOS_(?:FLASH_OFFSET|ROM_SIZE)|NEXTOR_DSK_(?:FLASH_OFFSET|ROM_SIZE)|SD_PATH_MAX|MIN_ROM_SIZE|RENAME_NAME_MAX'
+$names = 'ROM_NAME_MAX|MAX_FLASH_RECORDS|ROM_RECORD_SIZE|MENU_ROM_SIZE|CONFIG_AREA_SIZE|WIFI_(?:CONFIG|BIOS)_(?:FLASH_OFFSET|ROM_SIZE)|(?:FMPAC|SFG)_BIOS_(?:FLASH_OFFSET|ROM_SIZE)|NEXTOR_DSK_(?:FLASH_OFFSET|ROM_SIZE)|SD_PATH_MAX|MIN_ROM_SIZE|RENAME_NAME_MAX|SOURCE_SD_FLAG|FOLDER_FLAG|MP3_FLAG|SOURCE_MODE_FLASH|SOURCE_MODE_SD|MAPPER_DSK|MAPPER_ASCII16X_FR|SD_ROM_MAX_SIZE|AUDIO_PROFILE_MSX_MUSIC|FLASH_COPY_\w+|FLASH_JOB_YIELD_US|CTRL_\w+|FH_\w+|MP3_\w+|DATA_BASE_ADDR|DATA_BUFFER_SIZE'
 $types = (([regex]::Matches($firmware, "(?m)^#define (?:$names)\b[^\r\n]*") | ForEach-Object { $_.Value }) -join "`n") + "`n"
+$picoHeader = Get-Content (Join-Path $root "pico\explorer\explorer.h") -Raw
+$types += [regex]::Match($picoHeader, "(?m)^#define PSRAM_TOTAL_SIZE\b[^\r\n]*").Value + "`n"
 $record = [regex]::Match($firmware, "typedef struct \{[^}]*\}\s*ROMRecord;")
 if (!$record.Success) { throw "Cannot find ROMRecord" }
 $types += $record.Value + "`n"
@@ -42,11 +44,17 @@ $code = $block.Value
 foreach ($name in @("write_u32_le", "trim_name_copy", "flash_store_align_up", "flash_store_base",
     "flash_store_config_base", "flash_store_serialize", "flash_store_load_records", "flash_names_equal",
     "flash_store_find_entry",
-    "flash_store_patch", "flash_store_compact", "flash_store_find_space", "flash_store_tombstone",
-    "flash_store_append", "flash_store_delete_entry", "flash_job_write_step", "flash_job_commit",
-    "flash_job_finish", "flash_store_rename_entry")) {
+    "flash_store_patch", "flash_store_compact", "flash_store_next_gap", "flash_store_find_space",
+    "flash_store_update_space", "flash_store_tombstone",
+    "flash_store_append", "flash_store_delete_entry", "process_copy_to_flash_request", "flash_job_start",
+    "flash_job_match_step", "flash_job_write_step", "flash_job_service_msx_reads",
+    "flash_job_mapper_reader", "flash_job_detect_mapper", "flash_job_commit",
+    "flash_job_finish", "resolve_flash_copy_match", "flash_store_rename_entry",
+    "pio_build_token", "menu_read_byte")) {
     $code += (Get-CFunction $firmware $name) + "`n"
 }
+$code += "static uint32_t flash_job_resume_us;`n"
+$code += (Get-CFunction $firmware "flash_job_background_work") + "`n"
 
 # Structural guards for the parts that cannot run on the host.
 $op = [regex]::Match($firmware, "(?s)static void __no_inline_not_in_flash_func\(flash_store_op\)\(.*?\n\}")
@@ -57,6 +65,14 @@ foreach ($pattern in @("save_and_disable_interrupts\(\)", "qmi_hw->m\[0\]\.timin
 if ((Get-CFunction $firmware "flash_job_start") -notmatch "quiesce_mp3_core1_before_sd_work\(\)") {
     throw "flash_job_start must stop Core 1 before programming the flash"
 }
+if ((Get-CFunction $firmware "flash_job_start") -match "detect_rom_type_from_file|mapper_detect_stream" -or
+    (Get-CFunction $firmware "flash_job_detect_mapper") -notmatch "XIP_BASE \+ flash_job_addr" -or
+    (Get-CFunction $firmware "flash_job_detect_mapper") -notmatch "mapper_detect_stream") {
+    throw "Mapper detection must run on the copied flash image, not pre-read the SD ROM"
+}
+if ((Get-CFunction $firmware "flash_job_mapper_reader") -notmatch "flash_job_service_msx_reads\(\)") {
+    throw "Flash mapper detection must keep answering MSX menu reads"
+}
 if ((Get-CFunction $firmware "core1_bg_work") -notmatch "(?s)^[^\n]*\n\s*if \(flash_job_state != FLASH_JOB_IDLE\)") {
     throw "core1_bg_work must give the flash copy job priority over other background work"
 }
@@ -64,6 +80,9 @@ if ((Get-CFunction $firmware "core1_bg_work") -notmatch "(?s)^[^\n]*\n\s*if \(fl
 # cannot draw the progress until the copy ends.
 if ((Get-CFunction $firmware "flash_job_background_work") -notmatch "(?s)time_us_32\(\) - flash_job_resume_us\) < 0\).*flash_job_resume_us = time_us_32\(\) \+ FLASH_JOB_YIELD_US;") {
     throw "flash_job_background_work must yield the bus to the MSX between steps"
+}
+if ($firmware -notmatch "static void __noinline flash_job_background_work\(void\)") {
+    throw "The flash job must not be inlined into the SRAM-resident menu loop"
 }
 $menuLoader = [regex]::Match($firmware, "(?s)int __no_inline_not_in_flash_func\(loadrom_msx_menu\)\(uint32_t offset\)\s*\{.*?\r?\n\}\r?\n")
 if (!$menuLoader.Success -or $menuLoader.Value -notmatch "flash_store_load_records\(\)") {
@@ -87,7 +106,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $work "flash-store-types.h"), $types)
     [IO.File]::WriteAllText((Join-Path $work "flash-store-production.h"), $code)
     $exe = Join-Path $work "flash-store-test.exe"
-    & $CC -std=c11 -Wall -Wextra -Werror "-DPICO_FLASH_SIZE_BYTES=$($flashSize.Groups[1].Value)u" -I $work (Join-Path $PSScriptRoot "flash_store.c") -o $exe
+    & $CC -std=c11 -Wall -Wextra -Werror "-DPICO_FLASH_SIZE_BYTES=$($flashSize.Groups[1].Value)u" -I $work -I (Join-Path $root "pico\explorer") (Join-Path $PSScriptRoot "flash_store.c") -o $exe
     if ($LASTEXITCODE -ne 0) { throw "Flash store host test compilation failed" }
 
     $creator = Join-Path $root "tool\dist\explorer.exe"

@@ -16,8 +16,6 @@
 #include "explorer_fh.h"
 
 #define EXPLORER_FH_NAME_MAX MAX_FILE_NAME_LENGTH
-#define EXPLORER_FH_STATUS_READY CTRL_MAGIC
-#define EXPLORER_FH_STATUS_BUSY 0x5A
 #define EXPLORER_FH_RESULT_SAVING 0x02
 #define EXPLORER_FH_MAX_QUERY 24
 #define EXPLORER_FH_FLAG_MESSAGE 0x80
@@ -33,18 +31,17 @@ static unsigned int fh_total_pages;
 static unsigned int fh_current_index;
 static unsigned int fh_total_files;
 static ExplorerFHRecord fh_records[FILES_PER_PAGE];
-static char fh_status_right[CTRL_FH_STATUS_TEXT_SIZE];
+// Preserve download results before another command reuses the protocol window.
+static char fh_status_text[CTRL_FH_STATUS_TEXT_SIZE];
 static unsigned char fh_message_row;
 static unsigned char fh_net_state;
 
 static void fh_redraw(void);
 static void fh_read_status_text(void);
 static void fh_show_detail(unsigned int index);
-static void fh_draw_status_left(const char *text);
 static void fh_update_message_row_text(void);
 static void fh_wait_ready_status(const char *text);
 static void fh_refresh_network_status(unsigned char force);
-static unsigned char fh_record_fits_sd_cache(const ExplorerFHRecord *record);
 
 static unsigned int fh_read_u16(unsigned int addr)
 {
@@ -81,46 +78,11 @@ static void fh_wait_ready_status(const char *text)
     unsigned char blink_state = 1;
     unsigned char blink_tick = 0;
 
-    fh_draw_status_left(text);
+    menu_ui_print_last_line_text(text);
     while (Peek(CTRL_CMD) != 0) {
         delay_ms(20);
         menu_ui_blink_last_line(text, &blink_state, &blink_tick, 4);
     }
-}
-
-static void fh_draw_status_left(const char *text)
-{
-    menu_ui_print_last_line_text(text);
-}
-
-static void fh_clear_line(unsigned char row)
-{
-    unsigned char i;
-    unsigned char width = menu_ui_row_width();
-    Locate(0, row);
-    for (i = 0; i < width; i++) {
-        PrintChar(' ');
-    }
-}
-
-static void fh_draw_detail_status(const char *text)
-{
-    fh_clear_line(7);
-    Locate(0, 7);
-    if (text) {
-        if (use_80_columns) {
-            printf("%.79s", text);
-        } else {
-            printf("%.39s", text);
-        }
-    }
-}
-
-static void fh_draw_detail_progress(unsigned int percent)
-{
-    fh_clear_line(7);
-    Locate(0, 7);
-    printf("Download: %u%%", percent);
 }
 
 static void fh_wait_download_ready(void)
@@ -132,30 +94,18 @@ static void fh_wait_download_ready(void)
         if (Peek(CTRL_FH_RESULT) == EXPLORER_FH_RESULT_SAVING) {
             if (!saving_visible) {
                 saving_visible = 1;
-                fh_draw_detail_status("Saving to microSD card...");
+                menu_ui_print_last_line_text("Finalizing microSD file...");
             }
         } else {
             unsigned int percent = fh_read_u16(CTRL_FH_PROGRESS_L);
             if (percent != last_percent) {
                 last_percent = percent;
-                fh_draw_detail_progress(percent);
+                menu_ui_print_progress("Download", percent);
             }
         }
         delay_ms(20);
     }
 
-    while (Peek(CTRL_FH_RESULT) == EXPLORER_FH_RESULT_SAVING) {
-        if (!saving_visible) {
-            saving_visible = 1;
-            fh_draw_detail_status("Saving to microSD card...");
-        }
-        delay_ms(100);
-    }
-}
-
-static unsigned char fh_record_fits_sd_cache(const ExplorerFHRecord *record)
-{
-    return record && record->size_kb <= SD_ROM_MAX_SIZE_KB;
 }
 
 static void fh_read_page_records(void)
@@ -218,7 +168,7 @@ static void fh_search(const char *query, const char *status_text)
 static void fh_download(unsigned int index)
 {
     fh_write_selected_index(index);
-    fh_draw_detail_progress(0);
+    menu_ui_print_progress("Download", 0);
     Poke(CTRL_CMD, CMD_FH_DOWNLOAD);
     fh_wait_download_ready();
 }
@@ -226,14 +176,14 @@ static void fh_download(unsigned int index)
 static void fh_read_status_text(void)
 {
     unsigned int i;
-    for (i = 0; i + 1 < sizeof(fh_status_right); i++) {
+    for (i = 0; i + 1 < sizeof(fh_status_text); i++) {
         char ch = *((char *)(CTRL_FH_STATUS_TEXT_BASE + i));
-        fh_status_right[i] = ch;
+        fh_status_text[i] = ch;
         if (ch == '\0') {
             return;
         }
     }
-    fh_status_right[sizeof(fh_status_right) - 1] = '\0';
+    fh_status_text[sizeof(fh_status_text) - 1] = '\0';
 }
 
 static void fh_size_text(unsigned int size_kb, char *out)
@@ -328,8 +278,7 @@ static void fh_refresh_network_status(unsigned char force)
         return;
     }
     fh_net_state = state;
-    fh_draw_status_left(menu_ui_status_text(state ? "Net: Online" : "Net: Offline",
-                                            state ? "Network: Online" : "Network: Offline"));
+    menu_ui_clear_last_line();
     fh_position_cursor_on_selection();
 }
 
@@ -403,19 +352,9 @@ static char fh_wait_key_with_scroll(void)
 
 static void fh_render_frame(void)
 {
-    unsigned int saved_page = currentPage;
-    unsigned int saved_total = totalPages;
-    unsigned char saved_selection = menu_shortcut_selection;
-
     currentPage = (int)(fh_current_page + 1);
     totalPages = (int)fh_total_pages;
-    menu_shortcut_selection = MENU_SHORTCUT_FILEHUNTER;
-    frame_rendered = 0;
     menu_ui_render_menu_frame();
-
-    currentPage = (int)saved_page;
-    totalPages = (int)saved_total;
-    menu_shortcut_selection = saved_selection;
 }
 
 static void fh_redraw(void)
@@ -427,19 +366,14 @@ static void fh_redraw(void)
 
 static void fh_render_detail_footer(void)
 {
-    /* Row 22 still holds the list footer (page counter and F1/F2/F3 source
-       shortcuts); clear it so only the detail actions remain. */
-    menu_ui_clear_rows(22, 23);
-    Locate(0, 22);
-    printf("[ESC - BACK] [ENTER - DOWNLOAD]");
-
+    static const char options[] = "ESC Back\0ENTER Save\0F5 Help";
+    menu_ui_render_footer(options, 3, MENU_SHORTCUT_NONE);
 }
 
 static void fh_render_detail_screen(const ExplorerFHRecord *record)
 {
     char name[MAX_FILE_NAME_LENGTH + 1];
     char size_text[8];
-    unsigned char can_download = fh_record_fits_sd_cache(record);
 
     menu_ui_render_detail_frame();
 
@@ -458,12 +392,8 @@ static void fh_render_detail_screen(const ExplorerFHRecord *record)
     Locate(0, 5);
     printf(" Source: FH");
 
-    menu_ui_render_selectable_line(9, can_download ? "Action: Download" : "Action: Too large", 1);
-    if (can_download) {
-        fh_draw_detail_status("");
-    } else {
-        fh_draw_detail_status("File exceeds 4MB limit!");
-    }
+    menu_ui_render_selectable_line(9, "Action: Download", 1);
+    menu_ui_print_last_line_text("");
     fh_render_detail_footer();
 }
 
@@ -490,12 +420,11 @@ static void fh_show_detail(unsigned int index)
             fh_redraw();
             return;
         }
-        if (key == MENU_KEY_F4_CONFIG) {
-            launch_wifi_config();
-            return;
-        }
-        if (key == 'h' || key == 'H') {
+        if (key == MENU_KEY_F5_HELP) {
             helpMenu();
+            if (menu_pending_key) {
+                return;
+            }
             fh_render_detail_screen(record);
         }
         if (key == 'c' || key == 'C') {
@@ -504,23 +433,14 @@ static void fh_show_detail(unsigned int index)
             }
         }
         if (key == 13 || key == ' ') {
-            if (!fh_record_fits_sd_cache(record)) {
-                fh_draw_detail_status("Download blocked: exceeds 4MB limit!");
-                continue;
-            }
-            fh_render_detail_screen(record);
             fh_download(index);
-            if (Peek(CTRL_FH_RESULT)) {
-                fh_draw_detail_status("Saved to microSD. Press key.");
+            fh_read_status_text();
+            if (fh_status_text[0] != '\0') {
+                menu_ui_wait_key_with_blinking_status(fh_status_text);
             } else {
-                fh_read_status_text();
-                if (fh_status_right[0] != '\0') {
-                    fh_draw_detail_status(fh_status_right);
-                } else {
-                    fh_draw_detail_status("Download or save failed. Press key.");
-                }
+                menu_ui_wait_key_with_blinking_status(Peek(CTRL_FH_RESULT) ?
+                    "Saved to microSD. Press key." : "Download/save failed. Press key.");
             }
-            (void)bios_chget_quiet();
             fh_redraw();
             return;
         }
@@ -541,9 +461,10 @@ unsigned char explorer_fh_run(void)
     fh_current_index = 0;
     fh_total_files = 0;
     fh_message_row = 0;
+    menu_shortcut_selection = MENU_SHORTCUT_FILEHUNTER;
     active_query[0] = '\0';
     memset(fh_records, 0, sizeof(fh_records));
-    memset(fh_status_right, 0, sizeof(fh_status_right));
+    memset(fh_status_text, 0, sizeof(fh_status_text));
 
     fh_render_frame();
     // Empty query = File Hunter latest releases. Issued as a search so the Pico
@@ -553,7 +474,11 @@ unsigned char explorer_fh_run(void)
     fh_redraw();
 
     while (1) {
-        key = fh_wait_key_with_scroll();
+        key = menu_pending_key;
+        menu_pending_key = 0;
+        if (!key) {
+            key = fh_wait_key_with_scroll();
+        }
         switch (key) {
             case '1':
                 frame_rendered = 0;
@@ -562,12 +487,14 @@ unsigned char explorer_fh_run(void)
                 frame_rendered = 0;
                 return SOURCE_MODE_SD;
             case '3':
+                if (!frame_rendered) {
+                    fh_redraw();
+                }
                 break;
             case MENU_KEY_F4_CONFIG:
                 launch_wifi_config();
                 break;
-            case 'h':
-            case 'H':
+            case MENU_KEY_F5_HELP:
                 helpMenu();
                 fh_redraw();
                 break;
@@ -598,13 +525,21 @@ unsigned char explorer_fh_run(void)
                 }
                 break;
             case '/':
+            {
+                int search_result;
                 search_query[0] = '\0';
-                if (menu_ui_read_line("Search: ", search_query, EXPLORER_FH_MAX_QUERY) > 0 && search_query[0]) {
+                search_result = menu_ui_read_line("Search: ", search_query, EXPLORER_FH_MAX_QUERY);
+                if (search_result == -1) {
+                    launch_wifi_config();
+                } else if (search_result == -2) {
+                    helpMenu();
+                } else if (search_result > 0 && search_query[0]) {
                     strcpy(active_query, search_query);
                     fh_search(active_query, search_status);
                 }
                 fh_redraw();
                 break;
+            }
             case 't':
             case 'T':
                 // Switch between the ROM and DSK catalogs, keeping the current search.
@@ -627,7 +562,6 @@ unsigned char explorer_fh_run(void)
                 break;
             case 27:
                 frame_rendered = 0;
-                menu_ui_render_menu_frame();
                 return SOURCE_MODE_ALL;
         }
     }

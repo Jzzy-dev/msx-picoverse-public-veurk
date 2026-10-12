@@ -12,6 +12,7 @@ You point openMSX at the same `.uf2` file you would flash to the PicoVerse 2350.
 - **microSD list (F2):** a folder on your PC plays the microSD card. Its folders, `.ROM`, `.DSK`, `.MP3` and `.WAV` files are listed like on the cartridge.
 - **Search, paging, 40/80 columns, help and the ROM detail screen** with mapper detection and the per-ROM options (mapper, audio profile, PSG mirror, volume, 1MB mapper for `.DSK`), saved to `.PVC` files on the emulated microSD card.
 - **Copy to flash (F), rename (R) and delete (D)**, including the `Wait NN%` progress of the copy. Flash changes are kept in an editable copy of the flash image, so they survive openMSX restarts, like the real flash.
+- **File Hunter (F3):** browse the online catalog of ROM and DSK files (`T` switches between them, `/` searches) and download them to the emulated microSD folder, with the real `Download: NN%` progress. The PC's network connection replaces the ESP-01 WiFi module.
 - **Last selection:** the menu reopens on the entry you ran last (`PICOVERSE.PVL`).
 - **Starting entries** with the matching openMSX hardware: the game mappers, the audio profiles (SCC/SCC+ in the game, external SCC/SCC+, MSX-MUSIC, Yamaha SFG-05/SFG-01, Dual PSG), the Nextor entries with a hard disk image, and `.DSK` images through the hidden Nextor 2.1.4 kernel of the UF2.
 
@@ -87,7 +88,13 @@ Restart openMSX afterwards. **PicoVerse 2350 Explorer** then shows up in the ext
    ```
    Without it, the script uses an empty `picoverse2350/sd` folder in the openMSX persistent folder.
 3. Open **Media > Cartridge Slot A** and choose **ROM image**. Browse to your Explorer `.uf2` file (switch the file type filter to **All files (\*)**, because openMSX only lists ROM files by default) and insert it.
-4. The MSX resets and shows the Explorer menu. Use it as on the cartridge: cursor keys, F1 (flash), F2 (microSD), Enter (detail screen), Space (run), `/` (search), `H` (help).
+4. The MSX resets and shows the Explorer menu. Use it as on the cartridge: cursor keys, F1 (flash), F2 (microSD), Enter (detail screen), Space (run), `/` (search), F5 (help).
+
+The menu evenly distributes the gaps between F1-F5 options on line 23, with the selected source highlighted and one inverted space on each side of its label. Detail screens replace them with relevant controls and F5 Help; the 80-column ROM/player hints include more detailed option/action descriptions. F4 WiFi is available on lists and Help, not directly on detail screens. Line 24 centers its complete text and separates each item with ` | `: `Page XX/YY | Available: X.X MB | message` for flash/microSD, or the File Hunter ROM/DSK catalog and network state. Longer messages keep the page counter while temporarily replacing source information. Search input remains left-aligned on line 24; Esc restores the centered status.
+
+The F2 summary shows the free space of the PC volume that holds the microSD folder, as the cartridge does for the card: megabytes to one decimal place, rounded down (for example `Available: 161245.3 MB`). The script asks the operating system (`dir` on Windows, `df -Pk` elsewhere) and caches the answer for a few seconds; if the volume can't be read, the summary falls back to `Available: unknown`.
+
+Help retains all F1-F5 options with F5 highlighted and only the centered chip ID on line 24. Its source/configuration keys are active even when Help was opened from a detail screen. The compact 40-column bar stays inside the usable 38 columns.
 
 Reset the MSX to go back to the menu. From now on, inserting the **PicoVerse 2350 Explorer** extension loads the same UF2.
 
@@ -127,7 +134,7 @@ A folder on your PC plays the microSD card. It is chosen, in this order, by the 
 Like the firmware, the menu lists:
 
 - folders (except `System Volume Information`), sorted by name, with `..` in subfolders;
-- `.ROM` files from 8KB to 4MB, with the mapper from a filename tag (`Game.Konami.ROM`) or, when needed, from the detector (SHA1 database, then heuristics, the same as the firmware);
+- `.ROM` files from 8KB up to the 32-bit menu size limit, with the mapper from a filename tag (`Game.Konami.ROM`) or, when needed, from the detector (SHA1 database, then heuristics, the same as the firmware);
 - `.DSK` files whose size is a multiple of 360KB, up to 4MB;
 - `.MP3` and `.WAV` files (listed, but not played, see section 13);
 - in the root folder, the flash entries too (only shown in the combined list).
@@ -141,6 +148,21 @@ The script writes to that folder exactly like the firmware writes to the card, s
 | `/PICOVERSE.PVL` | An entry is started (last selection). |
 
 Renaming (R) and deleting (D) a microSD entry renames or deletes the file in the folder, with its `.PVC`.
+
+Selecting a ROM above 4MB with Enter or Space immediately offers the menu's line-24 `Y/N` flash-copy confirmation, before mapper detection or the options screen, just like the cartridge. After confirmation, an identical, same-name installed image is reused or a new persistent `F1` entry is created. Explorer switches to `F1` and opens that exact flash entry's ROM options screen, even when sorting places it on another page. Choose the options and select Run to execute; copying alone does not boot the ROM, and Esc keeps the copy and returns to the flash list. New copies inherit the SD options, while reused entries retain their existing flash options; edits and last selection use the actual flash identity. No suitable contiguous block or a full list reports the cleanup message; deleting flash entries with `D` makes the freed space reusable. The centered basic `F1` status is `Page XX/YY | Available: X.X MB` in both column modes; contiguous-space checks remain internal.
+
+### 8.1 File Hunter (F3): download ROMs and DSKs
+
+Press **F3** to browse [File Hunter](https://msxpico.file-hunter.com), the online catalog the cartridge reaches through its ESP-01 WiFi module. In openMSX the same requests are made with your PC's network connection, so there is no WiFi or serial emulation and nothing to configure: if the PC is online, the menu shows `Net: Online`.
+
+- The list opens on the **latest releases**. **T** switches between the **ROM** and **DSK** catalogs (the line-24 status shows `Listing: ROM` or `Listing: DSK`), **/** searches by name (the search is kept when you press **T**), and the cursor keys, paging and 40/80 column keys work as on the cartridge.
+- **Enter** or **Space** opens the detail screen and **Enter** downloads the file. The menu shows `Download: NN%` while the data arrives (the emulated MSX keeps running), then `Saved to microSD. Press key.`
+- The file is saved in the **root of the emulated microSD folder** (section 8) as `<name>.ROM` or `<name>.DSK`, like on the card: characters Windows and FAT don't allow become `_`, trailing spaces and dots are dropped, and an existing file with the same name is replaced only once the new download is complete (it is written as `<name>.part` first). The file gets the date File Hunter reports for it (`Last-Modified`, else the server's clock). Press **F2** to see it, and run it from there. The `Available` space of the F2 list is updated.
+- A `.DSK` must be a 360KB-multiple image of at most 4MB to be accepted, like the cartridge.
+- A failed or interrupted download leaves no file and reports the reason on the status line, using the firmware's messages where they exist: `Download failed: ...` (`timeout`, `closed`, `network`, `HTTP 404`, `invalid size`, `incomplete`, `no metadata`), `Download exceeds file size`, `Bad DSK size`, `microSD full` and `No microSD card`. When File Hunter can't be reached, the list shows `Offline or File Hunter unavailable` and `Net: Offline`.
+- Resetting the MSX or switching machine in the middle of a download cancels it and deletes the partial file.
+
+Only plain `http://` is supported (File Hunter's own address works; `https` redirects are not). The script uses openMSX's non-blocking sockets from realtime events, so the emulator does not freeze while downloading; run openMSX at normal speed (`set throttle on`, the default) if you want the progress to be visible, as a fast download can finish in less than a second.
 
 ## 9. Copy to flash, rename and delete
 
@@ -172,7 +194,7 @@ The selected entry is started like the firmware does it: the script swaps the ca
 
 ## 11. Hard disk image of the Nextor entries
 
-On the cartridge, the Nextor SD entries use a partition of the microSD card and the USB entries use a USB drive. In openMSX, both use a hard disk image, chosen in this order: the `-hd` option of the last `picoverse2350 insert`, setting `picoverse2350_hd` (read every time a Nextor entry boots), or `persistent/picoverse2350/hd.dsk` (created empty, 100MB, the first time).
+On the cartridge, Nextor SD entries can expose either a primary FAT16 partition or the whole microSD card through `SD Part: WHOLE DISK`; USB entries use a USB drive. In openMSX, both use a hard disk image, chosen in this order: the `-hd` option of the last `picoverse2350 insert`, setting `picoverse2350_hd` (read every time a Nextor entry boots), or `persistent/picoverse2350/hd.dsk` (created empty, 100MB, the first time).
 
 ```
 set picoverse2350_hd C:/MSX/nextor.dsk
@@ -181,6 +203,8 @@ set picoverse2350_hd C:/MSX/nextor.dsk
 A new empty image needs a partition: in Nextor BASIC, `CALL FDISK`. To create an image and copy a PC folder into it, use the openMSX `diskmanipulator`, as described in [MSX PicoVerse 2040 — MultiROM in openMSX](./msx-picoverse-2040-openmsx.md) (section 9.3); the steps are the same.
 
 The microSD folder (section 8) and the Nextor image are separate: the menu does not see the files inside the image, and Nextor does not see the folder.
+
+The script models the `SD Part` label/`WHOLE DISK` choices and saves/restores the selection in the existing `.PVC` file. It still presents the entire hard disk image to Nextor in either case; real-card partition-window isolation and multi-partition Explorer browsing are not simulated.
 
 ## 12. Console command and settings
 
@@ -204,7 +228,7 @@ picoverse2350 eject             remove the cartridge
 ## 13. Limitations
 
 - **MP3/WAV playback** is not emulated: the files are listed and the player reports an error.
-- **File Hunter and WiFi** are not emulated: the menu reports the WiFi module offline, and the WiFi setup option resets to the menu.
+- **WiFi setup (F4)** is not emulated: it resets to the menu. File Hunter (F3) works through the PC's network instead of the ESP-01 module, see section 8.1; only `http://` is supported.
 - **VDP frequency (50/60 Hz) and CPU mode** options are saved, but not applied to the emulated MSX. Use the openMSX settings instead. The audio volume and PSG mirror options have no effect either.
 - **Multi-disk `.DSK` images** (several disks joined into one file) boot the first disk only; the GRAPH + key disk switching is not emulated.
 - **ASC16X-FR** ROMs run as ASCII16-X; FlashROM saves (`.FLA`) are not emulated.
@@ -217,11 +241,11 @@ picoverse2350 eject             remove the cartridge
 
 ### 14.1 The cartridge window
 
-The PicoVerse_2350 extension maps a 32KB RAM device at 0x4000-0xBFFF. The script loads the menu ROM of the UF2 into it and serves the Pico control area of `msx/src/menu.h` there: the page buffer at 0xB900-0xBF7F, the ROM select register at 0xBF7F, the partition info / status text at 0xBF80, `CTRL_VDP_FREQ`..`CTRL_DISK_ACT` at 0xBFA0, the chip ID at 0xBFAF, the query buffer at 0xBFC0, the MP3 registers at 0xBFE0 and the control registers at 0xBFF0.
+The PicoVerse_2350 extension maps a 32KB RAM device at 0x4000-0xBFFF. The script loads the menu ROM of the UF2 into it and serves the Pico control area of `msx/src/menu.h` there: the page buffer at 0xB900-0xBF7F, the ROM select register at 0xBF7F, the partition info / status text at 0xBF80, `CTRL_VDP_FREQ`..`CTRL_DISK_ACT` at 0xBFA0, the 16-bit free/largest flash-capacity words at 0xBFA4/0xBFA6, the chip ID at 0xBFAF, the query buffer at 0xBFC0, the MP3 registers at 0xBFE0 and the control registers at 0xBFF0.
 
 A write watchpoint on 0x4000-0xBFFF (only while the cartridge is selected in that page) runs `handle_menu_write_explorer()`'s logic for every MSX write: query and rename buffers, commands (`CTRL_CMD`), page requests, option registers and the ROM select register. The script answers synchronously, then puts back the byte the Pico serves at the written address. The MSX therefore never sees RAM in the window, which matters because the BIOS RAM probe at boot writes to the top of page 2. Writes made by BIOS code (PC below 0x4000) are only restored, never executed as commands.
 
-The commands follow the firmware: the paged record list (`PVEX` header, record table, string pool, TLV records), the filter and find-first search, source switching, folders, mapper detection and override, `.PVC` load/save, quick run, last selection, partition cycling, delete, copy to flash and rename. The copy runs in steps of 0.1 s of emulated time and reports its percentage in `CTRL_MAPPER`.
+The commands follow the firmware: the paged record list (`PVEX` header, record table, string pool, TLV records), the filter and find-first search, source switching, folders, mapper detection and override, `.PVC` load/save, quick run, last selection, partition cycling, delete, copy to flash, copy/reuse and select the flash ROM (`0x10`) and rename. Copy progress is simulated in 0.1 s steps, not used as a cartridge speed benchmark. The image is written and verified first; mapper validation then uses the copied flash bytes, with `CTRL_MAPPER = 0x7F` showing `Mapper...`. Saved/selected mapper overrides and filename tags still take precedence; unknown images use the SHA1/database and heuristic detector through a temporary copy of the flash bytes, removed after detection. Unsupported mappers leave no new entry. Command `0x10` stays busy until the refreshed flash list is ready, then reports the exact selected entry through `CTRL_MATCH` with `CTRL_ACK = 0xA5`; it does not write the ROM-select register or execute a reset.
 
 ### 14.2 UF2 decoding and the flash copy
 
@@ -235,6 +259,14 @@ When the menu writes the ROM select register, the script takes the record (using
 
 Any reset, except the one issued to start an entry, a power cycle, or restarting openMSX with an entry in the slot (restored setup) brings back the menu. After a machine switch or a savestate load, the script re-attaches to the menu if it is in a slot, or lets the running entry continue until the next reset.
 
+### 14.5 File Hunter
+
+The File Hunter commands of the menu (`CMD_FH_SEARCH` 0x42, `CMD_FH_LIST_PAGE` 0x40, `CMD_FH_DOWNLOAD` 0x41 and `CMD_FH_WIFI_STATUS` 0x43) are answered like `handle_menu_fh_command()` does. While the File Hunter window is active the control registers change meaning: `CTRL_COUNT` is the number of results, `CTRL_MAPPER`/`CTRL_ACK` the download progress, `CTRL_AUDIO` the result (0 = failed, 1 = ok), 0xBF80 holds the status text shown after a download, and the page buffer holds 74-byte records (name, flags, size in KB). Leaving File Hunter (F1/F2/Esc) returns the window to the normal lists.
+
+The requests are the firmware's: `/new-pico.php?base=1BA0&type=<rom|dsk>&download=` for the latest releases and `/picoverse.php?base=1BA0&type=<rom|dsk>&msx=&char=<query>&download=` for a search, with `&download=<index>` to download an entry. The listing is a packed table (a 4-byte name pointer, the size in KB and a flag, ending with a zero pointer, followed by the names; at most 384 results and 256KB); a download starts with a metadata line (`type:,start:,size:<bytes>,name:<name>`) followed by the file, which is saved to a `.part` file and renamed when the size matches.
+
+The HTTP client (`http_get` and friends) is a small state machine over a non-blocking socket polled every 20ms of real time: connect (10s timeout), headers, redirects (up to 4), and `Content-Length`, chunked or until-close bodies, with the firmware's idle timeouts (3s for a listing, 20s for a download). Because the polling runs from realtime events and the command stays busy (`CTRL_CMD` is not cleared) until the transfer ends, the emulated MSX keeps running and polls the progress itself. A list-page request that follows a failed search is answered from the message row instead of connecting a second time. The ESP-01 serial protocol and WiFi setup are not involved.
+
 ## 15. Troubleshooting
 
 | Problem | Solution |
@@ -246,3 +278,6 @@ Any reset, except the one issued to start an entry, a power cycle, or restarting
 | Copies/renames/deletes are gone | The UF2 was rebuilt (a new flash copy is used), or `picoverse2350 reflash` was run. |
 | Nextor says it has no drive | The hard disk image has no partition: use `CALL FDISK`, or point `picoverse2350_hd` to a prepared image. |
 | A 2040 UF2 is selected | Use the PicoVerse 2040 add-on (`picoverse2040 insert`). |
+| File Hunter says `Offline or File Hunter unavailable` | The PC can't reach `msxpico.file-hunter.com` on port 80: check the internet connection, a firewall or proxy, and try again with **T** or **/**. |
+| A File Hunter download fails with `HTTP` or `network` | The server answered with an error or the connection dropped; nothing is saved. Try again. |
+| A downloaded file isn't in the F2 list | Press F2 again: downloads go to the root of the microSD folder (`picoverse2350 info` shows it). |

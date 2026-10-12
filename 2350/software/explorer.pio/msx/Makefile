@@ -1,5 +1,4 @@
 CC = sdcc
-ASM = sdasz80
 PLATFORM = -mz80
 HEXBIN = hex2bin
 
@@ -12,12 +11,8 @@ SRCDIR = src
 BINDIR = build
 DISDIR = dist
 
-# See startup files for the correct ADDR_CODE and ADDR_DATA
-# 16K ROM 4000H
-#CRT0 = $(FUSIONINC)\crt0_MSX816kROM4000.rel
-#ADDR_CODE = 0x4020
-#ADDR_DATA = 0xC000
-# 32K ROM 4000H
+# The 32 KB cartridge starts at 0x4000; startup occupies 0x4000..0x404F.
+# Writable menu state lives in MSX RAM, not the 0xB900 protocol window.
 CRT0 = $(FUSIONINC)/crt0_MSX32k_ROM4000.rel
 ADDR_CODE = 0x4050
 ADDR_DATA = 0xC000
@@ -30,11 +25,10 @@ CCFLAGS += $(DEBUGFLAGS)
 endif
 
 # Project metadata
-VERSION ?= v2.57
+VERSION ?= v2.58
 CCDEFS = -DEXPLORER_VERSION=\"$(VERSION)\"
 
 SOURCES = menu.c menu_state.c menu_ui.c menu_input.c screen_rom.c explorer_fh.c
-SRCS = $(addprefix $(SRCDIR)/,$(SOURCES))
 RELS = $(SOURCES:%.c=$(BINDIR)/%.rel)
 OUTFILE = menu.rom
 
@@ -52,9 +46,6 @@ $(BINDIR)/menu.ihx: $(RELS)
 
 $(BINDIR)/$(OUTFILE): $(BINDIR)/menu.ihx
 	@echo "Building $(OUTFILE)..."
-# 16K ROM 4000H
-#	@$(HEXBIN) -e ROM -l 0x4000 $(BINDIR)/$(OUTFILE) $< 
-# 32K ROM 4000H
 	@$(HEXBIN) -e ROM -s 0x4000 -l 0x8000 $(BINDIR)/$(OUTFILE) $<
 
 package:

@@ -1,6 +1,6 @@
 # MSX PicoVerse 2350 — Sunrise IDE Emulation for Nextor
 
-This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`, or combined with the mapper plus a separate 1MB MegaRAM subslot. The four non-Carnivore2/non-MegaRAM Sunrise modes can also optionally expose ESP-01 WiFi support when built with `-w` in either `loadrom.exe` or `multirom.exe`, or when enabled from the Explorer ROM details screen. Explorer uses the same `-s1`/`-m1`/`-c1`/`-r1` and `-s2`/`-m2`/`-c2`/`-r2` option names to add embedded Nextor SYSTEM entries alongside the ROMs scanned from the source folder, and `-a` / `--allnextor` adds all eight entries at once, plus the `-s3` Nextor 3 beta microSD entry.
+This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`, or combined with the mapper plus a separate 1MB MegaRAM subslot. The four non-Carnivore2/non-MegaRAM Sunrise modes can also optionally expose ESP-01 WiFi support when built with `-w` in either `loadrom.exe` or `multirom.exe`, or when enabled from the Explorer ROM details screen. Explorer uses the same `-s1`/`-m1`/`-c1`/`-r1` and `-s2`/`-m2`/`-c2`/`-r2` option names to add embedded Nextor SYSTEM entries alongside the ROMs scanned from the source folder, and `-a` / `--allnextor` adds all eight Nextor 2.1.4 entries at once, plus both Nextor 3.0.0 Beta 2 microSD entries (`-s3` and `-m3`).
 
 ## 1. Overview
 
@@ -27,6 +27,8 @@ All eight modes:
 
 The mapper variants (`-m1`, `-m2`) additionally provide 1MB of mapper RAM (64 × 16KB pages) in an expanded sub-slot architecture, with mapper page registers intercepted via PIO1.
 
+Explorer's `-m3` / `--mapper3-sd` uses the same mapper type 16 and 1MB PSRAM layout as `-m1`, but serves the Nextor 3.0.0 Beta 2 Sunrise IDE MasterOnly ROM already used by `-s3`. It appears as `Nextor Sunrise 3.0.0 Beta 2 + 1MB Mapper (SD)` and can be combined with the other Nextor options. `-a` therefore adds ten SYSTEM entries; the hidden `.DSK` boot kernel remains Nextor 2.1.4.
+
 The Carnivore2 RAM-mode variants (`-c1`, `-c2`) build on that same mapper architecture and add a Carnivore2-compatible control/register surface plus banked RAM windows so `SROM.COM /D15` can upload ROM images into PSRAM and launch them directly from RAM.
 
 The MegaRAM variants (`-r1`, `-r2`) also build on the mapper architecture. They add a separate 1MB MegaRAM in subslot 3, implemented as 128 x 8KB writable banks with four visible windows in `0x4000`-`0xBFFF`, Cartucho II-compatible `IN (0x8E/0x8F)` write enable, `OUT (0x8E/0x8F)` write disable, and bank-latch writes selected by address bits A14:A13. See the dedicated [MegaRAM implementation guide](./msx-picoverse-2350-megaram.md) for register-level details and historical notes.
@@ -35,11 +37,18 @@ The `-w` WiFi flag is available for `-s1`, `-m1`, `-s2`, and `-m2`. It does not 
 
 ### Nextor partition requirements and Explorer selection
 
-Nextor storage uses the Sunrise IDE block device and should be prepared with FAT16 partitions up to 4 GB for reliable MSX-DOS/Nextor access. FAT32 and exFAT partitions can be useful on the same microSD card for Explorer browsing, ROM loading, MP3/WAV playback, or File Hunter downloads, but they are not valid boot/storage partitions for Sunrise Nextor SYSTEM entries.
+Nextor storage uses the Sunrise IDE block device and supports FAT12/FAT16 volumes, with a 4 GB limit per FAT16 partition rather than per device. FAT32 and exFAT partitions can be useful on the same microSD card for Explorer browsing, ROM loading, MP3/WAV playback, or File Hunter downloads, but are not Nextor FAT12/FAT16 volumes.
 
-In Explorer, Sunrise Nextor SD SYSTEM entries scan the microSD partition table and offer only compatible FAT16 partitions up to 4 GB in the ROM detail screen. The `SD Part` option shows the filesystem volume label when available; use Left/Right to choose between compatible partitions. The selected partition is stored in that ROM's `.PVC` options file, so each Sunrise Nextor SYSTEM entry can remember its own FAT16 partition.
+In Explorer, all Sunrise Nextor SD SYSTEM entries, including Nextor 3 beta, offer **WHOLE DISK** alongside compatible primary FAT16 partitions up to 4 GB in the ROM detail screen's `SD Part` option. Use Left/Right to select:
+
+- **WHOLE DISK**: pass the card's physical sector count to ATA IDENTIFY and map each read/write LBA directly to the physical card, including the MBR at LBA zero. Nextor handles primary and logical partitions natively and can map several FAT12/FAT16 partitions concurrently using `CALL FDISK` / `MAPDRV`, without removing primary partitions. This uses the existing 28-bit ATA commands; cards larger than 128 GiB are not fully addressable.
+- **A filesystem volume label**: expose just the selected primary FAT16 partition, with its own sector count and an LBA offset to its start. Existing saved partition choices and the automatic first-compatible-partition default are preserved. With no compatible primary partition, the selection defaults to `WHOLE DISK`.
+
+The selection is stored in byte 7 of the ROM's existing `.PVC` options file: `0` retains automatic selection, `1`-`4` select primary partitions, and `5` selects the whole card. The file format and size are unchanged. A blank or otherwise unmountable card still offers `WHOLE DISK`, but options can only be saved when Explorer has a mountable browsing filesystem. LoadROM's existing raw-card exposure is unchanged.
 
 The normal Explorer `F2` microSD browser has different rules: it can cycle through supported FAT16, FAT32, and exFAT primary/logical partitions with `P`, saves the current browsing partition in `/PICOVERSE.PVC`, and displays the selected partition label plus free-space status. This partition selection is for Explorer file browsing and does not make FAT32/exFAT partitions valid for Nextor.
+
+Back up the card before using FDISK: repartitioning can destroy Explorer browsing volumes and their configuration files. Restart Explorer after changing the layout so it enumerates and remounts the new partitions.
 
 ## 2. Architecture
 

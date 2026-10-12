@@ -125,8 +125,8 @@ These are normal openMSX settings. Change them in the console (for example `set 
 
 openMSX only loads extensions from its `extensions` folders. When you boot a Nextor entry, the script therefore writes a standard openMSX extension to `share/extensions/PicoVerse2040_Nextor*/hardwareconfig.xml` in the user directory and inserts it into the PicoVerse slot:
 
-- **Nextor Sunrise IDE** (`-s`): a `SunriseIDE` device that uses the Nextor ROM taken from the UF2.
-- **Nextor Sunrise IDE + 192KB Mapper** (`-m`): the slot is expanded, like `loadrom_sunrise_mapper()` does. Sub-slot 0 holds the `SunriseIDE` device and sub-slot 1 a 192KB `MemoryMapper`.
+- **Sunrise IDE** entries (`-s`, `-s3`): a `SunriseIDE` device that uses the Nextor ROM taken from the UF2 for that entry (Nextor 2.1.4 or 3.0.0 Beta 2).
+- **Sunrise IDE + 192KB Mapper** entries (`-m`, `-m3`): the slot is expanded, like `loadrom_sunrise_mapper()` does. Sub-slot 0 holds the `SunriseIDE` device and sub-slot 1 a 192KB `MemoryMapper`.
 
 The USB thumb drive becomes the IDE master hard disk image, which is the `-hd` option or the `picoverse2040_hd` setting. If the image doesn't exist, openMSX creates a blank 100MB one. Partition and format it with `CALL FDISK` from Nextor BASIC, then copy the Nextor system files onto it, the same as a thumb drive. See [the MultiROM manual](../../../../docs/msx-picoverse-2040-multirom-tool-manual.en-us.md#using-nextor-with-the-picoverse-2040-cartridge). You can also point `-hd` at an existing disk image.
 

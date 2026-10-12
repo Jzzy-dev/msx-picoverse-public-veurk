@@ -10,6 +10,8 @@
 #include "menu_input.h"
 #include "menu.h"
 
+// CALSLT calls the main BIOS slot while Explorer ROM is mapped into page 1.
+// Preserve IX for SDCC and return the result in HL.
 unsigned char bios_chsns(void) __naked
 {
     __asm

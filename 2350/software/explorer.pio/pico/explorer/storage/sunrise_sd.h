@@ -28,11 +28,12 @@ typedef struct {
 #define SUNRISE_SD_FS_FAT16 1u
 #define SUNRISE_SD_FS_FAT32 2u
 #define SUNRISE_SD_FS_EXFAT 3u
+#define SD_PART_WHOLE_DISK 5u
 
 // Set the pointer to the shared IDE context (call before launching core 1).
 void sunrise_sd_set_ide_ctx(sunrise_ide_t *ide);
 
-// Select the primary FAT16 partition number to expose as the Sunrise IDE disk.
+// Select a primary FAT16 partition (1-4), the whole card (5), or automatic (0).
 void sunrise_sd_select_partition(uint8_t partition_number);
 
 // Enumerate MBR primary FAT16 partitions up to 4GB.

@@ -454,13 +454,41 @@ static uint32_t read_le32(const uint8_t *bytes) {
            ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
 }
 
-static void test_bios_image(const char *bios_path, const char *uf2_path, uint32_t firmware_size) {
-    uint8_t bios[FMPAC_BIOS_ROM_SIZE], block[512], records[9 * ROM_RECORD_SIZE];
-    FILE *file = fopen(bios_path, "rb");
+static void read_rom_file(const char *path, uint8_t *data, size_t size) {
+    FILE *file = fopen(path, "rb");
     assert(file);
-    assert(fread(bios, 1, sizeof(bios), file) == sizeof(bios));
+    assert(fread(data, 1, size, file) == size);
     assert(fgetc(file) == EOF && !ferror(file));
     assert(fclose(file) == 0);
+}
+
+static const struct {
+    uint8_t mapper;
+    const char *name;
+    unsigned kernel;
+} nextor_variants[] = {
+    {15, "Nextor Sunrise 2.1.4 (SD)", 0},
+    {16, "Nextor Sunrise 2.1.4 + 1MB Mapper (SD)", 0},
+    {17, "Nextor Sunrise 2.1.4 + 1MB Mapper + C2 RAM (SD)", 0},
+    {19, "Nextor Sunrise 2.1.4 + 1MB Mapper + 1MB MegaRAM (SD)", 0},
+    {10, "Nextor Sunrise 2.1.4 (USB)", 0},
+    {11, "Nextor Sunrise 2.1.4 + 1MB Mapper (USB)", 0},
+    {18, "Nextor Sunrise 2.1.4 + 1MB Mapper + C2 RAM (USB)", 0},
+    {20, "Nextor Sunrise 2.1.4 + 1MB Mapper + 1MB MegaRAM (USB)", 0},
+    {15, "Nextor Sunrise 3.0.0 Beta 2 (SD)", 1},
+    {16, "Nextor Sunrise 3.0.0 Beta 2 + 1MB Mapper (SD)", 1},
+};
+
+#define NEXTOR_VARIANT_COUNT (sizeof(nextor_variants) / sizeof(nextor_variants[0]))
+
+static void test_bios_image(const char *bios_path, const char *uf2_path, uint32_t firmware_size,
+                            const char *nextor_path, const char *nextor3_path,
+                            const unsigned *selected, unsigned selected_count) {
+    uint8_t bios[FMPAC_BIOS_ROM_SIZE], kernels[2][NEXTOR_DSK_ROM_SIZE], block[512];
+    uint8_t records[(NEXTOR_VARIANT_COUNT + 1) * ROM_RECORD_SIZE];
+    read_rom_file(bios_path, bios, sizeof(bios));
+    read_rom_file(nextor_path, kernels[0], sizeof(kernels[0]));
+    read_rom_file(nextor3_path, kernels[1], sizeof(kernels[1]));
 
     fmpac_state_t pac = {.control = 0x10};
     for (unsigned bank = 0; bank < 4; bank++) {
@@ -475,11 +503,16 @@ static void test_bios_image(const char *bios_path, const char *uf2_path, uint32_
         }
     }
 
-    file = fopen(uf2_path, "rb");
+    FILE *file = fopen(uf2_path, "rb");
     assert(file);
     const uint32_t bios_start = firmware_size + FMPAC_BIOS_FLASH_OFFSET;
     const uint32_t records_start = firmware_size + MENU_ROM_SIZE;
+    const uint32_t records_size = (selected_count + 1) * ROM_RECORD_SIZE;
+    const uint32_t hidden_nextor_start = firmware_size + NEXTOR_DSK_FLASH_OFFSET;
+    const uint32_t nextor_start = hidden_nextor_start + NEXTOR_DSK_ROM_SIZE;
+    const uint32_t nextor_size = selected_count * NEXTOR_DSK_ROM_SIZE;
     uint32_t bios_bytes = 0, record_bytes = 0, blocks = 0, total_blocks = 0;
+    uint32_t hidden_nextor_bytes = 0, nextor_bytes = 0;
     size_t count;
     while ((count = fread(block, 1, sizeof(block), file)) != 0) {
         assert(count == sizeof(block));
@@ -494,34 +527,56 @@ static void test_bios_image(const char *bios_path, const char *uf2_path, uint32_
                 assert(block[32 + i] == bios[offset - bios_start]);
                 bios_bytes++;
             }
-            if (offset >= records_start && offset < records_start + sizeof(records)) {
+            if (offset >= records_start && offset < records_start + records_size) {
                 records[offset - records_start] = block[32 + i];
                 record_bytes++;
+            }
+            if (offset >= hidden_nextor_start && offset < nextor_start) {
+                assert(block[32 + i] == kernels[0][offset - hidden_nextor_start]);
+                hidden_nextor_bytes++;
+            }
+            if (offset >= nextor_start && offset < nextor_start + nextor_size) {
+                uint32_t rom_offset = offset - nextor_start;
+                unsigned entry = rom_offset / NEXTOR_DSK_ROM_SIZE;
+                unsigned kernel = nextor_variants[selected[entry]].kernel;
+                assert(block[32 + i] == kernels[kernel][rom_offset % NEXTOR_DSK_ROM_SIZE]);
+                nextor_bytes++;
             }
         }
         blocks++;
     }
     assert(!ferror(file) && fclose(file) == 0);
-    assert(blocks == total_blocks && bios_bytes == sizeof(bios) && record_bytes == sizeof(records));
+    assert(blocks == total_blocks && bios_bytes == sizeof(bios) && record_bytes == records_size);
+    assert(hidden_nextor_bytes == NEXTOR_DSK_ROM_SIZE && nextor_bytes == nextor_size);
+    assert(total_blocks == (nextor_start + nextor_size + 255) / 256);
 
-    // --allnextor: eight Nextor 2.1.4 entries, then the Nextor 3 beta on microSD.
-    const uint8_t variants[] = {15, 16, 17, 19, 10, 11, 18, 20, 15};
     uint32_t nextor_offset = NEXTOR_DSK_FLASH_OFFSET + NEXTOR_DSK_ROM_SIZE;
-    for (unsigned i = 0; i < sizeof(variants); i++) {
+    for (unsigned i = 0; i < selected_count; i++) {
         const uint8_t *record = records + i * ROM_RECORD_SIZE;
-        assert(record[ROM_NAME_MAX] == variants[i]);
-        assert(read_le32(record + ROM_NAME_MAX + 1) == 128 * 1024);
+        assert(memchr(record, '\0', ROM_NAME_MAX));
+        assert(strcmp((const char *)record, nextor_variants[selected[i]].name) == 0);
+        assert(record[ROM_NAME_MAX] == nextor_variants[selected[i]].mapper);
+        assert(read_le32(record + ROM_NAME_MAX + 1) == NEXTOR_DSK_ROM_SIZE);
         assert(read_le32(record + ROM_NAME_MAX + 5) == nextor_offset);
-        nextor_offset += 128 * 1024;
+        nextor_offset += NEXTOR_DSK_ROM_SIZE;
     }
-    puts("PASS: real BIOS AB/PAC2OPLL discovery and all bank bytes; UF2 BIOS payload and 9 Nextor records");
+    for (unsigned i = selected_count * ROM_RECORD_SIZE; i < records_size; i++)
+        assert(records[i] == 0xFF);
+    printf("PASS: real BIOS AB/PAC2OPLL discovery and all bank bytes; UF2 BIOS payload and %u Nextor records/names/kernel bytes; hidden Nextor 2.1.4 unchanged\n",
+           selected_count);
 }
 
 int main(int argc, char **argv) {
-    assert(argc == 4);
+    assert(argc >= 7 && argc <= 6 + (int)NEXTOR_VARIANT_COUNT);
     char *end;
     unsigned long firmware_size = strtoul(argv[3], &end, 10);
     assert(*end == '\0' && firmware_size > 0 && firmware_size < 16 * 1024 * 1024);
+    unsigned selected[NEXTOR_VARIANT_COUNT], selected_count = (unsigned)(argc - 6);
+    for (unsigned i = 0; i < selected_count; i++) {
+        unsigned long variant = strtoul(argv[6 + i], &end, 10);
+        assert(end != argv[6 + i] && *end == '\0' && variant < NEXTOR_VARIANT_COUNT);
+        selected[i] = (unsigned)variant;
+    }
     // The tool starts the menu ROM on the first 4 KB boundary after the firmware.
     firmware_size = (firmware_size + 4095ul) & ~4095ul;
     test_profiles();
@@ -532,7 +587,7 @@ int main(int argc, char **argv) {
     test_sunrise_mapper_bus();
     test_game_read_ordering();
     test_game_services_io_bus();
-    test_bios_image(argv[1], argv[2], (uint32_t)firmware_size);
+    test_bios_image(argv[1], argv[2], (uint32_t)firmware_size, argv[4], argv[5], selected, selected_count);
     puts("PASS: 8 Nextor profiles, WiFi exclusion, FM-PAC banks/SRAM/FM writes, Sunrise/C2 bus dispatch");
     return 0;
 }

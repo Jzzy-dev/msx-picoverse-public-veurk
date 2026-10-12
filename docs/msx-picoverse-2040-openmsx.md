@@ -9,7 +9,7 @@ The openMSX support is part of the MultiROM project and lives in [2040/software/
 You point openMSX at the same `.uf2` file you would flash to the Pico. The emulated MSX then boots the PicoVerse MultiROM menu and lists every entry in that UF2:
 
 - the game and application ROMs, with their PicoVerse mappers;
-- the embedded **Nextor Sunrise IDE** entry (UF2 built with `-s`) or **Nextor Sunrise IDE + 192KB Mapper** entry (UF2 built with `-m`), with a disk image as the USB drive.
+- the embedded Nextor entries: **Nextor 2.1.4 Sunrise IDE** (UF2 built with `-s`), **Nextor 2.1.4 Sunrise IDE + 192KB Mapper** (`-m`), and the Nextor 3.0.0 Beta 2 versions of both (`-s3`, `-m3`), with a disk image as the USB drive.
 
 The Raspberry Pi Pico is not emulated. An openMSX Tcl script does the Pico firmware's job instead, and a normal openMSX extension makes the cartridge appear in the openMSX menus. You don't need to change or rebuild openMSX.
 
@@ -211,7 +211,7 @@ Alternatively, let openMSX create the blank default image, boot the Nextor entry
 
 Without system files on the image, Nextor boots into Nextor BASIC (`Nextor BASIC version 2.10`). `CALL DRVINFO` lists the drives; the image is the drive assigned to `Sunrise IDE`, normally `A:`. To boot into the Nextor command prompt, copy `NEXTOR.SYS` and `COMMAND2.COM` to the root of the image, as for a real thumb drive. See [How to prepare a thumb drive for Nextor](./msx-picoverse-2040-multirom-tool-manual.en-us.md#how-to-prepare-a-thumb-drive-for-nextor) for the download links, ROM launchers such as SofaRun, and the RAM requirements.
 
-The **Nextor Sunrise IDE + 192KB Mapper** entry adds a 192KB memory mapper, as on the cartridge, so Nextor also works on machines with less than 128KB of RAM.
+The **+ 192KB Mapper** entries add a 192KB memory mapper, as on the cartridge, so Nextor also works on machines with less than 128KB of RAM.
 
 ## 10. Console command reference
 
@@ -299,8 +299,10 @@ Banked ROMs are padded to a whole number of banks.
 
 The Nextor entries are not separate cartridges: like on the hardware, they are options of the PicoVerse menu. openMSX can only build a Sunrise IDE and a memory mapper from an extension configuration, though, so when a Nextor entry boots, the script writes a standard openMSX extension configuration and inserts it into the PicoVerse slot:
 
-- **Nextor Sunrise IDE** (mapper code 10): a `SunriseIDE` device with the Nextor ROM taken from the UF2 and an `IDEHD` master disk.
-- **Nextor Sunrise IDE + 192KB Mapper** (mapper code 11): an expanded slot, like `loadrom_sunrise_mapper()` on the cartridge. Sub-slot 0 holds the `SunriseIDE` device and sub-slot 1 a 192KB `MemoryMapper`.
+- **Sunrise IDE** entries (mapper code 10): a `SunriseIDE` device with the Nextor ROM taken from the UF2 and an `IDEHD` master disk.
+- **Sunrise IDE + 192KB Mapper** entries (mapper code 11): an expanded slot, like `loadrom_sunrise_mapper()` on the cartridge. Sub-slot 0 holds the `SunriseIDE` device and sub-slot 1 a 192KB `MemoryMapper`.
+
+The Nextor kernel is the one stored in the UF2 for the selected entry, so the Nextor 2.1.4 and Nextor 3.0.0 Beta 2 entries each boot their own version.
 
 The `IDEHD` master disk is the USB drive image (section 9), with a default size of 100MB when openMSX has to create it.
 

@@ -31,7 +31,7 @@ static void render_rom_volume_line(unsigned char audio_volume, int selected);
 static void render_rom_psg_line(unsigned char psg_enabled, int selected);
 static void render_rom_freq_line(unsigned char row, unsigned char vdp_freq, int selected);
 static void render_rom_cpu_line(unsigned char row, unsigned char cpu_mode, int selected);
-static void render_rom_partition_line(unsigned char row, unsigned char sd_partition, int selected);
+static void render_rom_partition_line(unsigned char row, int selected);
 static void render_rom_wifi_line(unsigned char row, unsigned char wifi_enabled, int selected);
 static void render_rom_action_line(unsigned char row, int selected);
 static void render_rom_options_block(void);
@@ -44,7 +44,7 @@ static void send_mp3_select(unsigned int index);
 static unsigned int read_mp3_elapsed(void);
 static unsigned int read_mp3_selected_index(void);
 static ROMRecord *load_mp3_detail_record(unsigned int index);
-static void build_mapper_text(const ROMRecord *record, int waiting_mapper, char *out, size_t out_size);
+static void build_mapper_text(const ROMRecord *record, int waiting_mapper, char *out);
 static void build_audio_text(const ROMRecord *record, unsigned char audio_profile, char *out, size_t out_size);
 static unsigned char sanitize_audio_profile(const ROMRecord *record, unsigned char audio_profile);
 static unsigned char next_audio_profile(const ROMRecord *record, unsigned char audio_profile, int dir);
@@ -56,7 +56,6 @@ static unsigned char current_wavegame_rom = 0;
 
 static unsigned char sd_partition_count = 0;
 static unsigned char sd_partition_mask = 0;
-static unsigned char rom_sd_partition = 0;
 static unsigned char rom_audio_volume = AUDIO_VOLUME_DEFAULT;
 static unsigned char rom_vdp_freq = VDP_FREQ_DEFAULT;
 static unsigned char rom_allow_sd_partition = 0;
@@ -169,6 +168,8 @@ static unsigned char send_set_mapper(unsigned int index, unsigned char mapper) {
 static unsigned char send_load_options(unsigned int index, unsigned char *audio_profile, unsigned char *psg_enabled, unsigned char *mapper, unsigned char *sd_partition, unsigned char *audio_volume, unsigned char *vdp_freq) {
     write_index_query(index);
     clear_query_tail(2);
+    sd_partition_count = 0;
+    sd_partition_mask = 0;
     unsigned char options_ack = run_ctrl_cmd(CMD_LOAD_OPTIONS);
     current_wavegame_rom = Peek(CTRL_WAVEGAME_ROM) ? 1 : 0;
     if (!options_ack) {
@@ -280,6 +281,21 @@ static void step_cpu_mode(int dir) {
     rom_cpu_mode = cpu_modes[cpu_mode_index];
 }
 
+static unsigned char next_sd_partition(unsigned char partition, signed char dir) {
+    unsigned char next = partition;
+    for (unsigned char i = 0; i < SD_PART_WHOLE_DISK; i++) {
+        if (dir > 0) {
+            next = next >= SD_PART_WHOLE_DISK ? 1 : (unsigned char)(next + 1);
+        } else {
+            next = next <= 1 ? SD_PART_WHOLE_DISK : (unsigned char)(next - 1);
+        }
+        if (sd_partition_mask & (1 << (next - 1))) {
+            return next;
+        }
+    }
+    return partition;
+}
+
 static void compute_option_selections(unsigned char allow_wifi_support) {
     int n = 4;
     sel_freq = rom_allow_freq ? n++ : -1;
@@ -299,11 +315,7 @@ static void apply_detected_mapper(ROMRecord *record) {
 }
 
 void quick_run_rom(unsigned int index) {
-    ROMRecord *record = &records[index % FILES_PER_PAGE];
-    write_index_query(index);
-    (void)run_ctrl_cmd(CMD_PREPARE_QUICK_RUN);
-    apply_detected_mapper(record);
-    loadGame((int)index);
+    loadGame((int)index, 1);
 }
 
 /* First detail line, shared by the ROM/DSK and MP3/WAV screens. The frame is
@@ -335,6 +347,10 @@ static void render_rom_screen(const ROMRecord *record) {
 
 void show_rom_screen(unsigned int index) {
     ROMRecord *record = &records[index % FILES_PER_PAGE];
+    if (record_needs_flash(record)) {
+        loadGame((int)index, 1);
+        return;
+    }
     unsigned char saved_mapper = 0;
     unsigned char sd_partition = 0;
     unsigned char options_loaded = 0;
@@ -412,18 +428,16 @@ void show_rom_screen(unsigned int index) {
         cur_psg_enabled = 0;
     }
 
-    rom_sd_partition = sd_partition;
     render_rom_options_block();
 
     while (1) {
         if (bios_chsns()) {
             char key = (char)bios_chget();
-            if (key == MENU_KEY_F4_CONFIG) {
-                launch_wifi_config();
-                return;
-            }
-            if (key == 'h' || key == 'H') {
+            if (key == MENU_KEY_F5_HELP) {
                 helpMenu();
+                if (menu_pending_key) {
+                    break;
+                }
                 render_rom_screen(record);
                 render_rom_options_block();
             }
@@ -439,8 +453,7 @@ void show_rom_screen(unsigned int index) {
                     Poke(CTRL_SD_PARTITION, allow_sd_partition ? sd_partition : 0);
                     Poke(CTRL_AUDIO_VOLUME, rom_audio_volume);
                     send_save_options(index, cur_audio_profile, cur_psg_enabled, record_mapper_code(record->Mapper), allow_sd_partition ? sd_partition : 0, rom_audio_volume, allow_freq ? rom_vdp_freq : VDP_FREQ_DEFAULT);
-                    loadGame((int)index);
-                    return;
+                    loadGame((int)index, 0);
                 }
             }
             if (key == 30 || key == 31) {
@@ -519,21 +532,7 @@ void show_rom_screen(unsigned int index) {
                 render_rom_options_block();
             }
             if ((key == 28 || key == 29) && rom_allow_sd_partition && cur_selection == sel_part && sd_partition_count) {
-                int dir = (key == 28) ? 1 : -1;
-                unsigned char next_part = sd_partition;
-                for (unsigned char i = 0; i < 4; i++) {
-                    next_part = (unsigned char)(next_part + dir);
-                    if (next_part < 1) {
-                        next_part = 4;
-                    } else if (next_part > 4) {
-                        next_part = 1;
-                    }
-                    if (sd_partition_mask & (1 << (next_part - 1))) {
-                        break;
-                    }
-                }
-                sd_partition = next_part;
-                rom_sd_partition = sd_partition;
+                sd_partition = next_sd_partition(sd_partition, (key == 28) ? 1 : -1);
                 Poke(CTRL_SD_PARTITION, sd_partition);
                 render_rom_options_block();
             }
@@ -576,7 +575,6 @@ void show_rom_screen(unsigned int index) {
             }
             cur_audio_profile = sanitize_audio_profile(record, cur_audio_profile);
             cur_waiting_mapper = 0;
-            rom_sd_partition = sd_partition;
             render_rom_options_block();
         }
 
@@ -650,10 +648,10 @@ static void render_rom_cpu_line(unsigned char row, unsigned char cpu_mode, int s
     render_rom_prefixed_line(row, "       CPU: ", text, selected);
 }
 
-static void render_rom_partition_line(unsigned char row, unsigned char sd_partition, int selected) {
+// The Pico publishes the label for the selected partition in the text window.
+static void render_rom_partition_line(unsigned char row, int selected) {
     char label[31];
     unsigned char i;
-    (void)sd_partition;
     for (i = 0; i < sizeof(label) - 1; i++) {
         label[i] = (char)Peek(CTRL_SD_PARTITION_INFO_BASE + 2 + i);
         if (!label[i]) {
@@ -679,7 +677,7 @@ static void render_rom_options_block(void) {
     int psg_selection = 3;
     unsigned char row = 11;
 
-    build_mapper_text(cur_record, cur_waiting_mapper, mapper_text, sizeof(mapper_text));
+    build_mapper_text(cur_record, cur_waiting_mapper, mapper_text);
     build_audio_text(cur_record, cur_audio_profile, audio_text, sizeof(audio_text));
     render_rom_mapper_line(mapper_text, cur_selection == 0);
     render_rom_audio_line(audio_text, cur_selection == 1);
@@ -692,7 +690,7 @@ static void render_rom_options_block(void) {
         render_rom_cpu_line(row++, rom_cpu_mode, cur_selection == sel_cpu);
     }
     if (rom_allow_sd_partition) {
-        render_rom_partition_line(row++, rom_sd_partition, cur_selection == sel_part);
+        render_rom_partition_line(row++, cur_selection == sel_part);
     }
     if (rom_allow_wifi) {
         render_rom_wifi_line(row++, cur_wifi_enabled, cur_selection == sel_wifi);
@@ -702,9 +700,10 @@ static void render_rom_options_block(void) {
 }
 
 static void render_rom_footer_line(void) {
-    menu_ui_clear_rows(22, 24);
-    Locate(0, 22);
-    printf(menu_ui_status_text("[ESC-BACK] [L/R-CHANGE]", "[ESC - BACK] [LEFT/RIGHT - CHANGE]"));
+    static const char options[] = "ESC Back\0L/R Chg\0U/D Opt\0F5 Help";
+    static const char options_80[] = "ESC Back\0L/R Change value\0U/D Select option\0ENTER Run\0F5 Help";
+    menu_ui_render_footer(use_80_columns ? options_80 : options, use_80_columns ? 5 : 4, MENU_SHORTCUT_NONE);
+    menu_ui_clear_last_line();
 }
 static void send_mp3_select(unsigned int index) {
     Poke(MP3_CTRL_INDEX_L, (unsigned char)(index & 0xFFu));
@@ -796,15 +795,17 @@ static void render_mp3_actions(int selection, unsigned char status) {
 static void render_mp3_footer_line(void) {
     unsigned char mode = Peek(MP3_CTRL_MODE);
     unsigned char multi_song = mode != MP3_PLAY_MODE_SINGLE;
-    const char *text;
-    menu_ui_clear_rows(22, 23);
-    Locate(0, 22);
+    static const char single_options[] = "ESC Back\0ENTER Action\0F5 Help";
+    static const char multi_options[] = "ESC Back\0ENTER\0N Next\0P Prev\0F5 Help";
+    static const char single_options_80[] = "ESC Back\0U/D Select option\0ENTER Action\0F5 Help";
+    static const char multi_options_80[] = "ESC Back\0U/D Options\0ENTER Action\0N Next\0P Previous\0F5 Help";
+    const char *options = multi_song ? multi_options : single_options;
+    unsigned char count = multi_song ? 5 : 3;
     if (use_80_columns) {
-        text = multi_song ? "[ESC - BACK] [ENTER - ACTION] [N - NEXT SONG] [P - PREVIOUS SONG]" : "[ESC - BACK] [ENTER - ACTION]";
-    } else {
-        text = multi_song ? "[ESC - BACK] [N - NEXT] [P - PREVIOUS]" : "[ESC - BACK] [ENT - ACTION]";
+        options = multi_song ? multi_options_80 : single_options_80;
+        count = multi_song ? 6 : 4;
     }
-    printf(text);
+    menu_ui_render_footer(options, count, MENU_SHORTCUT_NONE);
 }
 
 static void show_mp3_screen(unsigned int index) {
@@ -829,12 +830,12 @@ static void show_mp3_screen(unsigned int index) {
     while (1) {
         if (bios_chsns()) {
             char key = (char)bios_chget();
-            if (key == MENU_KEY_F4_CONFIG) {
-                launch_wifi_config();
-                return;
-            }
-            if (key == 'h' || key == 'H') {
+            if (key == MENU_KEY_F5_HELP) {
                 helpMenu();
+                if (menu_pending_key) {
+                    Poke(MP3_CTRL_CMD, MP3_CMD_STOP);
+                    break;
+                }
                 record = &records[detail_index % FILES_PER_PAGE];
                 render_mp3_screen(record);
                 render_mp3_counter_line();
@@ -951,11 +952,9 @@ static void show_mp3_screen(unsigned int index) {
     displayMenu();
 }
 
-static void build_mapper_text(const ROMRecord *record, int waiting_mapper, char *out, size_t out_size) {
+static void build_mapper_text(const ROMRecord *record, int waiting_mapper, char *out) {
     /* Callers pass a 48-byte buffer and the longest result is
        "ASC16X-FR (detected)" at 20 characters, so no truncation is needed. */
-    (void)out_size;
-
     if (!out) {
         return;
     }

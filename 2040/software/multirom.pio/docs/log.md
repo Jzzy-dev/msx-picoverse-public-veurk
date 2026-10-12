@@ -1,5 +1,16 @@
 # Change Log
 
+## PicoVerse 2040 Multirom v2.67
+
+- Version bumped to v2.67 (top-level and tool Makefiles, and the `picoverse2040.tcl` script version). Rebuilt the MSX menu (header shows `[MultiROM v2.67]`) and `tool/dist/multirom.exe`; the firmware binary is unchanged.
+- Renamed `nextor/kernel/` to `resources/`, which now holds both `Nextor-2.1.4.SunriseIDE.MasterOnly.ROM` and Konamiman's `Nextor-3.0.0-beta2.SunriseIDE.MasterOnly.ROM` (128 KB, SunriseIDE-Nextor-driver `v0.1.8-blueMSX-v0.1.5-Nextor-3.0-beta.2` release, same ROM as the 2350 projects and 2040 LoadROM v2.64). `tool/Makefile` embeds them from there as `tool/src/nextor_sunrise.h` (symbol now `___resources_Nextor_2_1_4_...`) and the new `tool/src/nextor3.h`, and cleans both headers. Removed the unused `NEXTOR_DIR` variable from the top-level Makefile.
+- Added the `-s3` / `--sunrise3` and `-m3` / `--mapper3` tool options for testing Nextor 3, following the 2350 MultiROM/Explorer `-s3` implementation. They add Nextor 3.0.0 Beta 2 Sunrise IDE entries on the existing Sunrise (10) and Sunrise + 192KB mapper (11) types, so the RP2040 firmware is unchanged; the beta 2 driver sends the same ATA commands as 2.1.4 and the firmware already boots each entry from its own record offset. Booting beta 2 on hardware is not yet validated.
+- The Nextor menu entries now show the Nextor version: `Nextor 2.1.4 Sunrise IDE` (`-s`), `Nextor 2.1.4 Sunrise IDE + 192KB Mapper` (`-m`), `Nextor 3.0.0 Beta 2 Sunrise IDE` (`-s3`) and `Nextor 3.0.0 Beta 2 Sunrise IDE + 192KB Mapper` (`-m3`). Longer names scroll in the menu as before.
+- Tool: the two hand-written Nextor blocks were replaced by a `nextor_entries[]` table in which each row carries its own kernel pointer and size, so `-s`, `-m`, `-s3` and `-m3` can be combined freely (in that order at the top of the menu) and Nextor versions can be mixed in one UF2. The tool refuses to build if an embedded kernel is not exactly 128 KB. The `-h` help text lists the new options.
+- Checked `-s -m -s3 -m3`, `-s -m3` with a scanned ROM, and a ROM-only UF2: every record has the expected name, type, size and offset, each Nextor payload matches its 2.1.4 or 3.0.0 beta 2 kernel, and the scanned ROM follows the Nextor kernels.
+- openMSX add-on: no script change needed beyond the version; the generated Sunrise IDE extension uses the kernel cached from the selected entry, so 2.1.4 and 3.0.0 entries each boot their own Nextor.
+- Docs: 2040 MultiROM tool manual (options, entry-name table, example, known issues), 2040 openMSX notes and `openmsx/README.md` (entry names), 2040 Sunrise Nextor implementation notes (embedded kernels, names for both tools) and the public README.
+
 ## PicoVerse 2040 Multirom v2.66
 
 - Version bumped to v2.66 (top-level and tool Makefiles).

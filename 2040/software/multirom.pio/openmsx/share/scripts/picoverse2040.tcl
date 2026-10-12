@@ -43,7 +43,7 @@
 
 namespace eval picoverse2040 {
 
-variable version "v2.66"
+variable version "v2.67"
 
 # Flash layout, must match pico/multirom/multirom.c and tool/src/multirom.c
 variable flash_base       0x10000000

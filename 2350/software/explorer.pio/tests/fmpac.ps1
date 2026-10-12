@@ -101,27 +101,51 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ("explorer-fmpac-" + [guid]::NewGui
 New-Item -ItemType Directory $temp | Out-Null
 $generated = Join-Path $temp "fmpac-production.h"
 $exe = Join-Path $temp "fmpac-test.exe"
-$uf2 = Join-Path $temp "fmpac-test.uf2"
+$uf2s = @()
 try {
     [IO.File]::WriteAllText($generated, $code)
     & $CC -std=c11 -Wall -Wextra -Werror -I $temp (Join-Path $PSScriptRoot "fmpac.c") -o $exe
     if ($LASTEXITCODE -ne 0) { throw "FMPAC host test compilation failed" }
     $creator = Join-Path $root "tool\dist\explorer.exe"
     if (!(Test-Path $creator)) { throw "Build and package the Explorer utility before running this test" }
+    $help = & $creator --help
+    if ($LASTEXITCODE -ne 0) { throw "Explorer help failed" }
+    if (($help -join "`n") -notmatch '-m3, --mapper3-sd\s+Include Nextor Sunrise 3\.0\.0 Beta 2 \+ 1MB mapper') {
+        throw "Explorer help does not describe the Nextor 3 mapper option"
+    }
     $embedded = Get-Content (Join-Path $root "tool\src\explorer.h") -Raw
     $length = [regex]::Match($embedded, 'unsigned int ___pico_explorer_build_explorer_bin_len = (\d+);')
     if (!$length.Success) { throw "Cannot determine the packaged firmware size" }
+    $allEntries = @("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+    $cases = @(
+        @{ Name = "all"; Options = @("-a"); Entries = $allEntries },
+        @{ Name = "all-alias"; Options = @("--allnextor"); Entries = $allEntries },
+        @{ Name = "mapper"; Options = @("-m1"); Entries = @("1") },
+        @{ Name = "beta"; Options = @("-s3"); Entries = @("8") },
+        @{ Name = "beta-mapper"; Options = @("-m3"); Entries = @("9") },
+        @{ Name = "beta-mapper-alias"; Options = @("--mapper3-sd"); Entries = @("9") },
+        @{ Name = "mixed"; Options = @("-m3", "-s3", "-m1"); Entries = @("1", "8", "9") },
+        @{ Name = "deduplicated"; Options = @("-a", "-m3", "--mapper3-sd"); Entries = $allEntries }
+    )
     Push-Location $temp
     try {
-        & $creator --allnextor --output $uf2
-        if ($LASTEXITCODE -ne 0) { throw "Nextor image generation failed" }
+        foreach ($case in $cases) {
+            $uf2 = Join-Path $temp ("nextor-" + $case.Name + ".uf2")
+            $uf2s += $uf2
+            $options = $case.Options
+            & $creator @options --output $uf2
+            if ($LASTEXITCODE -ne 0) { throw "Nextor image generation failed: $($case.Name)" }
+            $entries = $case.Entries
+            & $exe (Join-Path $root "..\loadrom.pio\fmpac\FMPCCMFC.BIN") $uf2 $length.Groups[1].Value `
+                (Join-Path $root "resources\Nextor-2.1.4.SunriseIDE.MasterOnly.ROM") `
+                (Join-Path $root "resources\Nextor-3.0.0-beta2.SunriseIDE.MasterOnly.ROM") @entries
+            if ($LASTEXITCODE -ne 0) { throw "FMPAC/Nextor host tests failed: $($case.Name)" }
+        }
     } finally {
         Pop-Location
     }
-    & $exe (Join-Path $root "..\loadrom.pio\fmpac\FMPCCMFC.BIN") $uf2 $length.Groups[1].Value
-    if ($LASTEXITCODE -ne 0) { throw "FMPAC host tests failed" }
 } finally {
-    foreach ($file in @($generated, $exe, $uf2)) {
+    foreach ($file in (@($generated, $exe) + $uf2s)) {
         if (Test-Path $file) { Remove-Item -LiteralPath $file }
     }
     Remove-Item -LiteralPath $temp

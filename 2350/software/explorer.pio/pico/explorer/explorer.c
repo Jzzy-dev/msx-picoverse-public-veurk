@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <errno.h>
 #include "ff.h"
 #include "diskio.h"
 #include "my_rtc.h"
@@ -31,6 +32,7 @@
 #include "hardware/flash.h"
 #include "hw_config.h"
 #include "explorer.h"
+#define MAPPER_DETECT_MAX_ROM_SIZE PICO_FLASH_SIZE_BYTES
 #include "mapper_detect.h"
 #include "audio/mp3.h"
 #include "memory/c2_emu.h"
@@ -111,6 +113,13 @@
 #define CMD_SAVE_LAST_SELECTION 0x0D // Command: save the entry being executed to microSD
 #define CMD_COPY_TO_FLASH 0x0E // Command: copy the selected microSD ROM into the flash ROM area
 #define CMD_RENAME_ENTRY 0x0F // Command: rename the selected microSD ROM/DSK or flash entry
+#define CMD_PREPARE_FLASH_ROM 0x10 // Command: copy/reuse a microSD ROM and select its flash entry
+#define FLASH_COPY_DETECTING 0x7Fu
+#define FLASH_COPY_NO_SPACE  0x80u
+#define FLASH_COPY_TOO_LARGE 0x81u
+#define FLASH_COPY_DUPLICATE 0x82u
+#define FLASH_COPY_MAPPER    0x83u
+#define FLASH_COPY_IO        0x84u
 #define CMD_FH_LIST_PAGE   0x40 // Command: File Hunter list page from menu ROM
 #define CMD_FH_DOWNLOAD    0x41 // Command: File Hunter download/save from menu ROM
 #define CMD_FH_SEARCH      0x42 // Command: File Hunter search from menu ROM
@@ -148,6 +157,8 @@
 #define VDP_FREQ_50HZ    2u
 #define CTRL_CPU_MODE   0xBFA2 // Control: per-ROM CPU speed load read-back (Pico -> MSX)
 #define CTRL_DISK_ACT   0xBFA3 // Control: microSD activity counter read-back (Pico -> MSX)
+#define CTRL_FLASH_FREE_KB 0xBFA4
+#define CTRL_FLASH_LARGEST_KB 0xBFA6
 #define CPU_MODE_DEFAULT 0u    // Leave the CPU as the BIOS boots it
 #define CPU_MODE_TURBO   1u    // Panasonic MSX2+/turbo R switched-I/O 5.37MHz Z80 turbo
 #define CPU_MODE_R800    2u    // MSX turbo R R800 ROM mode via the CHGCPU BIOS entry
@@ -771,7 +782,6 @@ static psram_region_t megaram_region;
 static psram_region_t flash_region;
 static psram_region_t mp3_buffer_region;
 static psram_region_t fh_list_region;
-static psram_region_t fh_download_region;
 static bool psram_bring_up_once(void);
 static bool psram_prepare_mp3_buffer(void);
 
@@ -797,7 +807,7 @@ ROMRecord records[MAX_ROM_RECORDS]; // Array to store the ROM records
 #define SD_PATH_MAX        256
 #define SD_PATH_BUFFER_SIZE 19000
 #define MIN_ROM_SIZE       8192
-#define MAX_ROM_SIZE       (15u * 1024u * 1024u)
+#define MAX_ROM_SIZE       MAPPER_DETECT_MAX_ROM_SIZE
 #define SD_ROM_MAX_SIZE    (4u * 1024u * 1024u) // PSRAM region capacity for SD-loaded ROMs
 #define SD_BROWSE_PARTITION_MAX 20u
 #define MP3_PSRAM_BUFFER_SIZE 65536u
@@ -872,6 +882,8 @@ static uint16_t flash_record_count = 0;
 // entry only clears its first name byte, so neither operation needs an erase.
 static uint8_t flash_record_slot[MAX_FLASH_RECORDS];
 static uint16_t flash_slots_used = 0;
+static uint16_t flash_free_kb = 0;
+static uint16_t flash_largest_kb = 0;
 static char sd_current_path[SD_PATH_MAX] = "/";
 static uint8_t browse_source_mode = SOURCE_MODE_FLASH;
 // Last executed entry: source, full microSD path (or flash display name) and the
@@ -912,7 +924,7 @@ static volatile uint8_t ctrl_audio_selection = AUDIO_PROFILE_NONE;
 static volatile uint8_t ctrl_wifi_support = 0; // 0=disabled, 1=enabled for Sunrise Nextor launches
 static volatile uint8_t ctrl_psg_emulation = 0; // 0=disabled, 1=primary PSG over I2S
 static volatile uint8_t ctrl_wavegame_rom = 0; // 0=normal ROM, 1=WAVEGAME sidecars detected
-static volatile uint8_t ctrl_sd_partition = 0; // 0=auto/default, 1-4=MBR primary partition
+static volatile uint8_t ctrl_sd_partition = 0; // 0=auto/default, 1-4=MBR primary, 5=whole disk
 static volatile uint8_t ctrl_audio_volume = AUDIO_VOLUME_DEFAULT; // per-ROM audio volume percent
 static volatile uint8_t ctrl_vdp_frequency = VDP_FREQ_DEFAULT; // per-ROM VDP 50/60Hz option (0=default,1=60,2=50)
 static volatile uint8_t vdp_freq_launch = VDP_FREQ_DEFAULT; // 50/60Hz to inject into the launched game's INIT (regular game mappers only)
@@ -935,22 +947,8 @@ static uint8_t fh_query[FH_QUERY_SIZE];
 static uint16_t fh_selected_index = 0;
 static char fh_wifi_status_text[FH_STATUS_TEXT_SIZE];
 static uint8_t fh_tcp_last_error = 0;
-static uint32_t fh_download_size = 0;
-static char fh_download_name[ROM_NAME_MAX + 1];
 static uint8_t fh_active_type = FH_TYPE_ROM;   // Catalog type of the loaded listing (ROM or DSK)
-static uint8_t fh_download_type = FH_TYPE_ROM; // Catalog type of the file being saved
-
-#define FH_SAVE_IDLE 0u
-#define FH_SAVE_RUNNING 1u
-#define FH_SAVE_DONE 2u
-#define FH_SAVE_FAILED 3u
-
-static uint8_t fh_sd_save_chunk[1024];
-static volatile uint8_t fh_save_state = FH_SAVE_IDLE;
-static FIL fh_save_file;
-static uint32_t fh_save_offset = 0;
-static bool fh_save_file_open = false;
-static bool fh_save_close_pending = false;
+static FIL fh_download_file;
 static FILINFO fh_download_timestamp;
 static volatile bool fh_menu_window_active = false;
 static volatile bool fh_service_menu_window = false;
@@ -1244,6 +1242,7 @@ static void write_u32_le(uint8_t *ptr, uint32_t value);
 static void write_u16_le(uint8_t *ptr, uint16_t value);
 static void build_page_buffer(uint8_t page_index);
 static void refresh_records_for_current_path(void);
+static bool sd_prepare_card(void);
 static bool sd_mount_card(void);
 static void sd_unmount_card(void);
 static void cancel_refresh_work(void);
@@ -2048,6 +2047,10 @@ static void set_sunrise_partition_text(const char *text) {
 }
 
 static void update_sunrise_partition_text(const sunrise_sd_partition_t *parts, uint8_t part_count) {
+    if (ctrl_sd_partition == SD_PART_WHOLE_DISK) {
+        set_sunrise_partition_text("WHOLE DISK");
+        return;
+    }
     if (part_count == 0) {
         set_sunrise_partition_text("NO FAT16 PARTITION AVAILABLE");
         return;
@@ -2067,8 +2070,8 @@ static void update_sunrise_partition_text(const sunrise_sd_partition_t *parts, u
     set_sunrise_partition_text("PARTITION");
 }
 
-static bool read_mounted_partition_free_mb(uint8_t selected_partition, uint32_t *free_mb) {
-    if (!free_mb || !sd_mounted || sd_mounted_partition != selected_partition) {
+static bool read_mounted_partition_free_mb(uint8_t selected_partition, uint32_t *free_mb, uint8_t *free_tenth) {
+    if (!free_mb || !free_tenth || !sd_mounted || sd_mounted_partition != selected_partition) {
         return false;
     }
 
@@ -2078,21 +2081,24 @@ static bool read_mounted_partition_free_mb(uint8_t selected_partition, uint32_t 
         return false;
     }
 
-    uint64_t mb = ((uint64_t)free_clusters * (uint64_t)fatfs->csize) / 2048u;
+    uint64_t sectors = (uint64_t)free_clusters * (uint64_t)fatfs->csize;
+    uint64_t mb = sectors / 2048u;
     *free_mb = (mb > UINT32_MAX) ? UINT32_MAX : (uint32_t)mb;
+    *free_tenth = (mb > UINT32_MAX) ? 0u : (uint8_t)((sectors % 2048u) * 10u / 2048u);
     return true;
 }
 
 static void set_browse_partition_status_text(const char *label, uint8_t selected_partition) {
     uint32_t free_mb = 0;
-    if (!read_mounted_partition_free_mb(selected_partition, &free_mb)) {
+    uint8_t free_tenth = 0;
+    if (!read_mounted_partition_free_mb(selected_partition, &free_mb, &free_tenth)) {
         set_sunrise_partition_text(label);
         return;
     }
 
     char suffix[24];
     char text[CTRL_SD_PARTITION_INFO_SIZE - 2u];
-    snprintf(suffix, sizeof(suffix), " (%luMB FREE)", (unsigned long)free_mb);
+    snprintf(suffix, sizeof(suffix), " (%lu.%uMB FREE)", (unsigned long)free_mb, (unsigned int)free_tenth);
 
     size_t max_len = CTRL_SD_PARTITION_INFO_SIZE - 3u;
     size_t label_len = strlen(label);
@@ -2137,10 +2143,18 @@ static void refresh_browse_partition_text(void) {
 static void refresh_sunrise_partition_info(uint8_t selected_partition) {
     memset(ctrl_sd_partition_info, 0, sizeof(ctrl_sd_partition_info));
     ctrl_sd_partition = 0;
+    if (!sd_prepare_card() || sd_card->get_num_sectors(sd_card) == 0) {
+        set_sunrise_partition_text("NO SD CARD AVAILABLE");
+        return;
+    }
 
     sunrise_sd_partition_t parts[4];
     uint8_t part_count = sunrise_sd_list_fat16_partitions(parts, 4);
-    ctrl_sd_partition_info[0] = part_count;
+    ctrl_sd_partition_info[0] = (uint8_t)(part_count + 1u);
+    ctrl_sd_partition_info[1] = (uint8_t)(1u << (SD_PART_WHOLE_DISK - 1u));
+    if (selected_partition == SD_PART_WHOLE_DISK || part_count == 0) {
+        ctrl_sd_partition = SD_PART_WHOLE_DISK;
+    }
 
     for (uint8_t i = 0; i < part_count; i++) {
         ctrl_sd_partition_info[1] |= (uint8_t)(1u << (parts[i].number - 1u));
@@ -2168,9 +2182,6 @@ static void process_load_options_request(void) {
     ctrl_cpu_mode = CPU_MODE_DEFAULT;
     memset(ctrl_sd_partition_info, 0, sizeof(ctrl_sd_partition_info));
     quiesce_mp3_core1_before_sd_work();
-    if (!sd_mount_card()) {
-        return;
-    }
 
     uint16_t index = query_filtered_index();
     if (index >= total_record_count) {
@@ -2179,6 +2190,13 @@ static void process_load_options_request(void) {
     uint16_t record_index = filtered_indices[index];
     ROMRecord *rec = &records[record_index];
     bool sunrise_sd_options = is_sunrise_sd_mapper(mapper_code_from_record_byte(rec->Mapper));
+    if (!sd_mount_card()) {
+        if (sunrise_sd_options) {
+            refresh_sunrise_partition_info(0);
+            ctrl_ack_value = ctrl_sd_partition_info[0] ? 1u : 0u;
+        }
+        return;
+    }
     ctrl_wavegame_rom = wavegame_assets_detected_for_record(record_index) ? 1u : 0u;
     if (sunrise_sd_options) {
         refresh_sunrise_partition_info(0);
@@ -2792,17 +2810,19 @@ static void process_delete_sd_file_request(void) {
 #define FLASH_CONFIG_SLOTS    (CONFIG_AREA_SIZE / ROM_RECORD_SIZE)
 #define FLASH_ROM_AREA_OFFSET (NEXTOR_DSK_FLASH_OFFSET + NEXTOR_DSK_ROM_SIZE)
 #define FLASH_RECORD_DELETED  0x00u
-#define FLASH_STORE_CHUNK     FLASH_PAGE_SIZE
+#define FLASH_STORE_CHUNK     2048u
 #define FLASH_STORE_BLOCK     65536u
 
 typedef enum {
     FLASH_JOB_IDLE = 0,
     FLASH_JOB_START,
+    FLASH_JOB_MATCH,
     FLASH_JOB_WRITE,
+    FLASH_JOB_DETECT,
     FLASH_JOB_COMMIT
 } flash_job_state_t;
 
-// Program source buffer (one flash page). It has to be in SRAM: flash and
+// Program source buffer. It has to be in SRAM: flash and
 // PSRAM (both XIP) are unreachable while the flash is being programmed.
 static uint8_t flash_store_buf[FLASH_STORE_CHUNK];
 // Set when the config area holds more live entries than flash_records[] can
@@ -2819,6 +2839,10 @@ static uint32_t flash_job_addr = 0;    // Absolute flash offset of the image
 static uint32_t flash_job_span = 0;    // Image size rounded up to whole sectors
 static uint32_t flash_job_erased = 0;  // Bytes of the span erased so far
 static uint32_t flash_job_written = 0; // Image bytes programmed so far
+static bool flash_job_show_details = false;
+static void flash_store_update_space(void);
+static uint8_t __no_inline_not_in_flash_func(menu_read_byte)(uint16_t addr, bool *in_window);
+static inline uint16_t __not_in_flash_func(pio_build_token)(bool drive, uint8_t data);
 
 static inline uint32_t flash_store_align_up(uint32_t value, uint32_t align) {
     return (value + align - 1u) & ~(align - 1u);
@@ -2899,6 +2923,7 @@ static void flash_store_load_records(void) {
     }
     flash_slots_used = slot;
     flash_record_count = count;
+    flash_store_update_space();
 }
 
 // Name comparison as the microSD card sees it: case-insensitive, and bounded
@@ -2976,35 +3001,67 @@ static bool flash_store_compact(void) {
     return ok;
 }
 
-// Lowest sector-aligned gap after the hidden payloads that holds size bytes
-// without sharing a sector with any live entry.
-static bool flash_store_find_space(uint32_t size, uint32_t *out_addr) {
+// Allocation and capacity reporting use the same sector-safe gaps.
+static bool flash_store_next_gap(uint32_t *cursor, uint32_t *length) {
     uint32_t base = flash_store_base();
-    uint32_t span = flash_store_align_up(size, FLASH_SECTOR_SIZE);
-    uint32_t cursor = flash_store_align_up(base + FLASH_ROM_AREA_OFFSET, FLASH_SECTOR_SIZE);
-    while (cursor <= FLASH_STORE_SIZE && span <= FLASH_STORE_SIZE - cursor) {
-        uint32_t next = cursor;
+    uint32_t limit = FLASH_STORE_SIZE & ~(FLASH_SECTOR_SIZE - 1u);
+    while (*cursor < limit) {
+        uint32_t next = limit;
+        uint32_t after = *cursor;
         for (uint16_t i = 0; i < flash_record_count; i++) {
             const ROMRecord *rec = &flash_records[i];
             if (rec->Size == 0) {
                 continue;
             }
             uint32_t start = base + (uint32_t)rec->Offset;
-            uint32_t end = start + (uint32_t)rec->Size;
-            if (start < cursor + span && end > cursor) {
-                uint32_t after = flash_store_align_up(end, FLASH_SECTOR_SIZE);
-                if (after > next) {
-                    next = after;
-                }
+            uint32_t end = flash_store_align_up(start + (uint32_t)rec->Size, FLASH_SECTOR_SIZE);
+            start &= ~(FLASH_SECTOR_SIZE - 1u);
+            if (start <= *cursor && end > after) {
+                after = end;
+            } else if (start > *cursor && start < next) {
+                next = start;
             }
         }
-        if (next == cursor) {
+        if (after == *cursor) {
+            *length = next - *cursor;
+            return true;
+        }
+        *cursor = after;
+    }
+    return false;
+}
+
+static bool flash_store_find_space(uint32_t size, uint32_t *out_addr) {
+    if (size == 0 || size > FLASH_STORE_SIZE || flash_store_overflow) {
+        return false;
+    }
+    uint32_t span = flash_store_align_up(size, FLASH_SECTOR_SIZE);
+    uint32_t cursor = flash_store_align_up(flash_store_base() + FLASH_ROM_AREA_OFFSET, FLASH_SECTOR_SIZE);
+    uint32_t length;
+    while (flash_store_next_gap(&cursor, &length)) {
+        if (length >= span) {
             *out_addr = cursor;
             return true;
         }
-        cursor = next;
+        cursor += length;
     }
     return false;
+}
+
+static void flash_store_update_space(void) {
+    uint32_t total = 0;
+    uint32_t largest = 0;
+    uint32_t cursor = flash_store_align_up(flash_store_base() + FLASH_ROM_AREA_OFFSET, FLASH_SECTOR_SIZE);
+    uint32_t length;
+    if (!flash_store_overflow) {
+        while (flash_store_next_gap(&cursor, &length)) {
+            total += length;
+            if (length > largest) largest = length;
+            cursor += length;
+        }
+    }
+    flash_free_kb = flash_store_overflow ? UINT16_MAX : (uint16_t)(total / 1024u);
+    flash_largest_kb = (uint16_t)(largest / 1024u);
 }
 
 // Mark a config slot as deleted by programming its first name byte to 0x00.
@@ -3059,77 +3116,136 @@ static bool flash_store_delete_entry(uint16_t record_index) {
     return true;
 }
 
-static void __noinline process_copy_to_flash_request(void) {
+static void __noinline process_copy_to_flash_request(bool show_details) {
     ctrl_ack_value = 0;
     ctrl_mapper_value = 0;
-    if (flash_job_state != FLASH_JOB_IDLE || fh_save_state == FH_SAVE_RUNNING) {
+    if (flash_job_state != FLASH_JOB_IDLE) {
+        printf("FLASHSTORE: another storage operation is running\n");
+        ctrl_mapper_value = FLASH_COPY_IO;
         ctrl_cmd_state = 0;
         return;
     }
     cancel_refresh_work();
+    flash_job_show_details = show_details;
     flash_job_index = query_filtered_index();
     flash_job_state = FLASH_JOB_START;
 }
 
 static bool flash_job_start(void) {
     quiesce_mp3_core1_before_sd_work();
+    ctrl_mapper_value = FLASH_COPY_IO;
     if (!sd_mount_card() || flash_job_index >= total_record_count) {
+        printf("FLASHSTORE: microSD or selected entry unavailable\n");
         return false;
     }
     uint16_t record_index = filtered_indices[flash_job_index];
     if (record_index >= full_record_count || sd_path_offsets[record_index] == 0xFFFF) {
+        printf("FLASHSTORE: selected entry has no microSD path\n");
         return false;
     }
-    const ROMRecord *rec = &records[record_index];
+    ROMRecord *rec = &records[record_index];
     if ((rec->Mapper & SOURCE_SD_FLAG) == 0 || (rec->Mapper & (FOLDER_FLAG | MP3_FLAG)) != 0 ||
-        rec->Size < MIN_ROM_SIZE || rec->Size > SD_ROM_MAX_SIZE ||
-        flash_record_count >= MAX_FLASH_RECORDS || flash_store_overflow) {
+        rec->Size < MIN_ROM_SIZE) {
+        printf("FLASHSTORE: selected entry is not a supported ROM\n");
+        ctrl_mapper_value = FLASH_COPY_MAPPER;
         return false;
     }
+    uint32_t first = flash_store_align_up(flash_store_base() + FLASH_ROM_AREA_OFFSET, FLASH_SECTOR_SIZE);
+    if (first >= FLASH_STORE_SIZE || rec->Size > FLASH_STORE_SIZE - first) {
+        printf("FLASHSTORE: ROM exceeds cartridge payload capacity\n");
+        ctrl_mapper_value = FLASH_COPY_TOO_LARGE;
+        return false;
+    }
+    int existing = -1;
     for (uint16_t i = 0; i < flash_record_count; i++) {
         if (flash_names_equal(flash_records[i].Name, rec->Name)) {
-            printf("FLASHSTORE: '%s' is already in flash\n", rec->Name);
-            return false;
+            if (!flash_job_show_details || flash_records[i].Size != rec->Size) {
+                printf("FLASHSTORE: '%s' is already in flash\n", rec->Name);
+                ctrl_mapper_value = FLASH_COPY_DUPLICATE;
+                return false;
+            }
+            existing = (int)i;
+            break;
         }
     }
 
     const char *path = sd_path_buffer + sd_path_offsets[record_index];
-    uint8_t mapper = mapper_code_from_record_byte(rec->Mapper);
-    if (mapper == 0) {
-        mapper = mapper_number_from_filename(basename_from_path(path));
-    }
-    if (mapper == 0) {
-        mapper = detect_rom_type_from_file(path, (uint32_t)rec->Size);
-    }
-    if (mapper == 0 || mapper == MAPPER_DSK || is_system_mapper(mapper)) {
-        printf("FLASHSTORE: unsupported mapper %u for %s\n", (unsigned)mapper, path);
+    if (is_dsk_record(rec)) {
+        printf("FLASHSTORE: disk images cannot be copied as ROMs\n");
+        ctrl_mapper_value = FLASH_COPY_MAPPER;
         return false;
     }
-
-    if (flash_slots_used >= FLASH_CONFIG_SLOTS && !flash_store_compact()) {
-        return false;
-    }
-    if (!flash_store_find_space((uint32_t)rec->Size, &flash_job_addr)) {
-        printf("FLASHSTORE: no room for %lu bytes\n", (unsigned long)rec->Size);
-        return false;
+    if (existing < 0) {
+        if (flash_record_count >= MAX_FLASH_RECORDS || flash_store_overflow) {
+            printf("FLASHSTORE: flash entry list is full\n");
+            ctrl_mapper_value = FLASH_COPY_NO_SPACE;
+            return false;
+        }
+        if (!flash_store_find_space((uint32_t)rec->Size, &flash_job_addr)) {
+            printf("FLASHSTORE: no contiguous room for %lu bytes\n", (unsigned long)rec->Size);
+            ctrl_mapper_value = FLASH_COPY_NO_SPACE;
+            return false;
+        }
+        if (flash_slots_used >= FLASH_CONFIG_SLOTS && !flash_store_compact()) {
+            printf("FLASHSTORE: metadata compaction failed\n");
+            return false;
+        }
+    } else {
+        flash_job_addr = flash_store_base() + (uint32_t)flash_records[existing].Offset;
     }
 
     sd_activity_note();
     if (f_open(&flash_job_file, path, FA_READ) != FR_OK) {
+        printf("FLASHSTORE: cannot open %s\n", path);
         return false;
     }
     flash_job_file_open = true;
+    if (f_size(&flash_job_file) != rec->Size) {
+        printf("FLASHSTORE: file size changed for %s\n", path);
+        return false;
+    }
     memset(&flash_job_entry, 0, sizeof(flash_job_entry));
     memcpy(flash_job_entry.Name, rec->Name, strnlen(rec->Name, ROM_NAME_MAX));
-    flash_job_entry.Mapper = mapper;
+    flash_job_entry.Mapper = mapper_code_from_record_byte(rec->Mapper);
     flash_job_entry.Size = rec->Size;
     flash_job_entry.Offset = flash_job_addr - flash_store_base();
     flash_job_record = record_index;
     flash_job_span = flash_store_align_up((uint32_t)rec->Size, FLASH_SECTOR_SIZE);
     flash_job_erased = 0;
     flash_job_written = 0;
-    printf("FLASHSTORE: copying %s (%lu bytes, mapper %u) to 0x%08lx\n", path,
-           (unsigned long)rec->Size, (unsigned)mapper, (unsigned long)flash_job_addr);
+    ctrl_mapper_value = 0;
+    if (existing >= 0) {
+        flash_job_state = FLASH_JOB_MATCH;
+        printf("FLASHSTORE: checking existing '%s'\n", rec->Name);
+        return true;
+    }
+    printf("FLASHSTORE: copying %s (%lu bytes) to 0x%08lx\n", path,
+           (unsigned long)rec->Size, (unsigned long)flash_job_addr);
+    return true;
+}
+
+static bool flash_job_match_step(void) {
+    uint32_t size = (uint32_t)flash_job_entry.Size;
+    uint32_t stop = flash_job_written + FLASH_SECTOR_SIZE;
+    if (stop > size) stop = size;
+    while (flash_job_written < stop) {
+        uint32_t want = stop - flash_job_written;
+        if (want > FLASH_STORE_CHUNK) want = FLASH_STORE_CHUNK;
+        UINT br = 0;
+        sd_activity_note();
+        if (f_read(&flash_job_file, flash_store_buf, want, &br) != FR_OK || br != want) {
+            printf("FLASHSTORE: existing-image check read failed\n");
+            ctrl_mapper_value = FLASH_COPY_IO;
+            return false;
+        }
+        if (memcmp((const void *)(XIP_BASE + flash_job_addr + flash_job_written), flash_store_buf, want) != 0) {
+            printf("FLASHSTORE: another image already uses '%s'\n", flash_job_entry.Name);
+            ctrl_mapper_value = FLASH_COPY_DUPLICATE;
+            return false;
+        }
+        flash_job_written += want;
+    }
+    ctrl_mapper_value = (uint8_t)((flash_job_written * 100u) / size);
     return true;
 }
 
@@ -3154,6 +3270,9 @@ static bool flash_job_write_step(void) {
     }
     while (flash_job_written < stop && flash_job_written < size) {
         uint32_t want = size - flash_job_written;
+        if (want > stop - flash_job_written) {
+            want = stop - flash_job_written;
+        }
         if (want > FLASH_STORE_CHUNK) {
             want = FLASH_STORE_CHUNK;
         }
@@ -3175,11 +3294,51 @@ static bool flash_job_write_step(void) {
         }
         flash_job_written += want;
     }
-    // size is at most SD_ROM_MAX_SIZE (4 MB), so written * 100 fits in 32 bits.
+    // The cartridge's 16 MB flash bounds written * 100 below UINT32_MAX.
     ctrl_mapper_value = (uint8_t)((flash_job_written * 100u) / size);
     if (flash_job_written >= size) {
-        flash_job_state = FLASH_JOB_COMMIT;
+        ctrl_mapper_value = FLASH_COPY_DETECTING;
+        flash_job_state = FLASH_JOB_DETECT;
     }
+    return true;
+}
+
+static void flash_job_service_msx_reads(void) {
+    while (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read)) {
+        uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+        bool in_window;
+        uint8_t data = menu_read_byte(addr, &in_window);
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+static uint32_t flash_job_mapper_reader(void *user, uint32_t offset, void *buf, uint32_t len) {
+    uint32_t got = mapper_detect_membuf_reader(user, offset, buf, len);
+    flash_job_service_msx_reads();
+    return got;
+}
+
+static bool flash_job_detect_mapper(void) {
+    uint8_t mapper = flash_job_entry.Mapper;
+    if (mapper == 0) {
+        const char *path = sd_path_buffer + sd_path_offsets[flash_job_record];
+        mapper = mapper_number_from_filename(basename_from_path(path));
+    }
+    if (mapper == 0) {
+        mapper_detect_membuf_t image = {
+            .data = (const uint8_t *)(XIP_BASE + flash_job_addr),
+            .size = (uint32_t)flash_job_entry.Size
+        };
+        mapper = mapper_detect_stream(image.size, flash_job_mapper_reader, &image);
+    }
+    if (mapper == 0 || mapper == MAPPER_DSK || is_system_mapper(mapper)) {
+        printf("FLASHSTORE: copied image has unsupported mapper %u\n", (unsigned)mapper);
+        ctrl_mapper_value = FLASH_COPY_MAPPER;
+        return false;
+    }
+    flash_job_entry.Mapper = mapper;
+    ctrl_mapper_value = 100;
+    printf("FLASHSTORE: copied image mapper %u\n", (unsigned)mapper);
     return true;
 }
 
@@ -3212,8 +3371,12 @@ static void flash_job_copy_options(void) {
 }
 
 static bool flash_job_commit(void) {
-    f_close(&flash_job_file);
+    FRESULT fr = f_close(&flash_job_file);
     flash_job_file_open = false;
+    if (fr != FR_OK) {
+        printf("FLASHSTORE: source close failed: %u\n", (unsigned)fr);
+        return false;
+    }
 
     uint16_t slot = flash_slots_used;
     if (flash_record_count >= MAX_FLASH_RECORDS || flash_store_overflow) {
@@ -3232,18 +3395,48 @@ static bool flash_job_commit(void) {
 
 static void flash_job_finish(bool ok) {
     if (flash_job_file_open) {
-        f_close(&flash_job_file);
+        FRESULT fr = f_close(&flash_job_file);
+        if (fr != FR_OK) {
+            printf("FLASHSTORE: cleanup close failed: %u\n", (unsigned)fr);
+            ok = false;
+        }
         flash_job_file_open = false;
     }
     flash_job_state = FLASH_JOB_IDLE;
     if (ok) {
-        // The rebuilt list clears ctrl_cmd_state once the new entry is in it.
-        ctrl_ack_value = 1;
+        if (flash_job_show_details) {
+            browse_source_mode = SOURCE_MODE_FLASH;
+            set_root_path();
+        }
+        ctrl_ack_value = flash_job_show_details ? 0 : 1;
+        // Keep the command busy until the refreshed list contains the entry.
         refresh_requested = true;
     } else {
+        flash_job_show_details = false;
+        if (ctrl_mapper_value < FLASH_COPY_NO_SPACE) ctrl_mapper_value = FLASH_COPY_IO;
         ctrl_ack_value = 0;
         ctrl_cmd_state = 0;
     }
+}
+
+static void resolve_flash_copy_match(void) {
+    if (!flash_job_show_details) return;
+    flash_job_show_details = false;
+    match_index = 0xFFFF;
+    for (uint16_t i = 0; i < total_record_count; i++) {
+        uint16_t record_index = filtered_indices[i];
+        if (record_index >= full_record_count) continue;
+        const ROMRecord *rec = &records[record_index];
+        if ((rec->Mapper & SOURCE_SD_FLAG) == 0 &&
+            rec->Offset == flash_job_entry.Offset && rec->Size == flash_job_entry.Size) {
+            match_index = i;
+            ctrl_ack_value = CTRL_MAGIC;
+            return;
+        }
+    }
+    printf("FLASHSTORE: copied entry missing from refreshed flash list\n");
+    ctrl_mapper_value = FLASH_COPY_IO;
+    ctrl_ack_value = 0;
 }
 
 // The menu loop calls this whenever the PIO read FIFO is empty, which happens
@@ -3251,23 +3444,37 @@ static void flash_job_finish(bool ok) {
 // right after the Pico answers a single read, and the MSX (running its menu
 // from the cartridge) would be starved until the copy ends, never getting to
 // draw the progress. Each step is therefore followed by a short MSX time slice.
-#define FLASH_JOB_YIELD_US 3000u
+#define FLASH_JOB_YIELD_US 1000u
 static uint32_t flash_job_resume_us = 0;
 
-static void flash_job_background_work(void) {
+static void __noinline flash_job_background_work(void) {
     if ((int32_t)(time_us_32() - flash_job_resume_us) < 0) {
         return;
     }
     switch (flash_job_state) {
         case FLASH_JOB_START:
             if (flash_job_start()) {
-                flash_job_state = FLASH_JOB_WRITE;
+                if (flash_job_state == FLASH_JOB_START) flash_job_state = FLASH_JOB_WRITE;
             } else {
                 flash_job_finish(false);
             }
             break;
+        case FLASH_JOB_MATCH:
+            if (!flash_job_match_step()) {
+                flash_job_finish(false);
+            } else if (flash_job_written >= flash_job_entry.Size) {
+                flash_job_finish(true);
+            }
+            break;
         case FLASH_JOB_WRITE:
             if (!flash_job_write_step()) {
+                flash_job_finish(false);
+            }
+            break;
+        case FLASH_JOB_DETECT:
+            if (flash_job_detect_mapper()) {
+                flash_job_state = FLASH_JOB_COMMIT;
+            } else {
                 flash_job_finish(false);
             }
             break;
@@ -3786,10 +3993,11 @@ static void refresh_records_for_current_path(void) {
                     continue;
                 }
 
-                if (fno.fsize < MIN_ROM_SIZE || fno.fsize > MAX_ROM_SIZE) {
+                if (fno.fsize < MIN_ROM_SIZE) {
                     continue;
                 }
-                if (fno.fsize > SD_ROM_MAX_SIZE) {
+                if (fno.fsize > UINT32_MAX) {
+                    printf("SDLIST: ROM exceeds the 32-bit menu size field: %s\n", path);
                     continue;
                 }
 
@@ -3964,8 +4172,11 @@ static bool refresh_records_chunked(void) {
                 continue;
             }
 
-            if (fno.fsize < MIN_ROM_SIZE || fno.fsize > MAX_ROM_SIZE) continue;
-            if (fno.fsize > SD_ROM_MAX_SIZE) continue;
+            if (fno.fsize < MIN_ROM_SIZE) continue;
+            if (fno.fsize > UINT32_MAX) {
+                printf("SDLIST: ROM exceeds the 32-bit menu size field: %s\n", path);
+                continue;
+            }
 
             uint8_t mapper = mapper_number_from_filename(fno.fname);
             refresh_record_index = add_sd_rom_record(refresh_record_index, path, fno.fname, (uint32_t)fno.fsize, mapper);
@@ -4008,6 +4219,7 @@ static bool refresh_records_chunked(void) {
         apply_filter();
         resolve_last_selection_match();
         resolve_rename_match();
+        resolve_flash_copy_match();
         current_page = 0;
         build_page_buffer(current_page);
         refresh_state = REFRESH_IDLE;
@@ -4388,14 +4600,9 @@ static void quiesce_mp3_core1_before_sd_work(void) {
 // (no PIO traffic from the MSX). Single-core ownership of the SD card
 // avoids FatFS reentrancy issues and removes the freeze observed when
 // folder navigation raced with MP3 work on Core 1.
-static void fh_save_background_work(void);
 static void core1_bg_work(void) {
     if (flash_job_state != FLASH_JOB_IDLE) {
         flash_job_background_work();
-        return;
-    }
-    if (fh_save_state == FH_SAVE_RUNNING) {
-        fh_save_background_work();
         return;
     }
 
@@ -4785,9 +4992,6 @@ static void psram_mem_init(void)
     memset(&flash_region, 0, sizeof(flash_region));
     memset(&mp3_buffer_region, 0, sizeof(mp3_buffer_region));
     memset(&fh_list_region, 0, sizeof(fh_list_region));
-    memset(&fh_download_region, 0, sizeof(fh_download_region));
-    fh_download_size = 0;
-    memset(fh_download_name, 0, sizeof(fh_download_name));
 }
 
 static bool psram_alloc(uint32_t size, psram_region_t *region)
@@ -4867,7 +5071,6 @@ static bool psram_prepare_flash_region(uint32_t size)
     memset(&megaram_region, 0, sizeof(megaram_region));
     memset(&mp3_buffer_region, 0, sizeof(mp3_buffer_region));
     memset(&fh_list_region, 0, sizeof(fh_list_region));
-    memset(&fh_download_region, 0, sizeof(fh_download_region));
     memset(&flash_region, 0, sizeof(flash_region));
 
     return psram_alloc(size, &flash_region);
@@ -7379,8 +7582,6 @@ static void fh_set_empty_catalog_message(void);
 static void fh_build_page_buffer(void);
 static bool fh_download_selected(void);
 static void fh_update_wifi_status_text(void);
-static void fh_save_background_work(void);
-static bool fh_start_save_job(void);
 static void nexus_tracker_checkin_once(void);
 
 static void __not_in_flash_func(handle_menu_fh_command)(uint8_t data, explorer_menu_ctx_t *menu_ctx)
@@ -7565,7 +7766,11 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
         }
         else if (data == CMD_COPY_TO_FLASH)
         {
-            process_copy_to_flash_request();
+            process_copy_to_flash_request(false);
+        }
+        else if (data == CMD_PREPARE_FLASH_ROM)
+        {
+            process_copy_to_flash_request(true);
         }
         else if (data == CMD_RENAME_ENTRY)
         {
@@ -7588,7 +7793,7 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
         }
         
            if (data != CMD_ENTER_DIR && data != CMD_DETECT_MAPPER && data != CMD_DELETE_SD_FILE &&
-               data != CMD_COPY_TO_FLASH && data != CMD_RENAME_ENTRY) {
+               data != CMD_COPY_TO_FLASH && data != CMD_RENAME_ENTRY && data != CMD_PREPARE_FLASH_ROM) {
              ctrl_cmd_state = 0;
         }
         return;
@@ -7641,7 +7846,7 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
     }
 
     if (addr == CTRL_SD_PARTITION) {
-        ctrl_sd_partition = (data >= 1u && data <= 4u) ? data : 0u;
+        ctrl_sd_partition = (data >= 1u && data <= SD_PART_WHOLE_DISK) ? data : 0u;
         refresh_sunrise_partition_info(ctrl_sd_partition);
         return;
     }
@@ -7662,13 +7867,22 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
     }
 
     if (addr == MONITOR_ADDR) {
-        uint8_t selected_index = data;
+        uint16_t selected_index = data;
         if (selected_index == ROM_SELECT_MENU) {
             menu_ctx->rom_selected = false;
             return;
         }
         if (selected_index < total_record_count) {
-            menu_ctx->rom_index = (uint8_t)filtered_indices[selected_index];
+            uint16_t record_index = filtered_indices[selected_index];
+            const ROMRecord *rec = &records[record_index];
+            if ((rec->Mapper & SOURCE_SD_FLAG) && rec->Size > SD_ROM_MAX_SIZE &&
+                !is_dsk_record(rec)) {
+                printf("FLASHSTORE: large ROM must be selected from the flash list\n");
+                ctrl_ack_value = 0;
+                ctrl_mapper_value = FLASH_COPY_IO;
+                return;
+            }
+            menu_ctx->rom_index = record_index;
             menu_ctx->rom_selected = true;
         }
         return;
@@ -8222,9 +8436,10 @@ typedef struct {
     bool chunked;
     bool done;
     bool has_content_length;
-    uint32_t content_remaining;
-    uint32_t remaining;
-    char size_line[12];
+    bool size_extension;
+    uint64_t content_remaining;
+    uint64_t remaining;
+    char size_line[24];
     uint8_t size_len;
     uint8_t crlf_to_skip;
 } fh_http_decoder_t;
@@ -8360,16 +8575,18 @@ static bool fh_header_value_is_chunked(const char *value)
     return false;
 }
 
-static bool fh_parse_header_u32(const char *value, uint32_t *out)
+static bool fh_parse_header_u64(const char *value, uint64_t *out)
 {
-    unsigned long parsed;
-
     if (!value || !out) return false;
     while (*value == ' ' || *value == '\t') value++;
     if (!isdigit((unsigned char)*value)) return false;
-    parsed = strtoul(value, NULL, 10);
-    if (parsed > 0xFFFFFFFFul) return false;
-    *out = (uint32_t)parsed;
+    char *end;
+    errno = 0;
+    uint64_t parsed = strtoull(value, &end, 10);
+    if (errno == ERANGE) return false;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0' && *end != '\r' && *end != '\n') return false;
+    *out = parsed;
     return true;
 }
 
@@ -8445,7 +8662,7 @@ static bool fh_deliver_http_body(const uint8_t *data, uint16_t len, fh_http_deco
                 decoder->done = true;
                 return true;
             }
-            if ((uint32_t)take > decoder->content_remaining)
+            if (take > decoder->content_remaining)
                 take = (uint16_t)decoder->content_remaining;
         }
         if (take != 0u && !callback(data, take, ctx))
@@ -8476,28 +8693,31 @@ static bool fh_deliver_http_body(const uint8_t *data, uint16_t len, fh_http_deco
             if (ch == '\n')
             {
                 decoder->size_line[decoder->size_len] = '\0';
-                decoder->remaining = (uint32_t)strtoul(decoder->size_line, NULL, 16);
+                char *end;
+                errno = 0;
+                decoder->remaining = strtoull(decoder->size_line, &end, 16);
+                if (errno == ERANGE || end == decoder->size_line || *end != '\0')
+                    return false;
                 decoder->size_len = 0;
+                decoder->size_extension = false;
                 if (decoder->remaining == 0u)
                     decoder->done = true;
             }
-            else if (ch != '\r' && ch != ';' && decoder->size_len + 1u < sizeof(decoder->size_line))
-            {
-                decoder->size_line[decoder->size_len++] = (char)ch;
-            }
             else if (ch == ';')
             {
-                while (len > 0u && *data != '\n')
-                {
-                    data++;
-                    len--;
-                }
+                decoder->size_extension = true;
+            }
+            else if (ch != '\r' && !decoder->size_extension)
+            {
+                if (!isxdigit((unsigned char)ch) || decoder->size_len + 1u >= sizeof(decoder->size_line))
+                    return false;
+                decoder->size_line[decoder->size_len++] = (char)ch;
             }
             continue;
         }
 
         uint16_t take = len;
-        if ((uint32_t)take > decoder->remaining)
+        if (take > decoder->remaining)
             take = (uint16_t)decoder->remaining;
         if (take != 0u && !callback(data, take, ctx))
             return false;
@@ -8682,8 +8902,15 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
                                 file_clock_set_from_fattime(((uint32_t)server_now.fdate << 16) | server_now.ftime);
                         }
                         decoder.chunked = fh_header_value_is_chunked(fh_find_header_value(headers, "Transfer-Encoding"));
-                        if (!decoder.chunked && fh_parse_header_u32(fh_find_header_value(headers, "Content-Length"), &decoder.content_remaining))
+                        const char *content_length = fh_find_header_value(headers, "Content-Length");
+                        if (!decoder.chunked && content_length) {
+                            if (!fh_parse_header_u64(content_length, &decoder.content_remaining)) {
+                                printf("[fh] invalid HTTP Content-Length\n");
+                                fh_wifi_tcp_close(connection);
+                                return false;
+                            }
                             decoder.has_content_length = true;
+                        }
                         body_started = true;
                         if (i + 1u < bytes_read)
                         {
@@ -8718,11 +8945,11 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
     }
     if (decoder.chunked || decoder.has_content_length)
     {
-        printf("[fh] HTTP done=%u chunked=%u content_length=%u remaining=%lu\n",
+        printf("[fh] HTTP done=%u chunked=%u content_length=%u remaining=%llu\n",
                decoder.done ? 1u : 0u,
                decoder.chunked ? 1u : 0u,
                decoder.has_content_length ? 1u : 0u,
-               (unsigned long)decoder.content_remaining);
+               (unsigned long long)decoder.content_remaining);
         fflush(stdout);
         return decoder.done;
     }
@@ -8914,62 +9141,69 @@ static bool fh_fetch_catalog(const char *query)
     return fh_parse_catalog(download.data, download.len);
 }
 
+#define FH_DOWNLOAD_PATH_SIZE (ROM_NAME_MAX + 6u)
+
 typedef struct {
     bool metadata_done;
+    bool size_exact;
+    bool file_open;
+    bool failed;
     char metadata_line[128];
     uint8_t metadata_len;
-    uint32_t expected_size;
-    uint32_t written;
+    uint64_t expected_size;
+    FSIZE_t written;
     uint16_t fallback_size_kb;
-    bool failed;
-} fh_psram_download_t;
+    char path[FH_DOWNLOAD_PATH_SIZE];
+    char temp_path[FH_DOWNLOAD_PATH_SIZE + 5u];
+} fh_sd_download_t;
 
-static uint32_t fh_parse_download_size(const char *line, uint16_t fallback_size_kb)
+static bool fh_parse_download_size(const char *line, uint16_t fallback_size_kb,
+                                   uint64_t *size, bool *exact)
 {
     const char *ptr = strstr(line, "size:");
-    uint32_t fallback_size = (uint32_t)fallback_size_kb * 1024u;
-    uint32_t value = 0u;
-
-    if (ptr)
-    {
-        value = (uint32_t)strtoul(ptr + 5, NULL, 10);
-    }
-
-    if (value == 0u)
+    if (!ptr)
     {
         ptr = line;
         while (*ptr == ' ' || *ptr == '\t') ptr++;
-        if (tolower((unsigned char)ptr[0]) == 's' &&
+        if (!(strlen(ptr) >= 5u && tolower((unsigned char)ptr[0]) == 's' &&
             tolower((unsigned char)ptr[1]) == 'i' &&
             tolower((unsigned char)ptr[2]) == 'z' &&
-            tolower((unsigned char)ptr[3]) == 'e' && ptr[4] == ':')
-        {
-            value = (uint32_t)strtoul(ptr + 5, NULL, 10);
-        }
+            tolower((unsigned char)ptr[3]) == 'e' && ptr[4] == ':'))
+            ptr = NULL;
     }
-
-    if (value < fallback_size) value = fallback_size;
-    return value;
-}
-
-static bool fh_prepare_download_region(uint32_t size)
-{
-    if (size == 0u || size > SD_ROM_MAX_SIZE) return false;
-    if (!psram_bring_up_once()) return false;
-
-    if (size <= sd_rom_region.size)
+    *exact = ptr != NULL;
+    *size = (uint64_t)fallback_size_kb * 1024u;
+    if (ptr)
     {
-        fh_download_region = sd_rom_region;
-        return true;
+        ptr += 5;
+        while (*ptr == ' ' || *ptr == '\t') ptr++;
+        if (!isdigit((unsigned char)*ptr)) return false;
+        errno = 0;
+        *size = strtoull(ptr, NULL, 10);
+        if (errno == ERANGE || *size > (uint64_t)(FSIZE_t)-1) return false;
     }
-
-    if (fh_download_region.ptr && fh_download_region.size >= size) return true;
-    return psram_alloc(size, &fh_download_region);
+    return true;
 }
 
-static bool fh_psram_download_body_callback(const uint8_t *data, uint16_t len, void *ctx)
+static uint16_t fh_download_percent(uint64_t written, uint64_t expected)
 {
-    fh_psram_download_t *download = (fh_psram_download_t *)ctx;
+    if (expected == 0u) return 0;
+    if (written >= expected) return 100;
+    uint16_t low = 0;
+    uint16_t high = 100;
+    while (low + 1u < high) {
+        uint16_t percent = (uint16_t)((low + high) / 2u);
+        uint64_t threshold = (expected / 100u) * percent +
+                             ((expected % 100u) * percent + 99u) / 100u;
+        if (written >= threshold) low = percent;
+        else high = percent;
+    }
+    return low;
+}
+
+static bool fh_sd_download_body_callback(const uint8_t *data, uint16_t len, void *ctx)
+{
+    fh_sd_download_t *download = (fh_sd_download_t *)ctx;
     const uint8_t *ptr = data;
     uint16_t remaining = len;
 
@@ -8980,18 +9214,34 @@ static bool fh_psram_download_body_callback(const uint8_t *data, uint16_t len, v
         if (ch == '\n')
         {
             download->metadata_line[download->metadata_len] = '\0';
-            download->expected_size = fh_parse_download_size(download->metadata_line, download->fallback_size_kb);
-            if (!fh_prepare_download_region(download->expected_size))
+            if (!fh_parse_download_size(download->metadata_line, download->fallback_size_kb,
+                                        &download->expected_size, &download->size_exact))
             {
+                fh_copy_status_prefix("Download failed: invalid size");
                 download->failed = true;
                 return false;
             }
+            fatfs_set_fattime_override(file_download_fattime(((uint32_t)fh_download_timestamp.fdate << 16) |
+                                                             fh_download_timestamp.ftime));
+            FRESULT fr = f_open(&fh_download_file, download->temp_path, FA_CREATE_ALWAYS | FA_WRITE);
+            if (fr != FR_OK) {
+                snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save open failed: %u", (unsigned)fr);
+                download->failed = true;
+                return false;
+            }
+            download->file_open = true;
             download->metadata_done = true;
             fh_progress_percent = 0;
             break;
         }
-        if (ch != '\r' && download->metadata_len + 1u < sizeof(download->metadata_line))
+        if (ch != '\r') {
+            if (download->metadata_len + 1u >= sizeof(download->metadata_line)) {
+                fh_copy_status_prefix("Download failed: metadata");
+                download->failed = true;
+                return false;
+            }
             download->metadata_line[download->metadata_len++] = (char)ch;
+        }
     }
 
     if (!download->metadata_done)
@@ -8999,26 +9249,26 @@ static bool fh_psram_download_body_callback(const uint8_t *data, uint16_t len, v
 
     if (remaining > 0u)
     {
-        uint32_t to_copy = remaining;
-
-        if (!fh_download_region.ptr || download->written > fh_download_region.size ||
-            to_copy > (fh_download_region.size - download->written))
-        {
+        if ((uint64_t)remaining > (uint64_t)(FSIZE_t)-1 - download->written ||
+            (download->size_exact && (download->written > download->expected_size ||
+             remaining > download->expected_size - download->written))) {
+            fh_copy_status_prefix("Download exceeds file size");
             download->failed = true;
             return false;
         }
-
-        memcpy(fh_download_region.ptr + download->written, ptr, to_copy);
-        download->written += to_copy;
+        UINT written = 0;
+        sd_activity_note();
+        FRESULT fr = f_write(&fh_download_file, ptr, remaining, &written);
+        if (fr != FR_OK || written != remaining) {
+            if (fr == FR_OK) fh_copy_status_prefix("microSD full. Press key.");
+            else snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save write failed: %u", (unsigned)fr);
+            download->failed = true;
+            return false;
+        }
+        download->written += written;
     }
 
-    if (download->expected_size != 0u)
-    {
-        uint32_t percent = (download->written * 100u) / download->expected_size;
-        if (percent > 100u) percent = 100u;
-        fh_progress_percent = (uint16_t)percent;
-    }
-
+    fh_progress_percent = fh_download_percent(download->written, download->expected_size);
     fh_service_msx_reads();
     return true;
 }
@@ -9035,8 +9285,7 @@ static bool fh_filename_has_extension(const char *filename, const char *ext3)
            tolower((unsigned char)ext[3]) == ext3[2];
 }
 
-// Runs once per save, just before FatFS (flash code) opens the file; kept out of
-// line so it is not inlined into the RAM-resident menu loop.
+// Kept out of line to avoid growing the RAM-resident command handler.
 static bool __noinline fh_build_download_path(const char *name, uint8_t type, char *path, size_t path_size)
 {
     char filename[ROM_NAME_MAX + 5u];
@@ -9072,196 +9321,120 @@ static bool __noinline fh_build_download_path(const char *name, uint8_t type, ch
         memcpy(filename + out, dsk ? ".DSK" : ".ROM", 5u);
     }
 
-    return snprintf(path, path_size, "%s", filename) < (int)path_size;
+    int length = snprintf(path, path_size, "/%s", filename);
+    return length > 0 && (size_t)length < path_size;
 }
 
-static void fh_save_fail(const char *message)
+static bool fh_publish_download(const fh_sd_download_t *download)
 {
-    if (message)
-        fh_copy_status_prefix(message);
-    if (fh_save_file_open)
-    {
-        f_close(&fh_save_file);
-        fh_save_file_open = false;
+    char backup[FH_DOWNLOAD_PATH_SIZE + 5u];
+    FRESULT fr = f_rename(download->temp_path, download->path);
+    if (fr == FR_EXIST) {
+        snprintf(backup, sizeof(backup), "%s.bak", download->path);
+        fr = f_rename(download->path, backup);
+        if (fr != FR_OK) {
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Replace failed: %u", (unsigned)fr);
+            return false;
+        }
+        fr = f_rename(download->temp_path, download->path);
+        if (fr != FR_OK) {
+            FRESULT restore = f_rename(backup, download->path);
+            printf("[fh] publish failed %u, restore %u: %s\n", (unsigned)fr, (unsigned)restore, backup);
+            fh_copy_status_prefix(restore == FR_OK ? "Save rename failed" : "Save failed; .bak kept");
+            return false;
+        }
+        FRESULT cleanup = f_unlink(backup);
+        if (cleanup != FR_OK) {
+            printf("[fh] backup cleanup failed %u: %s\n", (unsigned)cleanup, backup);
+            fh_copy_status_prefix("Saved; remove .bak. Press key.");
+            return true;
+        }
     }
-    fatfs_set_fattime_override(0u);
-    fh_save_close_pending = false;
-    fh_result = 0u;
-    fh_save_state = FH_SAVE_FAILED;
-}
-
-static void fh_save_background_work(void)
-{
-    FRESULT fr;
-
-    if (fh_save_state != FH_SAVE_RUNNING) return;
-
-    if (!fh_save_file_open && !fh_save_close_pending)
-    {
-        char path[SD_PATH_MAX];
-
-        if (!fh_download_region.ptr || fh_download_size == 0u || fh_download_size > fh_download_region.size)
-        {
-            fh_save_fail("Save failed: buffer");
-            return;
-        }
-        if (!sd_is_mounted())
-        {
-            fh_save_fail("Use F2 microSD first");
-            return;
-        }
-        if (!fh_build_download_path(fh_download_name, fh_download_type, path, sizeof(path)))
-        {
-            fh_save_fail("Save failed: path");
-            return;
-        }
-        fatfs_set_fattime_override(file_download_fattime(((uint32_t)fh_download_timestamp.fdate << 16) |
-                                                         fh_download_timestamp.ftime));
-        fr = f_open(&fh_save_file, path, FA_CREATE_ALWAYS | FA_WRITE);
-        if (fr != FR_OK)
-        {
-            fatfs_set_fattime_override(0u);
-            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: open %u", (unsigned int)fr);
-            fh_save_fail(NULL);
-            return;
-        }
-        fh_save_file_open = true;
-        return;
+    if (fr != FR_OK) {
+        snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save rename failed: %u", (unsigned)fr);
+        return false;
     }
-
-    if (fh_save_close_pending)
-    {
-        fr = f_close(&fh_save_file);
-        fatfs_set_fattime_override(0u);
-        fh_save_file_open = false;
-        fh_save_close_pending = false;
-        if (fr != FR_OK)
-        {
-            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: close %u", (unsigned int)fr);
-            fh_result = 0u;
-            fh_save_state = FH_SAVE_FAILED;
-            return;
-        }
-        fh_copy_status_prefix("Saved to microSD");
-        fh_result = 1u;
-        fh_save_state = FH_SAVE_DONE;
-        set_root_path();
-        refresh_requested = true;
-        return;
-    }
-
-    if (fh_save_offset < fh_download_size)
-    {
-        UINT to_write = (UINT)((fh_download_size - fh_save_offset) > 512u ? 512u : (fh_download_size - fh_save_offset));
-        UINT written = 0;
-
-        memcpy(fh_sd_save_chunk, fh_download_region.ptr + fh_save_offset, to_write);
-        sd_activity_note();
-        fr = f_write(&fh_save_file, fh_sd_save_chunk, to_write, &written);
-        if (fr != FR_OK || written != to_write)
-        {
-            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: write %u", (unsigned int)fr);
-            fh_save_fail(NULL);
-            return;
-        }
-        fh_save_offset += written;
-        if (fh_save_offset >= fh_download_size)
-            fh_save_close_pending = true;
-    }
-}
-
-static bool fh_start_save_job(void)
-{
-    if (fh_save_state == FH_SAVE_RUNNING) return false;
-
-    // The File Hunter save does FatFS on Core 0, so the live MP3/WAV core must
-    // not touch the SD card during the save. Stop any active playback but keep
-    // the core alive (while FH_SAVE_RUNNING, core1_bg_work() services only the
-    // save and dispatches no MP3 commands, so the stopped core stays idle and
-    // the save single-owns the SD card). NOTE: a File Hunter download currently
-    // leaves the live audio pipeline unusable until a power cycle - reusing or
-    // re-initialising pico_audio_i2s after a download is silent (see docs/log).
-    if (mp3_core1_started &&
-        (mp3_get_status() & (MP3_STATUS_PLAYING | MP3_STATUS_PAUSED)))
-    {
-        mp3_send_cmd(MP3_CMD_STOP);
-        uint32_t deadline = time_us_32() + 500000u;
-        while ((mp3_get_status() & (MP3_STATUS_PLAYING | MP3_STATUS_PAUSED)) &&
-               (int32_t)(deadline - time_us_32()) > 0)
-            sleep_us(500);
-    }
-
-    fh_save_offset = 0;
-    fh_save_file_open = false;
-    fh_save_close_pending = false;
-    fh_result = FH_RESULT_SAVING;
-    fh_save_state = FH_SAVE_RUNNING;
+    fh_copy_status_prefix("Saved to microSD. Press key.");
     return true;
 }
 
 static bool fh_download_selected(void)
 {
     char path[192];
-    fh_psram_download_t download;
-    bool http_ok;
-    bool ok;
-
-    if (fh_selected_index >= fh_catalog_count) return false;
-
-    if (((uint32_t)fh_catalog[fh_selected_index].size_kb * 1024u) > SD_ROM_MAX_SIZE)
-    {
-        fh_copy_status_prefix("Download blocked: >4MB");
+    fh_sd_download_t download;
+    fh_wifi_status_text[0] = '\0';
+    if (fh_selected_index >= fh_catalog_count) {
+        fh_copy_status_prefix("Invalid download selection");
+        printf("[fh] invalid download index %u\n", (unsigned)fh_selected_index);
+        return false;
+    }
+    fh_quiesce_audio_for_qmi();
+    if (!sd_mount_card()) {
+        fh_copy_status_prefix("No microSD card. Press key.");
+        printf("[fh] microSD mount failed\n");
         return false;
     }
 
     fh_build_http_path(path, sizeof(path), fh_active_query, fh_active_type, (int)fh_selected_index);
-
     memset(&download, 0, sizeof(download));
     memset(&fh_download_timestamp, 0, sizeof(fh_download_timestamp));
-    download.fallback_size_kb = fh_catalog[fh_selected_index].size_kb;
-    fh_progress_percent = 0;
-    http_ok = fh_http_get_with_timestamp(path, fh_psram_download_body_callback, &download, 20000000u,
-                                         &fh_download_timestamp);
-    ok = http_ok &&
-         download.metadata_done && !download.failed &&
-            download.written != 0u &&
-            (download.expected_size == 0u || download.written >= download.expected_size);
-    // Explorer lists a .DSK only when it can boot it, so do not save an image
-    // that would never show up in the microSD list.
-    if (ok && fh_active_type == FH_TYPE_DSK && !dsk_size_supported(download.written))
-    {
-        snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Unsupported DSK size: %luKB",
-                 (unsigned long)(download.written / 1024u));
+    if (!fh_build_download_path(fh_catalog[fh_selected_index].name, fh_active_type,
+                                download.path, sizeof(download.path))) {
+        fh_copy_status_prefix("Invalid download filename");
+        printf("[fh] download path does not fit\n");
         return false;
     }
-    if (ok)
-    {
-        fh_progress_percent = 100u;
-        fh_download_size = download.written;
-        fh_download_type = fh_active_type;
-        strncpy(fh_download_name, fh_catalog[fh_selected_index].name, sizeof(fh_download_name) - 1u);
-        fh_download_name[sizeof(fh_download_name) - 1u] = '\0';
-        fh_result = FH_RESULT_SAVING;
-        fh_copy_status_prefix("Saving to microSD card...");
-        fh_service_msx_reads_for(250000u);
-        ok = fh_start_save_job();
-    }
-    else
-    {
-        uint32_t percent = 0;
-        if (download.expected_size != 0u)
-        {
-            percent = (download.written * 100u) / download.expected_size;
-            if (percent > 100u) percent = 100u;
-        }
+    snprintf(download.temp_path, sizeof(download.temp_path), "%s.part", download.path);
+    download.fallback_size_kb = fh_catalog[fh_selected_index].size_kb;
+    fh_progress_percent = 0;
+    bool http_ok = fh_http_get_with_timestamp(path, fh_sd_download_body_callback, &download, 20000000u,
+                                              &fh_download_timestamp);
+    bool ok = http_ok && download.metadata_done && !download.failed && download.written != 0u &&
+              (!download.size_exact || download.written == download.expected_size);
+    if (!ok && !download.failed) {
         if (!http_ok)
-            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Download failed: TCP %u %lu%%", (unsigned int)fh_tcp_last_error, (unsigned long)percent);
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Download failed: TCP %u %u%%",
+                     (unsigned)fh_tcp_last_error, (unsigned)fh_progress_percent);
         else if (!download.metadata_done)
-            fh_copy_status_prefix("Download failed: no size");
-        else if (download.failed)
-            fh_copy_status_prefix("Download failed: data");
+            fh_copy_status_prefix("Download failed: no metadata");
         else
-            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Download failed: %lu%%", (unsigned long)percent);
+            fh_copy_status_prefix("Download failed: incomplete file");
+    }
+    if (ok && fh_active_type == FH_TYPE_DSK &&
+        (download.written > UINT32_MAX || !dsk_size_supported((uint32_t)download.written))) {
+        fh_copy_status_prefix("Unsupported DSK size. Press key.");
+        ok = false;
+    }
+    if (ok) {
+        fh_result = FH_RESULT_SAVING;
+        fh_copy_status_prefix("Finalizing microSD file...");
+        fh_service_msx_reads_for(250000u);
+        FRESULT fr = f_close(&fh_download_file);
+        if (fr != FR_OK) {
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save close failed: %u", (unsigned)fr);
+            ok = false;
+        } else {
+            download.file_open = false;
+            ok = fh_publish_download(&download);
+        }
+    }
+    if (download.file_open) {
+        FRESULT fr = f_close(&fh_download_file);
+        if (fr != FR_OK) printf("[fh] cleanup close failed: %u\n", (unsigned)fr);
+    }
+    fatfs_set_fattime_override(0u);
+    if (ok) {
+        fh_progress_percent = 100;
+        fh_result = 1;
+        set_root_path();
+        refresh_requested = true;
+    } else {
+        FRESULT fr = f_unlink(download.temp_path);
+        if (fr != FR_OK && fr != FR_NO_FILE && fr != FR_NO_PATH) {
+            printf("[fh] partial file cleanup failed %u: %s\n", (unsigned)fr, download.temp_path);
+        }
+        printf("[fh] %s\n", fh_wifi_status_text);
+        fh_result = 0;
     }
     return ok;
 }
@@ -9659,6 +9832,101 @@ static int __no_inline_not_in_flash_func(loadrom_filehunter)(void)
     return ROM_SELECT_MENU;
 }
 
+static uint8_t __no_inline_not_in_flash_func(menu_read_byte)(uint16_t addr, bool *in_window)
+{
+    uint8_t data = 0xFFu;
+    *in_window = addr >= 0x4000u && addr <= 0xBFFFu;
+    if (!*in_window) return data;
+
+    if (addr >= CTRL_BASE_ADDR && addr <= CTRL_BASE_ADDR + 0x0Fu)
+    {
+        if (fh_menu_window_active)
+        {
+            switch (addr)
+            {
+                case CTRL_COUNT_L: data = (uint8_t)(fh_catalog_count & 0xFFu); break;
+                case CTRL_COUNT_H: data = (uint8_t)(fh_catalog_count >> 8); break;
+                case CTRL_PAGE: data = fh_page_index; break;
+                case CTRL_STATUS: data = fh_status; break;
+                case CTRL_CMD: data = ctrl_cmd_state; break;
+                case CTRL_MATCH_L: data = (uint8_t)(fh_selected_index & 0xFFu); break;
+                case CTRL_MATCH_H: data = (uint8_t)(fh_selected_index >> 8); break;
+                case CTRL_MAPPER: data = (uint8_t)(fh_progress_percent & 0xFFu); break;
+                case CTRL_ACK: data = (uint8_t)(fh_progress_percent >> 8); break;
+                case CTRL_AUDIO: data = fh_result; break;
+                case CTRL_WIFI_SUPPORT:
+                case CTRL_PSG_EMULATION:
+                case CTRL_WAVEGAME_ROM:
+                case CTRL_SD_PARTITION:
+                case CTRL_SD_BROWSE_PARTITION:
+                case CTRL_AUDIO_VOLUME: data = 0; break;
+            }
+        }
+        else
+        {
+            switch (addr)
+            {
+                case CTRL_COUNT_L: data = (uint8_t)(total_record_count & 0xFFu); break;
+                case CTRL_COUNT_H: data = (uint8_t)(total_record_count >> 8); break;
+                case CTRL_PAGE: data = current_page; break;
+                case CTRL_STATUS: data = ctrl_status_value; break;
+                case CTRL_CMD: data = ctrl_cmd_state; break;
+                case CTRL_MATCH_L: data = (uint8_t)(match_index & 0xFFu); break;
+                case CTRL_MATCH_H: data = (uint8_t)(match_index >> 8); break;
+                case CTRL_MAPPER: data = ctrl_mapper_value; break;
+                case CTRL_ACK: data = ctrl_ack_value; break;
+                case CTRL_AUDIO: data = ctrl_audio_selection; break;
+                case CTRL_WIFI_SUPPORT: data = ctrl_wifi_support; break;
+                case CTRL_PSG_EMULATION: data = ctrl_psg_emulation; break;
+                case CTRL_WAVEGAME_ROM: data = ctrl_wavegame_rom; break;
+                case CTRL_SD_PARTITION: data = ctrl_sd_partition; break;
+                case CTRL_SD_BROWSE_PARTITION: data = sd_browse_partition; break;
+                case CTRL_AUDIO_VOLUME: data = ctrl_audio_volume; break;
+            }
+        }
+    }
+    else if (addr >= MP3_CTRL_BASE && addr <= MP3_CTRL_BASE + 0x0Fu)
+    {
+        uint16_t elapsed = mp3_get_elapsed_seconds();
+        uint16_t total = mp3_get_total_seconds();
+        switch (addr)
+        {
+            case MP3_CTRL_STATUS: data = mp3_get_status(); break;
+            case MP3_CTRL_ELAPSED_L: data = (uint8_t)elapsed; break;
+            case MP3_CTRL_ELAPSED_H: data = (uint8_t)(elapsed >> 8); break;
+            case MP3_CTRL_TOTAL_L: data = (uint8_t)total; break;
+            case MP3_CTRL_TOTAL_H: data = (uint8_t)(total >> 8); break;
+            case MP3_CTRL_INDEX_L: data = (uint8_t)mp3_selected_index; break;
+            case MP3_CTRL_INDEX_H: data = (uint8_t)(mp3_selected_index >> 8); break;
+            case MP3_CTRL_MODE: data = mp3_play_mode; break;
+        }
+    }
+    else if (!fh_menu_window_active && addr >= CTRL_SD_PARTITION_INFO_BASE &&
+             addr < CTRL_SD_PARTITION_INFO_BASE + CTRL_SD_PARTITION_INFO_SIZE)
+        data = ctrl_sd_partition_info[addr - CTRL_SD_PARTITION_INFO_BASE];
+    else if (addr >= CTRL_CHIP_ID_BASE && addr < CTRL_CHIP_ID_BASE + CTRL_CHIP_ID_SIZE)
+        data = (uint8_t)pico_chip_id[addr - CTRL_CHIP_ID_BASE];
+    else if (!fh_menu_window_active && addr == CTRL_VDP_FREQ)
+        data = ctrl_vdp_frequency;
+    else if (!fh_menu_window_active && addr == CTRL_CPU_MODE)
+        data = ctrl_cpu_mode;
+    else if (addr == CTRL_NET_STATUS)
+        data = esp_net_status;
+    else if (addr == CTRL_DISK_ACT)
+        data = sd_activity_counter;
+    else if (!fh_menu_window_active && addr >= CTRL_FLASH_FREE_KB && addr < CTRL_FLASH_FREE_KB + 2u)
+        data = (uint8_t)(flash_free_kb >> ((addr - CTRL_FLASH_FREE_KB) * 8u));
+    else if (!fh_menu_window_active && addr >= CTRL_FLASH_LARGEST_KB && addr < CTRL_FLASH_LARGEST_KB + 2u)
+        data = (uint8_t)(flash_largest_kb >> ((addr - CTRL_FLASH_LARGEST_KB) * 8u));
+    else if (fh_menu_window_active && addr >= FH_STATUS_TEXT_BASE && addr < FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE)
+        data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
+    else if (addr >= DATA_BASE_ADDR && addr < DATA_BASE_ADDR + DATA_BUFFER_SIZE)
+        data = page_buffer[addr - DATA_BASE_ADDR];
+    else if ((uint32_t)(addr - 0x4000u) < MENU_ROM_SIZE)
+        data = rom_sram[addr - 0x4000u];
+    return data;
+}
+
 //load the MSX Menu ROM into the MSX
 int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
 {
@@ -9723,8 +9991,6 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
         pio_drain_writes(handle_menu_write_explorer, &menu_ctx);
 
         bool in_window = false;
-        uint8_t data = 0xFFu;
-        bool drive = false;
 
         if (menu_ctx.rom_selected && addr == 0x0000u)
         {
@@ -9732,114 +9998,8 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
             return menu_ctx.rom_index;
         }
 
-        if (addr >= 0x4000u && addr <= 0xBFFFu)
-        {
-            in_window = true;
-            drive = true;
-
-            if (addr >= CTRL_BASE_ADDR && addr <= (CTRL_BASE_ADDR + 0x0F))
-            {
-                if (fh_menu_window_active)
-                {
-                    switch (addr)
-                    {
-                        case CTRL_COUNT_L: data = (uint8_t)(fh_catalog_count & 0xFFu); break;
-                        case CTRL_COUNT_H: data = (uint8_t)((fh_catalog_count >> 8) & 0xFFu); break;
-                        case CTRL_PAGE:    data = fh_page_index; break;
-                        case CTRL_STATUS:  data = fh_status; break;
-                        case CTRL_CMD:     data = ctrl_cmd_state; break;
-                        case CTRL_MATCH_L: data = (uint8_t)(fh_selected_index & 0xFFu); break;
-                        case CTRL_MATCH_H: data = (uint8_t)((fh_selected_index >> 8) & 0xFFu); break;
-                        case CTRL_MAPPER:  data = (uint8_t)(fh_progress_percent & 0xFFu); break;
-                        case CTRL_ACK:     data = (uint8_t)((fh_progress_percent >> 8) & 0xFFu); break;
-                        case CTRL_AUDIO:   data = fh_result; break;
-                        case CTRL_WIFI_SUPPORT: data = 0; break;
-                        case CTRL_PSG_EMULATION: data = 0; break;
-                        case CTRL_WAVEGAME_ROM: data = 0; break;
-                        case CTRL_SD_PARTITION: data = 0; break;
-                        case CTRL_SD_BROWSE_PARTITION: data = 0; break;
-                        case CTRL_AUDIO_VOLUME: data = 0; break;
-                    }
-                }
-                else switch (addr)
-                {
-                    case CTRL_COUNT_L: data = (uint8_t)(total_record_count & 0xFFu); break;
-                    case CTRL_COUNT_H: data = (uint8_t)((total_record_count >> 8) & 0xFFu); break;
-                    case CTRL_PAGE:    data = current_page; break;
-                    case CTRL_STATUS:  data = ctrl_status_value; break;
-                    case CTRL_CMD:     data = ctrl_cmd_state; break;
-                    case CTRL_MATCH_L: data = (uint8_t)(match_index & 0xFFu); break;
-                    case CTRL_MATCH_H: data = (uint8_t)((match_index >> 8) & 0xFFu); break;
-                    case CTRL_MAPPER:  data = ctrl_mapper_value; break;
-                    case CTRL_ACK:     data = ctrl_ack_value; break;
-                    case CTRL_AUDIO:   data = ctrl_audio_selection; break;
-                    case CTRL_WIFI_SUPPORT: data = ctrl_wifi_support; break;
-                    case CTRL_PSG_EMULATION: data = ctrl_psg_emulation; break;
-                    case CTRL_WAVEGAME_ROM: data = ctrl_wavegame_rom; break;
-                    case CTRL_SD_PARTITION: data = ctrl_sd_partition; break;
-                    case CTRL_SD_BROWSE_PARTITION: data = sd_browse_partition; break;
-                    case CTRL_AUDIO_VOLUME: data = ctrl_audio_volume; break;
-                }
-            }
-            else if (addr >= MP3_CTRL_BASE && addr <= (MP3_CTRL_BASE + 0x0F))
-            {
-                uint16_t elapsed = mp3_get_elapsed_seconds();
-                uint16_t total = mp3_get_total_seconds();
-                switch (addr)
-                {
-                    case MP3_CTRL_STATUS:    data = mp3_get_status(); break;
-                    case MP3_CTRL_ELAPSED_L: data = (uint8_t)(elapsed & 0xFFu); break;
-                    case MP3_CTRL_ELAPSED_H: data = (uint8_t)((elapsed >> 8) & 0xFFu); break;
-                    case MP3_CTRL_TOTAL_L:   data = (uint8_t)(total & 0xFFu); break;
-                    case MP3_CTRL_TOTAL_H:   data = (uint8_t)((total >> 8) & 0xFFu); break;
-                    case MP3_CTRL_INDEX_L:   data = (uint8_t)(mp3_selected_index & 0xFFu); break;
-                    case MP3_CTRL_INDEX_H:   data = (uint8_t)((mp3_selected_index >> 8) & 0xFFu); break;
-                    case MP3_CTRL_MODE:      data = mp3_play_mode; break;
-                }
-            }
-            else if (addr >= CTRL_SD_PARTITION_INFO_BASE && addr < (CTRL_SD_PARTITION_INFO_BASE + CTRL_SD_PARTITION_INFO_SIZE))
-            {
-                data = ctrl_sd_partition_info[addr - CTRL_SD_PARTITION_INFO_BASE];
-            }
-            else if (addr >= CTRL_CHIP_ID_BASE && addr < (CTRL_CHIP_ID_BASE + CTRL_CHIP_ID_SIZE))
-            {
-                data = (uint8_t)pico_chip_id[addr - CTRL_CHIP_ID_BASE];
-            }
-            else if (!fh_menu_window_active && addr == CTRL_VDP_FREQ)
-            {
-                data = ctrl_vdp_frequency;
-            }
-            else if (!fh_menu_window_active && addr == CTRL_CPU_MODE)
-            {
-                data = ctrl_cpu_mode;
-            }
-            else if (addr == CTRL_NET_STATUS)
-            {
-                data = esp_net_status;
-            }
-            else if (addr == CTRL_DISK_ACT)
-            {
-                data = sd_activity_counter;
-            }
-            else if (fh_menu_window_active && addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
-            {
-                data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
-            }
-            else if (addr >= DATA_BASE_ADDR && addr < (DATA_BASE_ADDR + DATA_BUFFER_SIZE))
-            {
-                data = page_buffer[addr - DATA_BASE_ADDR];
-            }
-            else
-            {
-                uint32_t rel = addr - 0x4000u;
-                if (rel < MENU_ROM_SIZE)
-                {
-                    data = rom_sram[rel];
-                }
-            }
-        }
-
-        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(drive, data));
+        uint8_t data = menu_read_byte(addr, &in_window);
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
     }
     // Old implementation disabled
     /*
