@@ -990,6 +990,10 @@ static unsigned char audio_profile_is_supported(const ROMRecord *record, unsigne
     if (audio_profile == AUDIO_PROFILE_NONE) {
         return 1;
     }
+    if (audio_profile == AUDIO_PROFILE_SN76489_FRANKY) {
+        unsigned char mapper_code = record_mapper_code(record->Mapper);
+        return !record_is_folder(record) && (mapper_code <= 18 || mapper_code == 22 || mapper_code == 23);
+    }
     if (audio_profile >= AUDIO_PROFILE_SCC && audio_profile <= AUDIO_PROFILE_SCC_PLUS) {
         return record_supports_scc_audio(record);
     }
@@ -1042,7 +1046,8 @@ static unsigned char next_audio_profile(const ROMRecord *record, unsigned char a
         AUDIO_PROFILE_YM2151_SFG05_4MHZ,
         AUDIO_PROFILE_YM2151_SFG01_4MHZ,
         AUDIO_PROFILE_DUAL_PSG,
-        AUDIO_PROFILE_MSX_MUSIC
+        AUDIO_PROFILE_MSX_MUSIC,
+        AUDIO_PROFILE_SN76489_FRANKY
     };
     const unsigned int audio_count = (unsigned int)(sizeof(audio_profiles) / sizeof(audio_profiles[0]));
     int current = -1;
@@ -1078,7 +1083,9 @@ static void build_audio_text(const ROMRecord *record, unsigned char audio_profil
         return;
     }
     audio_profile = sanitize_audio_profile(record, audio_profile);
-    if (audio_profile == AUDIO_PROFILE_SCC) {
+    if (audio_profile == AUDIO_PROFILE_SN76489_FRANKY) {
+        audio_label = "SN76489 Franky";
+    } else if (audio_profile == AUDIO_PROFILE_SCC) {
         audio_label = "SCC";
     } else if (audio_profile == AUDIO_PROFILE_SCC_PLUS) {
         audio_label = "SCC+";

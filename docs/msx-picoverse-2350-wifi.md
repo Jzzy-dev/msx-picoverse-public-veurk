@@ -4,6 +4,8 @@ This document describes the ESP-01 WiFi support currently implemented for the Pi
 
 The PicoVerse 2350 WiFi implementation has two user-facing surfaces: an ESP8266P-compatible system ROM and memio UART bridge on top of the Sunrise IDE Nextor modes, and the integrated Explorer File Hunter browser that uses the ESP-01 module directly from the Pico firmware.
 
+For SymbOS, see the [PicoVerse 2350 SymbOS setup guide](./msx-picoverse-2350-symbos.md): disk access works with LoadROM and Explorer. LoadROM networking is hardware-confirmed; Explorer v2.59 restores the status bits required by the PicoVerse daemon's adapter probe, but end-to-end networking still needs hardware validation.
+
 ## 1. Overview
 
 WiFi support is enabled from the RP2350 LoadROM tool with the `-w` or `--wifi` flag.
@@ -173,8 +175,10 @@ The status byte follows the WiFi memio conventions used by the reference FPGA im
 | 2 | RX FIFO full |
 | 3 | quick receive supported |
 | 4 | RX underrun occurred; clears after status read |
-| 6 | set to `1` in the normal non-interrupt state |
+| 6 | `0` |
 | 7 | set to `1` in the normal non-interrupt state |
+
+Bits 7 and 3 are always set (`0x88`) in LoadROM and Explorer v2.59. The PicoVerse SymbOS daemon requires both during adapter detection. Explorer v2.58 and earlier omitted them, so the daemon rejected its interface before sending any ESP commands.
 
 The current PicoVerse implementation does not expose the old interrupt-oriented WiFi behavior. It implements the lite/request-response memio behavior instead.
 
@@ -268,7 +272,7 @@ File Hunter downloads are received into PSRAM and saved as `.ROM` files in the r
 
 - WiFi support is available in **LoadROM** and **MultiROM** (in MultiROM only on `-s1`/`-m1`/`-s2`/`-m2`/`-s3` Nextor entries).
 - WiFi support is currently **not available** in `-c1` / `-c2` Carnivore2 RAM-loader builds.
-- Explorer exposes WiFi setup and direct ESP-01 access for File Hunter browsing, but it does not expose the Sunrise IDE `-w` system-ROM boot mode.
+- Explorer exposes the ESP8266P BIOS and memio interface when **Wifi: Yes** is selected for a supported Sunrise Nextor SYSTEM entry; it does not use a tool-side `-w` flag. Its WiFi setup and File Hunter browser are separate direct ESP-01 paths.
 - The PicoVerse firmware provides the ROM mapping and serial transport; the ESP-01 still needs compatible firmware on the module itself.
 - The implementation follows the ESP8266P memio conventions, so compatibility is best with software already targeting that environment.
 

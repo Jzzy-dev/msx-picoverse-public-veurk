@@ -4,6 +4,8 @@ This document describes the implementation of the Sunrise IDE interface emulatio
 
 ## 1. Overview
 
+For SymbOS installation, use the [PicoVerse 2350 SymbOS setup guide](./msx-picoverse-2350-symbos.md). Disk access works with LoadROM and Explorer using the patched Sunrise IDE driver. LoadROM networking is hardware-confirmed; Explorer v2.59 fixes the daemon's adapter-detection mismatch, but end-to-end networking still needs hardware validation.
+
 The MSX PicoVerse 2350 provides a complete Sunrise IDE emulation that allows the MSX to boot Nextor DOS and access mass storage through either the on-board microSD card slot or the USB-C port. Eight firmware modes are available:
 
 | Option | Mapper Type | Storage Backend | Description |

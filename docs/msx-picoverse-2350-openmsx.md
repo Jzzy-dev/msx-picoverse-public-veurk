@@ -28,6 +28,7 @@ Typical uses:
 ## 2. Requirements
 
 - openMSX 20.0 or newer (tested with 21.0). It needs the `NEO-8`, `NEO-16`, `ASCII16-X` and `Manbow2` ROM types, the `YamahaSFG` device and the `sha1sum` command.
+- The optional **SN76489 Franky** profile additionally requires an openMSX build with the `Franky` device; older releases may not provide it. There is no silent port-only fallback.
 - An Explorer UF2 built with the PicoVerse 2350 Explorer tool (`explorer.exe`) v2.56 or later, see the [Explorer tool manual](./msx-picoverse-2350-explorer-tool-manual.en-us.md).
 - An MSX1, MSX2, MSX2+ or turbo R machine with a real MSX BIOS (MSX-BASIC) and its system ROMs installed in openMSX. The FM-PAC, SFG and Nextor ROMs come from the UF2, so no extra system ROMs are needed for them.
 - Python 3, only to regenerate the ROM database after the firmware's `romdb.h` changes (see section 4).
@@ -181,6 +182,7 @@ These v2.57 features work as on the cartridge:
 | Game ROM + MSX-MUSIC | Expanded slot: the ROM in subslot 0, an FM-PAC with the FM-PAC BIOS of the UF2 in subslot 3. |
 | Game ROM + YM2151 SFG-05 / SFG-01 | Expanded slot: the ROM in subslot 0, a Yamaha SFG (YM2164 or YM2151) with the SFG BIOS of the UF2 in subslot 2. |
 | Game ROM + Dual PSG | A second PSG on ports 0x10-0x13, next to the ROM. |
+| Game ROM or supported Nextor/DSK + SN76489 Franky | A native openMSX Franky device on sound/counter ports 0x48/0x49 and video ports 0x88/0x89. The hardware firmware exposes only the limited counter/control behavior needed by sound drivers, not a full Sega VDP. |
 | Nextor Sunrise 2.1.4 / 3.0.0 Beta 2 (SD or USB) | Sunrise IDE with the entry's own Nextor kernel and the hard disk image (section 11). |
 | Nextor + 1MB Mapper | Expanded slot: Sunrise IDE in subslot 0, a 1MB memory mapper in subslot 1. |
 | Nextor + 1MB Mapper + 1MB MegaRAM | As above, plus a 1MB MegaRAM (port 0x8E) in subslot 3. |
@@ -189,6 +191,8 @@ These v2.57 features work as on the cartridge:
 | `.DSK` image | Sunrise IDE with the hidden Nextor 2.1.4 kernel of the UF2 and the `.DSK` file itself as the disk, plus the 1MB mapper when **1MB Mapper** is **Yes**. The DSK audio profiles (External SCC/SCC+, MSX-MUSIC, SFG-05/SFG-01, Dual PSG) are added as above. Writes go straight to the `.DSK` file, like the firmware's write-through. |
 
 The audio profile follows the firmware's `resolve_audio_mode()`: the option saved in the `.PVC` or chosen on the detail screen, with the same restrictions per mapper. The SCC/SCC+ profiles of Konami SCC and Manbow 2 games use the SCC built into the openMSX mapper. The 4 MHz SFG variants use the standard SFG clock.
+
+The SN profile keeps saved ID 13 (Franky), without changing older IDs or the PVC file size. Former MMM selections (ID 14) are unsupported and do not create an audio device or mapper. Franky preserves the selected Nextor/DSK memory layout. See the [SN76489 instructions](./msx-picoverse-2350-explorer-tool-manual.en-us.md#sn76489-music-and-games) for entry restrictions and the VGMPlay workflow. openMSX supplies its own sound/device implementation; it does not validate Pico synthesis performance or PIO bus timing.
 
 The selected entry is started like the firmware does it: the script swaps the cartridge and resets the MSX. Any later reset, a power cycle, or restarting openMSX with the entry still in the slot brings back the menu, which reopens on the last entry.
 

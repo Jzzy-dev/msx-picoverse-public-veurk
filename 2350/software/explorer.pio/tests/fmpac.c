@@ -227,6 +227,7 @@ static void test_profiles(void) {
         assert(resolve_audio_mode(variants[i], AUDIO_PROFILE_NONE) == AUDIO_MODE_NONE);
     }
     ROMRecord record = {21};
+    assert(record_is_standalone_megaram(&record));
     assert(!audio_profile_is_supported(&record, AUDIO_PROFILE_MSX_MUSIC));
     assert(resolve_audio_mode(21, AUDIO_PROFILE_MSX_MUSIC) == AUDIO_MODE_NONE);
     assert(resolve_audio_mode(19, AUDIO_PROFILE_MEGARAM_SCC) == AUDIO_MODE_MEGARAM_SCC);
@@ -236,6 +237,32 @@ static void test_profiles(void) {
     record.Mapper = 1;
     assert(audio_profile_is_supported(&record, AUDIO_PROFILE_MSX_MUSIC));
     assert(resolve_audio_mode(1, AUDIO_PROFILE_MSX_MUSIC) == AUDIO_MODE_MSX_MUSIC);
+    for (uint8_t mapper = 1; mapper <= MAPPER_DSK; ++mapper) {
+        record.Mapper = mapper;
+        bool franky = mapper <= 18 || mapper == 22 || mapper == 23;
+        assert(audio_profile_is_supported(&record, AUDIO_PROFILE_SN76489_FRANKY) == franky);
+        assert((resolve_audio_mode(mapper, AUDIO_PROFILE_SN76489_FRANKY) == AUDIO_MODE_SN76489_FRANKY) == franky);
+        assert(!audio_profile_is_supported(&record, 14));
+        assert(resolve_audio_mode(mapper, 14) == AUDIO_MODE_NONE);
+        assert(sanitize_audio_profile(&record, 14) == default_audio_profile(&record));
+    }
+    record.Mapper = 1;
+    unsigned seen = 0;
+    uint8_t profile = AUDIO_PROFILE_NONE;
+    do {
+        profile = next_audio_profile(&record, profile, 1);
+        if (profile == AUDIO_PROFILE_SN76489_FRANKY) seen |= 1;
+        assert(profile != 14);
+    } while (profile != AUDIO_PROFILE_NONE);
+    assert(seen == 1);
+    char label[32];
+    build_audio_text(&record, AUDIO_PROFILE_SN76489_FRANKY, label, sizeof(label));
+    assert(strstr(label, "SN76489 Franky"));
+    build_audio_text(&record, 14, label, sizeof(label));
+    assert(strstr(label, "None"));
+    cur_wifi_enabled = 1;
+    assert(!audio_profile_is_supported(&record, AUDIO_PROFILE_SN76489_FRANKY));
+    cur_wifi_enabled = 0;
 
     // .DSK (mapper 23, SD): every cartridge-side profile a Sunrise SYSTEM entry
     // offers (External SCC/SCC+, MSX-MUSIC, YM2151/SFG at both clocks, Dual
@@ -245,7 +272,8 @@ static void test_profiles(void) {
     const uint8_t dsk_profiles[] = {
         AUDIO_PROFILE_SCC, AUDIO_PROFILE_SCC_PLUS, AUDIO_PROFILE_SCC_EXTERNAL, AUDIO_PROFILE_SCC_PLUS_EXTERNAL,
         AUDIO_PROFILE_MEGARAM_SCC, AUDIO_PROFILE_MEGARAM_SCC_PLUS, AUDIO_PROFILE_YM2151_SFG05, AUDIO_PROFILE_YM2151_SFG01,
-        AUDIO_PROFILE_YM2151_SFG05_4MHZ, AUDIO_PROFILE_YM2151_SFG01_4MHZ, AUDIO_PROFILE_DUAL_PSG, AUDIO_PROFILE_MSX_MUSIC
+        AUDIO_PROFILE_YM2151_SFG05_4MHZ, AUDIO_PROFILE_YM2151_SFG01_4MHZ, AUDIO_PROFILE_DUAL_PSG, AUDIO_PROFILE_MSX_MUSIC,
+        AUDIO_PROFILE_SN76489_FRANKY
     };
     record.Mapper = (uint8_t)(MAPPER_DSK | 0x80u);
     cur_is_dsk = 1;
@@ -268,6 +296,7 @@ static void test_profiles(void) {
     assert(resolve_audio_mode(MAPPER_DSK, AUDIO_PROFILE_YM2151_SFG05_4MHZ) == AUDIO_MODE_YM2151_SFG05);
     assert(resolve_audio_mode(MAPPER_DSK, AUDIO_PROFILE_YM2151_SFG01) == AUDIO_MODE_YM2151_SFG01);
     assert(resolve_audio_mode(MAPPER_DSK, AUDIO_PROFILE_YM2151_SFG01_4MHZ) == AUDIO_MODE_YM2151_SFG01);
+    assert(resolve_audio_mode(MAPPER_DSK, AUDIO_PROFILE_SN76489_FRANKY) == AUDIO_MODE_SN76489_FRANKY);
     assert(!dsk_audio_mode_supported(AUDIO_MODE_NONE));
     // The DSK rule must not leak to other system entries: Nextor + MegaRAM
     // (19) still has no Dual PSG/SFG, standalone MegaRAM (21) no MSX-MUSIC.

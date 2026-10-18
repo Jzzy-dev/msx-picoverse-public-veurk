@@ -64,6 +64,7 @@ set(EXPLORER_SOURCES
     audio/mp3.c
     audio/emu2212.c
     audio/emu2149.c
+    audio/sn76489.c
     audio/emu2413.c
     audio/emu2151.cpp
     audio/ymfm/ymfm_opm.cpp

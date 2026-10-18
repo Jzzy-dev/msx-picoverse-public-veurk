@@ -2,6 +2,8 @@
 
 ## PicoVerse 2350 Loadrom v2.79
 
+- Added the shared [SymbOS setup guide](../../../../docs/msx-picoverse-2350-symbos.md), covering the patched Sunrise IDE driver, LoadROM mapper/WiFi images, slot and partition settings, the PicoVerse network daemon, and SymZilla/GB-proxy. Linked it from the documentation index and Sunrise/WiFi guides, distinguishing LoadROM-only SymbOS networking from shared LoadROM/Explorer disk support.
+- Added the SymbOS guide to `build/Makefile` packaging so the next public release copies it into the public repository's `docs` directory.
 - Bumped LoadROM version to v2.79 (top-level `Makefile` and `tool/Makefile`).
 - Added the `-s3` / `--sunrise3-sd` tool option for testing Nextor 3, microSD only for now. It builds a `Nextor Sunrise 3.0.0 Beta 2 (SD)` system image with Konamiman's Nextor 3.0.0 beta 2 Sunrise IDE MasterOnly kernel (`resources/Nextor-3.0.0-beta2.SunriseIDE.MasterOnly.ROM`, 128 KB, SunriseIDE-Nextor-driver `v0.1.8-blueMSX-v0.1.5-Nextor-3.0-beta.2` release), embedded by `tool/Makefile` as `tool/src/nextor3.h`. It uses the existing Sunrise SD type (15), so the firmware is unchanged; the beta 2 driver sends the same ATA commands as 2.1.4.
 - `-s3` is mutually exclusive with the other Nextor modes, rejects a ROM file, `-d` and `-f` like `-s1`, and accepts `-w` (same loader as `-s1`). The tool refuses to build a Nextor image whose kernel is not 128 KB. Checked `-s3`, `-s3 -w` and `-s1` UF2s: the record points at the matching kernel bytes, and with `-w` the ESP8266P BIOS follows it. Booting beta 2 on hardware is not yet validated.

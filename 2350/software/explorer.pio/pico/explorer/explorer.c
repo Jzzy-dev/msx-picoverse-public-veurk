@@ -38,6 +38,7 @@
 #include "memory/c2_emu.h"
 #include "audio/emu2212.h"
 #include "audio/emu2149.h"
+#include "audio/sn76489.h"
 #include "audio/emu2413.h"
 #include "audio/emu2151.h"
 #include "msx_bus.pio.h"
@@ -214,6 +215,7 @@
 // was written for.
 #define AUDIO_PROFILE_YM2151_SFG05_4MHZ 11u
 #define AUDIO_PROFILE_YM2151_SFG01_4MHZ 12u
+#define AUDIO_PROFILE_SN76489_FRANKY 13u
 
 #define PSG_SAMPLE_RATE 44100
 #define PSG_CLOCK       1789773
@@ -397,6 +399,7 @@ static msx_pio_bus_t msx_bus;
 static bool msx_bus_programs_loaded = false;
 static msx_pio_io_bus_t msx_io_bus;
 static bool msx_io_read_program_loaded = false;
+static bool msx_io_read_wait_loaded = false;
 static bool msx_io_write_program_loaded = false;
 
 typedef struct {
@@ -708,7 +711,8 @@ static inline uint8_t __not_in_flash_func(wifi_status_read)(void)
 {
     wifi_uart_init_once();
     wifi_service();
-    uint8_t status = 0u;
+    // SymbOS probes bits 7 and 3 before sending any ESP commands.
+    uint8_t status = WIFI_STATUS_QUICK_RX | WIFI_STATUS_FREE_BITS;
     uint16_t rx_count = wifi_rx_count_snapshot();
     if (rx_count != 0u) status |= WIFI_STATUS_RX_READY;
     if (rx_count >= WIFI_RX_FIFO_SIZE) status |= WIFI_STATUS_RX_FULL;
@@ -1041,7 +1045,23 @@ static inline void __not_in_flash_func(scc_write_traced)(SCC *scc, uint32_t adr,
 #define SCC_write(scc, adr, val) scc_write_traced((scc), (adr), (val))
 #endif
 
-static PSG psg_instance;
+static union {
+    PSG ay;
+    struct {
+        sn76489_t chip;
+        sn76489_bus_t bus;
+    } sn;
+} secondary_psg;
+_Static_assert(sizeof(secondary_psg) == sizeof(PSG), "Secondary audio must not grow the AY state allocation");
+#define psg_instance secondary_psg.ay
+#define sn_chip secondary_psg.sn.chip
+#define sn_bus secondary_psg.sn.bus
+
+static bool sn_audio_selected(void)
+{
+    return ctrl_audio_selection == AUDIO_PROFILE_SN76489_FRANKY;
+}
+
 static spin_lock_t *dual_psg_lock = NULL;
 static struct audio_buffer_pool *dual_psg_audio_pool;
 static bool dual_psg_ready = false;
@@ -1231,6 +1251,7 @@ typedef enum {
     AUDIO_MODE_MSX_MUSIC,
     AUDIO_MODE_YM2151_SFG05,
     AUDIO_MODE_YM2151_SFG01,
+    AUDIO_MODE_SN76489_FRANKY,
 } audio_mode_t;
 
 static const char *EXCLUDED_SD_FOLDERS[] = {
@@ -1288,10 +1309,14 @@ static bool mapper_supports_scc_audio(uint8_t mapper) {
 static bool dsk_audio_mode_supported(audio_mode_t mode) {
     return mode == AUDIO_MODE_SCC_EXTERNAL || mode == AUDIO_MODE_SCC_PLUS_EXTERNAL ||
            mode == AUDIO_MODE_MSX_MUSIC || mode == AUDIO_MODE_DUAL_PSG ||
-           mode == AUDIO_MODE_YM2151_SFG05 || mode == AUDIO_MODE_YM2151_SFG01;
+           mode == AUDIO_MODE_YM2151_SFG05 || mode == AUDIO_MODE_YM2151_SFG01 ||
+           mode == AUDIO_MODE_SN76489_FRANKY;
 }
 
 static audio_mode_t resolve_audio_mode(uint8_t mapper, uint8_t requested_profile) {
+    if (requested_profile == AUDIO_PROFILE_SN76489_FRANKY &&
+        ((mapper > 0u && mapper <= MAPPER_C2_USB) || mapper == MAPPER_ASCII16X_FR || mapper == MAPPER_DSK))
+        return AUDIO_MODE_SN76489_FRANKY;
     if (is_system_mapper(mapper)) {
         if (requested_profile == AUDIO_PROFILE_MSX_MUSIC && mapper != MAPPER_MEGARAM)
             return AUDIO_MODE_MSX_MUSIC;
@@ -5419,7 +5444,7 @@ static void msx_pio_bus_init(void)
 
     if (!msx_bus_programs_loaded)
     {
-        msx_bus.offset_read  = pio_add_program(msx_bus.pio, &msx_read_responder_program);
+        msx_bus.offset_read = pio_add_program(msx_bus.pio, &msx_read_responder_program);
         msx_bus.offset_write = pio_add_program(msx_bus.pio, &msx_write_captor_program);
         msx_bus_programs_loaded = true;
     }
@@ -5478,9 +5503,21 @@ static void msx_pio_io_bus_init(void)
     msx_io_bus.sm_io_read  = 2;
     msx_io_bus.sm_io_write = 1;
 
+    bool wait_reads = sn_audio_selected();
+    if (msx_io_read_program_loaded && msx_io_read_wait_loaded != wait_reads)
+    {
+        pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, false);
+        pio_remove_program(msx_io_bus.pio_read, msx_io_read_wait_loaded ? &msx_io_read_wait_responder_program
+                                                                    : &msx_io_read_responder_program,
+                           msx_io_bus.offset_io_read);
+        msx_io_read_program_loaded = false;
+    }
     if (!msx_io_read_program_loaded)
     {
-        msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, &msx_io_read_responder_program);
+        const struct pio_program *program = wait_reads ? &msx_io_read_wait_responder_program
+                                                     : &msx_io_read_responder_program;
+        msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, program);
+        msx_io_read_wait_loaded = wait_reads;
         msx_io_read_program_loaded = true;
     }
     if (!msx_io_write_program_loaded)
@@ -5496,12 +5533,16 @@ static void msx_pio_io_bus_init(void)
     pio_sm_restart(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
     pio_sm_restart(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
 
-    pio_sm_config cfg_io_read = msx_io_read_responder_program_get_default_config(msx_io_bus.offset_io_read);
+    pio_sm_config cfg_io_read = sn_audio_selected()
+        ? msx_io_read_wait_responder_program_get_default_config(msx_io_bus.offset_io_read)
+        : msx_io_read_responder_program_get_default_config(msx_io_bus.offset_io_read);
     sm_config_set_in_pins(&cfg_io_read, PIN_A0);
     sm_config_set_in_shift(&cfg_io_read, false, false, 16);
     sm_config_set_out_pins(&cfg_io_read, PIN_D0, 8);
     sm_config_set_out_shift(&cfg_io_read, true, false, 32);
     sm_config_set_jmp_pin(&cfg_io_read, PIN_IORQ);
+    if (sn_audio_selected())
+        sm_config_set_set_pins(&cfg_io_read, PIN_WAIT, 1);
     sm_config_set_clkdiv(&cfg_io_read, 1.0f);
     pio_sm_init(msx_io_bus.pio_read, msx_io_bus.sm_io_read, msx_io_bus.offset_io_read, &cfg_io_read);
 
@@ -5696,7 +5737,7 @@ static inline int16_t __not_in_flash_func(soft_limit_i16)(int32_t sample)
     return (int16_t)((sample < 0) ? -limited : limited);
 }
 
-static void __not_in_flash_func(dual_psg_init)(void)
+static void __attribute__((noinline)) dual_psg_init(void)
 {
     if (dual_psg_ready)
         return;
@@ -5704,12 +5745,19 @@ static void __not_in_flash_func(dual_psg_init)(void)
     if (!dual_psg_lock)
         dual_psg_lock = spin_lock_init(spin_lock_claim_unused(true));
 
-    memset(&psg_instance, 0, sizeof(psg_instance));
-    psg_instance.rate = PSG_SAMPLE_RATE;
-    PSG_setVolumeMode(&psg_instance, 2);
-    PSG_setClock(&psg_instance, PSG_CLOCK);
-    PSG_setQuality(&psg_instance, 1);
-    PSG_reset(&psg_instance);
+    memset(&secondary_psg, 0, sizeof(secondary_psg));
+    if (sn_audio_selected())
+    {
+        sn76489_reset(&sn_chip);
+    }
+    else
+    {
+        psg_instance.rate = PSG_SAMPLE_RATE;
+        PSG_setVolumeMode(&psg_instance, 2);
+        PSG_setClock(&psg_instance, PSG_CLOCK);
+        PSG_setQuality(&psg_instance, 1);
+        PSG_reset(&psg_instance);
+    }
     msx_pio_io_bus_init();
     dual_psg_ready = true;
 }
@@ -5719,7 +5767,11 @@ static inline void __not_in_flash_func(dual_psg_write_ring_push)(uint8_t port, u
     uint32_t head = dual_psg_write_ring_head;
     uint32_t next = (head + 1u) & DUAL_PSG_WRITE_RING_MASK;
     if (next == dual_psg_write_ring_tail)
+    {
+        if (sn_audio_selected())
+            ++sn_bus.dropped;
         return; // ring full: drop write (audio only; mapper state unaffected)
+    }
     dual_psg_write_ring[head] = (uint16_t)(((uint16_t)port << 8) | data);
     __dmb();
     dual_psg_write_ring_head = next;
@@ -5737,18 +5789,46 @@ static inline void __not_in_flash_func(dual_psg_drain_write_ring)(void)
         uint8_t port = (uint8_t)(entry >> 8);
         uint8_t data = (uint8_t)(entry & 0xFFu);
         uint32_t save = spin_lock_blocking(dual_psg_lock);
-        PSG_writeIO(&psg_instance, port, data);
+        if (sn_audio_selected())
+            sn76489_write(&sn_chip, data);
+        else
+            PSG_writeIO(&psg_instance, port, data);
         spin_unlock(dual_psg_lock, save);
         tail = (tail + 1u) & DUAL_PSG_WRITE_RING_MASK;
     }
     dual_psg_write_ring_tail = tail;
 }
 
-static inline bool __not_in_flash_func(dual_psg_handle_io_write)(uint8_t port, uint8_t data)
+static bool __attribute__((noinline)) sn_handle_io_write(uint8_t port, uint8_t data)
+{
+    if (port == 0x89u)
+    {
+        sn76489_franky_write(&sn_bus, port);
+        return true;
+    }
+    if (port != 0x48u && port != 0x49u)
+        return false;
+    if (!dual_psg_core1_services_io)
+        dual_psg_write_ring_push(port, data);
+    else
+    {
+        uint32_t save = spin_lock_blocking(dual_psg_lock);
+        sn76489_write(&sn_chip, data);
+        spin_unlock(dual_psg_lock, save);
+    }
+    return true;
+}
+
+// Spare scratch SRAM keeps the secondary-audio hot path below the Core 1 stack
+// without reducing the heap reserved for menu playback and audio handoff.
+static bool __attribute__((noinline)) __scratch_x("secondary_audio") dual_psg_handle_io_write(uint8_t port, uint8_t data)
 {
     if (!dual_psg_ready)
         return false;
-    if (port == PSG_PORT_REG || port == PSG_PORT_DATA)
+    if (sn_audio_selected())
+        return sn_handle_io_write(port, data);
+    bool sound_port = port == PSG_PORT_REG || port == PSG_PORT_DATA;
+    if (sound_port)
     {
         if (!dual_psg_core1_services_io)
         {
@@ -5765,7 +5845,13 @@ static inline bool __not_in_flash_func(dual_psg_handle_io_write)(uint8_t port, u
     return false;
 }
 
-static void __not_in_flash_func(main_psg_init_with_io)(uint8_t quality, bool init_io_bus)
+static bool __attribute__((noinline)) sn_handle_io_read(uint8_t port, uint8_t *data)
+{
+    return ctrl_audio_selection == AUDIO_PROFILE_SN76489_FRANKY &&
+           sn76489_franky_read(&sn_bus, port, time_us_64(), data);
+}
+
+static void __attribute__((noinline)) main_psg_init_with_io(uint8_t quality, bool init_io_bus)
 {
     if (main_psg_ready)
     {
@@ -5870,7 +5956,7 @@ static inline void __not_in_flash_func(main_psg_service_io)(void)
     }
 }
 
-static inline void __not_in_flash_func(dual_psg_service_io)(void)
+static void __no_inline_not_in_flash_func(dual_psg_service_io)(void)
 {
     if (!dual_psg_ready)
         return;
@@ -5896,8 +5982,9 @@ static inline void __not_in_flash_func(dual_psg_service_io)(void)
 
     while (pio_try_get_io_read(&io_addr))
     {
-        pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read,
-                            pio_build_token(false, 0xFFu));
+        uint8_t data = 0xFFu;
+        bool respond = sn_handle_io_read((uint8_t)io_addr, &data);
+        io_read_respond(respond, data);
     }
 }
 
@@ -5907,7 +5994,8 @@ static inline int16_t __not_in_flash_func(dual_psg_calc_sample)(void)
         return 0;
 
     uint32_t save = spin_lock_blocking(dual_psg_lock);
-    int16_t sample = clamp_i16((int32_t)PSG_calc(&psg_instance) << PSG_VOLUME_SHIFT);
+    int16_t sample = sn_audio_selected() ? sn76489_sample(&sn_chip)
+                                       : clamp_i16((int32_t)PSG_calc(&psg_instance) << PSG_VOLUME_SHIFT);
     spin_unlock(dual_psg_lock, save);
     return sample;
 }
@@ -6000,8 +6088,21 @@ static inline int16_t __not_in_flash_func(main_psg_calc_sample_reporting)(uint8_
     return sample;
 }
 
-static inline void __not_in_flash_func(dual_psg_write_stereo_sample)(int16_t *samples, int index)
+static void __attribute__((noinline)) sn_write_stereo_sample(int16_t *samples, int index)
 {
+    int16_t secondary = dual_psg_calc_sample();
+    int16_t sample = apply_audio_volume(soft_limit_i16((int32_t)secondary + main_psg_calc_sample()));
+    samples[index * 2] = sample;
+    samples[index * 2 + 1] = sample;
+}
+
+static void __attribute__((noinline)) __scratch_x("secondary_audio") dual_psg_write_stereo_sample(int16_t *samples, int index)
+{
+    if (sn_audio_selected())
+    {
+        sn_write_stereo_sample(samples, index);
+        return;
+    }
     int16_t secondary = dual_psg_calc_sample();
     if (ctrl_psg_emulation != 0u && main_psg_ready)
     {
@@ -6014,6 +6115,15 @@ static inline void __not_in_flash_func(dual_psg_write_stereo_sample)(int16_t *sa
     sample = apply_audio_volume(sample);
     samples[index * 2] = sample;
     samples[index * 2 + 1] = sample;
+}
+
+static void __attribute__((noinline)) sn_report_drops(void)
+{
+    if (sn_audio_selected() && sn_bus.dropped != sn_bus.reported)
+    {
+        sn_bus.reported = sn_bus.dropped;
+        printf("SN76489: write queue overflow (%lu writes lost)\n", (unsigned long)sn_bus.reported);
+    }
 }
 
 static void __no_inline_not_in_flash_func(core1_dual_psg_audio)(void)
@@ -6034,6 +6144,7 @@ static void __no_inline_not_in_flash_func(core1_dual_psg_audio)(void)
                 }
                 buffer->sample_count = SCC_AUDIO_BUFFER_SAMPLES;
                 give_audio_buffer(dual_psg_audio_pool, buffer);
+                sn_report_drops();
                 break;
             }
             tight_loop_contents();
@@ -6103,6 +6214,8 @@ static void start_dual_psg_audio(void)
     dual_psg_init();
     dual_psg_core1_services_io = true;
     dual_psg_audio_init();
+    if (sn_audio_selected() && !dual_psg_audio_pool)
+        panic("SN76489: cannot allocate audio");
     if (dual_psg_audio_pool)
         multicore_launch_core1(core1_dual_psg_audio);
 }
@@ -6119,7 +6232,7 @@ static void dual_psg_audio_init_for_system(bool service_io_on_core1)
     dual_psg_audio_init();
 }
 
-static inline void __not_in_flash_func(dual_psg_audio_service_buffer)(void)
+static void __attribute__((noinline)) dual_psg_audio_service_buffer(void)
 {
     if (!dual_psg_audio_started || !dual_psg_audio_pool)
         return;
@@ -6136,6 +6249,7 @@ static inline void __not_in_flash_func(dual_psg_audio_service_buffer)(void)
     }
     buffer->sample_count = SCC_AUDIO_BUFFER_SAMPLES;
     give_audio_buffer(dual_psg_audio_pool, buffer);
+    sn_report_drops();
 }
 
 static void __no_inline_not_in_flash_func(core1_main_psg_audio)(void)
@@ -6259,6 +6373,8 @@ static void start_main_psg_audio(bool service_io_on_core1)
 
 static system_audio_profile_t system_audio_resolve_profile(void)
 {
+    if (sn_audio_selected())
+        return SYSTEM_AUDIO_PROFILE_DUAL_PSG;
     if (ctrl_audio_selection == AUDIO_PROFILE_MSX_MUSIC)
         return SYSTEM_AUDIO_PROFILE_MSX_MUSIC;
     if (ctrl_audio_selection == AUDIO_PROFILE_DUAL_PSG)
@@ -6313,6 +6429,8 @@ static void system_audio_init_for_sunrise(bool service_io_on_core1)
         break;
     case SYSTEM_AUDIO_PROFILE_DUAL_PSG:
         dual_psg_audio_init_for_system(service_io_on_core1);
+        if (sn_audio_selected() && !dual_psg_audio_pool)
+            panic("SN76489: cannot allocate audio");
         break;
     case SYSTEM_AUDIO_PROFILE_YM2151_SFG05:
     case SYSTEM_AUDIO_PROFILE_YM2151_SFG01:
@@ -6374,11 +6492,9 @@ static inline bool __not_in_flash_func(system_audio_handle_io_write)(uint8_t por
     }
 }
 
-static inline bool __not_in_flash_func(system_audio_handle_io_read)(uint8_t port, uint8_t *data)
+static bool __no_inline_not_in_flash_func(system_audio_handle_io_read)(uint8_t port, uint8_t *data)
 {
-    (void)port;
-    (void)data;
-    return false;
+    return sn_handle_io_read(port, data);
 }
 
 static inline void __not_in_flash_func(system_audio_service_core1)(void)
@@ -13828,32 +13944,36 @@ static inline bool __not_in_flash_func(megaram_scc_read)(uint16_t addr, uint8_t 
     return false;
 }
 
-void __no_inline_not_in_flash_func(loadrom_external_scc)(uint32_t offset, bool cache_enable, uint8_t mapper, uint32_t scc_type)
+static void external_scc_game_prepare(external_scc_game_t *game, uint32_t offset, bool cache_enable, uint8_t mapper)
 {
-    fmpac_wait_for_expanded_bootstrap();
-
-    external_scc_game_t game;
-    external_scc_game_init(&game, mapper);
+    external_scc_game_init(game, mapper);
 
     if (mapper == 14u)
     {
         static const uint32_t WRITABLE_SECTOR_SIZE   = 0x10000u;
         static const uint32_t WRITABLE_SECTOR_OFFSET = 0x70000u;
-        loadrom_manbow2_setup(offset, &game.rom_base, &game.available_length, &game.manbow2_writable_sram,
+        loadrom_manbow2_setup(offset, &game->rom_base, &game->available_length, &game->manbow2_writable_sram,
                               WRITABLE_SECTOR_OFFSET, WRITABLE_SECTOR_SIZE);
-        game.manbow2.bank_regs[0] = 0;
-        game.manbow2.bank_regs[1] = 1;
-        game.manbow2.bank_regs[2] = 2;
-        game.manbow2.bank_regs[3] = 3;
-        game.manbow2.state = MBW2_READ;
-        game.manbow2.writable_sram = game.manbow2_writable_sram;
-        game.manbow2.writable_offset = WRITABLE_SECTOR_OFFSET;
-        game.manbow2.writable_size = WRITABLE_SECTOR_SIZE;
+        game->manbow2.bank_regs[0] = 0;
+        game->manbow2.bank_regs[1] = 1;
+        game->manbow2.bank_regs[2] = 2;
+        game->manbow2.bank_regs[3] = 3;
+        game->manbow2.state = MBW2_READ;
+        game->manbow2.writable_sram = game->manbow2_writable_sram;
+        game->manbow2.writable_offset = WRITABLE_SECTOR_OFFSET;
+        game->manbow2.writable_size = WRITABLE_SECTOR_SIZE;
     }
     else
     {
-        prepare_rom_source(offset, cache_enable, 0u, &game.rom_base, &game.available_length);
+        prepare_rom_source(offset, cache_enable, 0u, &game->rom_base, &game->available_length);
     }
+}
+
+void __no_inline_not_in_flash_func(loadrom_external_scc)(uint32_t offset, bool cache_enable, uint8_t mapper, uint32_t scc_type)
+{
+    fmpac_wait_for_expanded_bootstrap();
+    external_scc_game_t game;
+    external_scc_game_prepare(&game, offset, cache_enable, mapper);
 
     gpio_init(PIN_WAIT);
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
@@ -15159,6 +15279,10 @@ int __no_inline_not_in_flash_func(main)()
 
     uint8_t mapper = mapper_code_from_record_byte(selected->Mapper);
     audio_mode_t audio_mode = resolve_audio_mode(mapper, ctrl_audio_selection);
+    if (sn_audio_selected() && audio_mode == AUDIO_MODE_NONE) {
+        printf("SN76489: unsupported mapper %u\n", mapper);
+        ctrl_audio_selection = AUDIO_PROFILE_NONE;
+    }
     // Standalone MegaRAM (no Nextor) has no PSG Mirror path. Every Nextor
     // variant, mapper ones included, forwards mirrored PSG writes to Core 1
     // through the lock-free ring, so mapper writes are never stalled.
@@ -15268,7 +15392,8 @@ int __no_inline_not_in_flash_func(main)()
                       audio_mode == AUDIO_MODE_MEGARAM_SCC || audio_mode == AUDIO_MODE_MEGARAM_SCC_PLUS);
     bool external_scc_audio = (audio_mode == AUDIO_MODE_SCC_EXTERNAL || audio_mode == AUDIO_MODE_SCC_PLUS_EXTERNAL);
     bool sfg_audio = (audio_mode == AUDIO_MODE_YM2151_SFG05 || audio_mode == AUDIO_MODE_YM2151_SFG01);
-    bool cartridge_audio = scc_audio || sfg_audio || audio_mode == AUDIO_MODE_DUAL_PSG || audio_mode == AUDIO_MODE_MSX_MUSIC;
+    bool cartridge_audio = scc_audio || sfg_audio || audio_mode == AUDIO_MODE_DUAL_PSG ||
+                           audio_mode == AUDIO_MODE_MSX_MUSIC || sn_audio_selected();
     bool psg_emulation = (ctrl_psg_emulation != 0u);
     bool system_mapper = is_system_mapper(mapper) || is_dsk;
     // The 50/60Hz INIT patch only applies to regular game ROMs; the system ROMs
@@ -15302,7 +15427,7 @@ int __no_inline_not_in_flash_func(main)()
             }
         }
     }
-    if (audio_mode == AUDIO_MODE_DUAL_PSG && !system_mapper) {
+    if ((audio_mode == AUDIO_MODE_DUAL_PSG || audio_mode == AUDIO_MODE_SN76489_FRANKY) && !system_mapper) {
         start_dual_psg_audio();
     } else if (audio_mode == AUDIO_MODE_MSX_MUSIC) {
         start_msx_music_audio();

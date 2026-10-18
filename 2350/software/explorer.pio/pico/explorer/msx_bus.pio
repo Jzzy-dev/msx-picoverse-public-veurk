@@ -62,6 +62,27 @@ wait_sltsl:
     out pindirs, 8                ; Tri-state D0..D7
 .wrap
 
+; SN76489 discovery reads may be serviced by the shared storage/audio core.
+; Hold /WAIT until it supplies a token, including for unclaimed I/O reads.
+; This replaces (never accompanies) the 13-instruction I/O read program.
+.program msx_io_read_wait_responder
+
+.wrap_target
+wait_rd:
+    wait 0 gpio 24
+    jmp pin wait_rd
+    set pindirs, 1
+    in pins, 16
+    push block
+    pull block
+    out pins, 8
+    out pindirs, 8 [2]
+    set pindirs, 0 [1]
+    wait 1 gpio 24
+    mov osr, null
+    out pindirs, 8
+.wrap
+
 .program msx_write_captor
 
 ; MSX_MEM_SETTLE: extra PIO cycles between observing /WR low and latching the

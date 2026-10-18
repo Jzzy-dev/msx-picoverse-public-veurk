@@ -44,7 +44,7 @@
 
 namespace eval picoverse2350 {
 
-variable version "v2.58"
+variable version "v2.59"
 
 # Flash layout, must match pico/explorer/explorer.c and tool/src/explorer.c.
 # Offsets are relative to the menu ROM (the firmware's flash_rom pointer).
@@ -2579,6 +2579,7 @@ proc on_select {value} {
 
 # resolve_audio_mode() of the firmware
 proc audio_mode {code profile} {
+    if {$profile == 13 && (($code > 0 && $code <= 18) || $code == 22 || $code == 23)} {return sn_franky}
 	set system [is_system_code $code]
 	if {$system} {
 		if {$profile == 4 && $code != 21} {return msx_music}
@@ -2692,6 +2693,16 @@ proc audio_devices {mode var_slots var_io} {
 	variable sfg_offset
 	upvar $var_slots slots $var_io io
 	switch -- $mode {
+		sn_franky {
+			append io "<Franky id=\"PicoVerse 2350 Franky\">
+      <video_standard>NTSC</video_standard>
+      <vdp>VDP2</vdp>
+      <device idref=\"VDP\"/>
+      <io base=\"0x48\" num=\"2\"/>
+      <io base=\"0x88\" num=\"2\"/>
+      <sound><volume>21000</volume></sound>
+    </Franky>"
+		}
 		scc_ext - megaram_scc {
 			dict set slots 2 "<ROM id=\"PicoVerse 2350 SCC\">
           <mem base=\"0x4000\" size=\"0x8000\"/>
@@ -2823,7 +2834,7 @@ proc start_record {rec opts} {
 		notify "$name: the Carnivore2 RAM registers are not emulated, starting Nextor with the 1MB mapper" warning
 	}
 	if {$code == $mapper_dsk} {
-		if {$audio ni {scc_ext sccp_ext msx_music dual_psg sfg05 sfg01}} {set audio none}
+		if {$audio ni {scc_ext sccp_ext msx_music dual_psg sfg05 sfg01 sn_franky}} {set audio none}
 		set kernel [cache_file "nextor_dsk.rom" [read_range $image_file $dsk_offset 0x20000]]
 		dict set slots 0 [ide_xml $kernel [sd_host $path]]
 		if {[dict get $opts wifi]} {

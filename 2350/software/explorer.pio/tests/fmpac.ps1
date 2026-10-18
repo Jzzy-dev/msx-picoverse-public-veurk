@@ -54,9 +54,10 @@ foreach ($name in @("handle_konamiscc_write", "handle_konami_write", "handle_asc
     "loadrom_fmpac")) {
     $code += (Get-CFunction $firmware $name) + "`n"
 }
-foreach ($name in @("record_is_system_rom", "record_is_sunrise_system_rom",
+foreach ($name in @("record_is_system_rom", "record_is_sunrise_system_rom", "record_is_standalone_megaram",
     "record_supports_scc_audio", "record_supports_external_scc_audio",
-    "record_supports_dual_psg", "record_supports_msx_music", "audio_profile_is_supported")) {
+    "record_supports_dual_psg", "record_supports_msx_music", "audio_profile_is_supported",
+    "default_audio_profile", "sanitize_audio_profile", "next_audio_profile", "build_audio_text")) {
     $code += (Get-CFunction $menu $name) + "`n"
 }
 

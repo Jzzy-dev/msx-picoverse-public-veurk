@@ -117,6 +117,8 @@ Press the Enter or Space key to launch the selected ROM. The MSX will attempt to
 
 Press a letter key (A to Z) to jump straight to the first ROM whose name starts with that letter; the menu switches to the page that contains it.
 
+A joystick connected to either MSX joystick port also works: move the stick up, down, left or right to navigate (hold it to repeat) and press a fire button to launch the selected ROM.
+
 At any time while in the menu, you can press the F1 key to read the help screen with basic instructions. Press any key to return to the main menu.
 
 ## Using Nextor with the PicoVerse 2040 cartridge

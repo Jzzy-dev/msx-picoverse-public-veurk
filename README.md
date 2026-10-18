@@ -1,8 +1,8 @@
-# PicoVerse for MSX
+# The PicoVerse for MSX
 
 **The MSX experience driven by the Raspberry Pi Pico family of microcontrollers.**
 
-PicoVerse is a community-driven effort to build versatile MSX cartridges powered by Raspberry Pi Pico development boards. The project pairs accessible hardware designs with ready-to-flash firmware so MSX users can jump straight into loading games, tools, and Nextor without having to compile sources.
+The PicoVerse project is a community-driven effort to build versatile MSX cartridges powered by Raspberry Pi Pico development boards. The project pairs accessible hardware designs with ready-to-flash firmware so MSX lovers can jump straight into loading games, tools, and Nextor without having to compile sources.
 
 | Cartridge Label - 2040 Variant | Cartridge Label - 2350 Variant |
 |---------|---------|
@@ -14,28 +14,25 @@ If you find any issues, have questions, or want to contribute, please open an is
 
 ## Project Highlights
 
-- Single-ROM LoadROM workflow for instant and easy booting of one title.
-- Multi-ROM loader with an on-screen menu and mapper auto-detection.
-- Explorer firmware (PicoVerse 2350) merges flash ROMs, optional embedded Sunrise Nextor SYSTEM entries, and microSD ROMs, labels the source (FL/SD), adds microSD MP3/WAV playback, supports WAVEGAME microSD ROMs with port `0x92` controlled WAV streaming, supports on-device search, can cycle supported microSD partitions with `P`, can delete selected SD files or flash entries with confirmed `D`, can copy microSD ROMs into the cartridge flash with `F` or an immediate confirmation when selecting ROMs above 4 MB, opens the copied or reused flash ROM's options before execution, shows total free flash space in `F1`, can rename ROMs, `.DSK` images and flash entries with `R`, includes ROM detail audio profiles with native and external SCC/SCC+, Dual PSG, MSX-MUSIC, and YM2151/SFG support, adds an independent primary PSG DAC mirror option, and includes an integrated File Hunter browser that streams ROM downloads of any size allowed by the microSD filesystem, plus supported `.DSK` disk images, over ESP-01 WiFi. Questions, progress and download results use the bottom status line.
-- Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or FAT16 up-to-4GB microSD partitions (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
-- Sunrise IDE + 192KB memory mapper on PicoVerse 2040 (`loadrom.exe -m`), or Sunrise IDE standalone (`loadrom.exe -s`); Nextor 3.0.0 Beta 2 for testing with `loadrom.exe -s3` / `loadrom.exe -m3`, or as extra MultiROM menu entries with `multirom.exe -s3` / `multirom.exe -m3`.
-- Sunrise IDE + 1MB PSRAM memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`).
-- Sunrise IDE + 1MB memory mapper + 1MB MegaRAM on PicoVerse 2350 (`loadrom.exe -r1` / `explorer.exe -r1` for microSD, `loadrom.exe -r2` / `explorer.exe -r2` for USB), exposing 128 × 8KB MegaRAM banks in a dedicated expanded subslot.
-- Carnivore2-compatible RAM-mode loader on PicoVerse 2350 (`loadrom.exe -c1` / `loadrom.exe -c2`) for `SROM.COM /D15` uploads into the 1MB PSRAM mapper.
-- ESP-01 WiFi support for PicoVerse 2350 Sunrise IDE LoadROM/MultiROM builds (`loadrom.exe -s1 -w`, `-m1 -w`, `-s2 -w`, `-m2 -w`) and for the Explorer File Hunter browser. Compatible with both real MSX hardware and FPGA-based MSX cores.
-- SCC/SCC+, Dual PSG, MSX-MUSIC/YM2413, and YM2151/SFG emulation on the PicoVerse 2350, with per-ROM audio profile selection where supported.
-- OPL4 / YMF278B / MoonSound emulation on the PicoVerse 2350 (`loadrom.exe -4`) — a standalone sound cartridge with OPL3 FM (18 channels), the 24-voice PCM wavetable, the embedded 2 MB YRW801-M wave ROM, and 2 MB of PCM sample RAM on the standard MoonSound ports.
-- MSX-AUDIO / Yamaha Y8950 emulation on the PicoVerse 2350 (`loadrom.exe -a`) — a standalone MSX-AUDIO card with OPL1 FM plus ADPCM, 256 KB of ADPCM sample RAM, and the MSX-Audio BIOS mapped in the cartridge slot.
-- Yamanooto flash-cartridge emulation on the PicoVerse 2350 (`yamanooto.exe`) — a Konami-SCC compatible 8 MB flash cartridge with SCC/SCC+, a secondary (dual) PSG, a primary PSG mirror, and MSX-MUSIC/FM-PAC, all always available with the firmware selecting SCC, FM, or pure PSG on the fly so one image can mix SCC, FM, and PSG games.
-- PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
-- openMSX emulated cartridge for PicoVerse 2040 MultiROM — run the same MultiROM `.uf2` in the openMSX emulator before flashing it, with the real PicoVerse menu, the matching ROM mappers, and the embedded Nextor Sunrise IDE entries using a disk image as the USB drive. See [MSX PicoVerse 2040 — MultiROM in openMSX](/docs/msx-picoverse-2040-openmsx.md).
-- openMSX emulated cartridge for PicoVerse 2350 Explorer — run an Explorer `.uf2` in openMSX with the real Explorer menu, a PC folder as the microSD card, copy to flash/rename/delete, the Nextor and `.DSK` entries, and the SCC/SCC+, MSX-MUSIC, SFG and Dual PSG audio profiles. See [MSX PicoVerse 2350 — Explorer in openMSX](/docs/msx-picoverse-2350-openmsx.md).
-- USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
-- MSX-MIDI support on PicoVerse 2040 — use a USB-MIDI cable as a standard MSX-MIDI interface via the cartridge slot. 
-- MIDI-PAC support on PicoVerse 2040 — passively convert live MSX PSG music and effects into high-quality MIDI for external synths or sound modules (SC-55 optimized). Features automatic bass detection, tone+noise coexistence, smooth pitch bending on fast passages, and improved percussion mapping. 
-- USB joystick support on PicoVerse 2040 — plug a standard USB gamepad (HID, Xbox 360, Xbox One, or Xbox Series X|S) into the USB-C port and it appears as one or two native MSX joysticks with no MSX-side software needed. Uses open-drain bus driving to coexist with the real PSG.
-- BOMs, and production-ready Gerbers.
-- Active development roadmap covering RP2040 and RP2350-based cartridges.
+### Core Platform (PicoVerse 2040 & 2350)
+- **Instant Single-ROM & Multi-ROM Cartridges**: Boot a single title directly with `LoadROM` or browse a multi-game menu with `MultiROM` (up to 16 MB of flash), backed by heuristic + SHA-1 database mapper auto-detection (`Plain 16/32/48/64`, `Konami`, `Konami SCC`, `ASCII 8/16/16X`, `NEO-8/16`, and `Manbow2`).
+- **Nextor + Sunrise IDE Mass Storage**: Ready-to-use Nextor 2.1.4 (and Nextor 3.0.0 Beta 2) builds via Sunrise IDE emulation over USB or microSD, available standalone or paired with expanded Memory Mapper RAM (`192 KB` on 2040, `1 MB` on 2350).
+- **USB Floppy Drive (FDD) & `.DSK` Disk Image Interface**: Standalone MSX-DOS 1 disk ROM (`msxusbfdd.exe`, available for both PicoVerse 2040 and PicoVerse 2350) supporting real 720 KB / 1.44 MB USB floppy drives (**only through an externally powered USB hub — never connect a floppy drive directly to the cartridge**) and `.DSK` disk images on FAT12/FAT16/FAT32 USB flash drives, with an interactive boot menu and `CALL USB*` BASIC commands ([2040 guide](/docs/msx-picoverse-2040-msxusbfdd.md), [2350 guide](/docs/msx-picoverse-2350-msxusbfdd.md)).
+- **Zero-Compile UF2 Builders & openMSX Preview**: PC tools generate drag-and-drop `.uf2` firmware images in seconds, and the included openMSX emulated cartridges ([2040 MultiROM](/docs/msx-picoverse-2040-openmsx.md), [2350 Explorer](/docs/msx-picoverse-2350-openmsx.md)) let you test your `.uf2` images on a PC before flashing.
+- **Open Hardware**: Interactive BOMs, and production-ready Gerbers for both cartridge variants.
+
+### PicoVerse 2040 Highlights (RP2040)
+- **ROM, MultiROM & Nextor USB Storage**: Run ROMs and MultiROM menus from flash, or boot Nextor from a USB flash drive (standalone or with a `192 KB` Memory Mapper).
+- **USB Floppy Drive (FDD) & `.DSK` Disk Image Interface**: Standalone MSX-DOS 1 disk ROM (`msxusbfdd.exe`) supporting real 720 KB / 1.44 MB USB floppy drives (only through powered USB hubs) and `.DSK` disk images on FAT12/FAT16/FAT32 USB flash drives, with an interactive boot menu and `CALL USB*` BASIC commands ([guide](/docs/msx-picoverse-2040-msxusbfdd.md)).
+- **USB Keyboard & USB Joystick Adapters**: Use a standard USB keyboard or up to two USB gamepads (HID, Xbox 360, Xbox One, Xbox Series X|S) as native MSX input devices via the cartridge slot.
+- **MSX-MIDI & MIDI-PAC**: Use a USB-MIDI cable as a standard MSX-MIDI interface, or passively convert live MSX PSG music and sound effects into Roland SC-55–optimized General MIDI (`MIDI-PAC`).
+
+### PicoVerse 2350 Highlights (RP2350 + PSRAM + microSD + I2S DAC + WiFi)
+- **All-in-One Explorer Environment**: Unified browser for flash ROMs, microSD ROMs, embedded Sunrise Nextor entries, and `.DSK` floppy images (including multi-disk games with number-key disk swapping). Includes an MP3/WAV player, `WAVEGAME` CD-quality WAV streaming, on-device file management (search, copy to flash, rename, delete, partition cycling), and per-ROM 50/60 Hz & CPU speed settings.
+- **Built-In Sound Cartridges & Per-ROM Audio**: Per-ROM audio profiles for `SCC/SCC+`, `Dual PSG`, `MSX-MUSIC (YM2413 / FM-PAC)`, `Yamaha SFG01/SFG05 (YM2151)`, and primary PSG DAC mirroring through the 16-bit stereo I2S DAC — plus standalone **MoonSound / OPL4 (`YMF278B` + 2 MB Wave ROM + 2 MB Sample RAM)**, **MSX-AUDIO (`Y8950` + 256 KB ADPCM RAM)**, and **Yamanooto** (8 MB flash with runtime SCC/FM/PSG auto-switching) cartridge firmwares.
+- **PSRAM Expansion Modes**: `1 MB` Memory Mapper, `1 MB` Memory Mapper + `1 MB` MegaRAM (128 × 8 KB banks in a dedicated subslot), and Carnivore2-compatible RAM-mode loading (`SROM.COM /D15`).
+- **USB Floppy Drive (FDD) & `.DSK` Disk Image Interface**: Standalone MSX-DOS 1 disk ROM (`msxusbfdd.exe`) supporting real 720 KB / 1.44 MB USB floppy drives (only through powered USB hubs) and `.DSK` disk images on FAT12/FAT16/FAT32 USB flash drives, with an interactive boot menu and `CALL USB*` BASIC commands ([guide](/docs/msx-picoverse-2350-msxusbfdd.md)).
+- **ESP-01 WiFi & File Hunter Browser**: Browse and download ROMs and `.DSK` disk images over WiFi directly to the microSD card from the integrated File Hunter catalog, or enable ESP8266 WiFi in Sunrise IDE LoadROM/MultiROM builds.
 
 ## Documentation
 
@@ -57,29 +54,44 @@ If you find any issues, have questions, or want to contribute, please open an is
 **Yamanooto Guides:** Use the Yamanooto tool to create a UF2 that emulates a Yamanooto flash cartridge (Konami-SCC compatible, SCC/SCC+, dual PSG, primary PSG mirror, and MSX-MUSIC/FM-PAC) from a single ROM image, with the firmware choosing SCC/FM/PSG automatically at runtime.
 - [MSX PicoVerse 2350 Yamanooto Tool Manual (English)](/docs/msx-picoverse-2350-yamanooto-tool-manual.en-us.md)
 
-**Reference Material** 
+**USB FDD & `.DSK` Guides:** Use the `msxusbfdd` tool to create a UF2 that turns the PicoVerse 2040 or PicoVerse 2350 into a standalone MSX-DOS 1 disk interface supporting both real USB floppy drives (720 KB and 1.44 MB, **connected exclusively via an externally powered USB hub**) and `.DSK` disk images on FAT12/FAT16/FAT32 USB flash drives, with an interactive boot menu and `CALL USB*` BASIC commands.
+> **⚠️ IMPORTANT — DO NOT CONNECT A USB FLOPPY DRIVE DIRECTLY TO THE CARTRIDGE USB-C PORT:** Unlike the MSX-USB / RookieDrive, the PicoVerse cartridge cannot supply the current required to spin and step USB floppy drives. Connecting a USB FDD directly to the PicoVerse USB-C port can damage the cartridge. **Always connect USB floppy drives through an externally powered (5V) USB hub.**
+- [MSX PicoVerse 2040 USB FDD Guide (English)](/docs/msx-picoverse-2040-msxusbfdd.md)
+- [MSX PicoVerse 2350 USB FDD Guide (English)](/docs/msx-picoverse-2350-msxusbfdd.md)
+
+**Reference Material**
+
+*PicoVerse 2040 Reference:*
 - [PicoVerse 2040 Features Overview](/docs/msx-picoverse-2040-features.md)
+- [MSX PicoVerse 2040 PIO Strategy](/docs/msx-picoverse-2040-pio.md)
+- [MSX PicoVerse 2040 MegaROMs](/docs/msx-picoverse-2040-megaroms.md)
+- [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md)
+- [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md)
+- [MSX PicoVerse 2040 USB FDD](/docs/msx-picoverse-2040-msxusbfdd.md)
+- [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md)
+- [MSX PicoVerse 2040 USB Joystick](/docs/msx-picoverse-2040-joystick.md)
+- [MSX PicoVerse 2040 MSX-MIDI](/docs/msx-picoverse-2040-msx-midi.md)
+- [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md)
+
+*PicoVerse 2350 Reference — Architecture, Storage & System:*
 - [PicoVerse 2350 Features Overview](/docs/msx-picoverse-2350-features.md)
+- [MSX PicoVerse 2350 PIO Strategy](/docs/msx-picoverse-2350-pio.md)
+- [MSX PicoVerse 2350 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2350-sunrise-nextor.md)
+- [MSX PicoVerse 2350 DSK Disk Image Support](/docs/msx-picoverse-2350-dsk-support.md)
+- [MSX PicoVerse 2350 USB FDD](/docs/msx-picoverse-2350-msxusbfdd.md)
+- [MSX PicoVerse 2350 MegaRAM Implementation](/docs/msx-picoverse-2350-megaram.md)
+- [MSX PicoVerse 2350 Yamanooto Implementation](/docs/msx-picoverse-2350-yamanooto.md)
+- [MSX PicoVerse 2350 WiFi Support](/docs/msx-picoverse-2350-wifi.md)
+- [MSX PicoVerse 2350 50/60Hz VDP Frequency Implementation](/docs/msx-picoverse-2350-50-60hz.md)
+- [MSX PicoVerse 2350 CPU Speed Implementation](/docs/msx-picoverse-2350-cpu-speed.md)
+
+*PicoVerse 2350 Reference — Sound & Audio Emulation:*
+- [MSX PicoVerse 2350 SCC Emulation](/docs/msx-picoverse-2350-scc.md)
 - [MSX PicoVerse 2350 Dual PSG Implementation](/docs/msx-picoverse-2350-dualpsg.md)
 - [MSX PicoVerse 2350 MSX-MUSIC/FM-PAC Implementation](/docs/msx-picoverse-2350-fmpac.md)
-- [MSX PicoVerse 2350 50/60Hz CPU Speed Implementation](/docs/msx-picoverse-2350-50-60hz.md) 
-- [MSX PicoVerse 2350 CPU Speed Implementation](/docs/msx-picoverse-2350-cpu-speed.md)
-- [MSX PicoVerse 2350 Yamanooto Implementation](/docs/msx-picoverse-2350-yamanooto.md)
-- [MSX PicoVerse 2350 MegaRAM Implementation](/docs/msx-picoverse-2350-megaram.md)
+- [MSX PicoVerse 2350 OPL4 / MoonSound Implementation](/docs/msx-picoverse-2350-opl4.md)
+- [MSX PicoVerse 2350 MSX-AUDIO / Y8950 Implementation](/docs/msx-picoverse-2350-msx-audio.md)
 - [MSX PicoVerse 2350 WAVEGAME Protocol and Support](/docs/msx-picoverse-2350-wavegame.md)
-- [MSX PicoVerse 2350 WiFi Support](/docs/msx-picoverse-2350-wifi.md)
-- [MSX PicoVerse 2040 PIO Strategy](/docs/msx-picoverse-2040-pio.md) 
-- [MSX PicoVerse 2350 PIO Strategy](/docs/msx-picoverse-2350-pio.md) 
-- [MSX PicoVerse 2350 SCC Emulation](/docs/msx-picoverse-2350-scc.md)
-- [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md) 
-- [MSX PicoVerse 2350 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2350-sunrise-nextor.md) 
-- [MSX PicoVerse 2350 DSK Disk Image Support](/docs/msx-picoverse-2350-dsk-support.md)
-- [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md) 
-- [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md)
-- [MSX PicoVerse 2040 MSX-MIDI](/docs/msx-picoverse-2040-msx-midi.md) 
-- [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md)
-- [MSX PicoVerse 2040 MegaROMs](/docs/msx-picoverse-2040-megaroms.md)
-- [MSX PicoVerse 2040 USB Joystick](/docs/msx-picoverse-2040-joystick.md)
 
 
 ## Hardware Variants
@@ -98,6 +110,7 @@ If you find any issues, have questions, or want to contribute, please open an is
 - Standalone MSX-MIDI firmware — use a USB-MIDI cable as a standard MSX-MIDI interface for MIDI players and sequencers (`loadrom.exe -i`).
 - Standalone MIDI-PAC firmware — passively listen to the MSX PSG and convert music and effects to USB MIDI for an external synth or sound module (`loadrom.exe -p`).
 - Standalone USB joystick firmware — use a standard USB gamepad as an MSX joystick via the cartridge slot (`loadrom.exe -j`). Supports Xbox 360, Xbox One, Xbox Series X|S, and generic USB HID gamepads, with up to 2 gamepads mapped to MSX joystick ports 1 and 2.  Not compatible with FPGA-based MSX systems or MSX computers with an integrated PSG (e.g. T9769 MSX-ENGINE).
+- Standalone USB Floppy Drive (FDD) and `.DSK` Disk Image firmware (`msxusbfdd.exe`) — use a real USB floppy drive (UFI/CBI/CB/Bulk-Only, **must be connected through an externally powered USB hub — never connect a USB FDD directly to the cartridge USB-C port, as it can damage the cartridge**) or mount `.DSK` disk images from a FAT12/FAT16/FAT32 USB flash drive with an on-screen boot menu and `CALL USB*` BASIC commands.
 
 #### Bill of Materials
 
@@ -130,6 +143,7 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Sunrise IDE + 1MB PSRAM memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
 - Sunrise IDE + 1MB mapper + 1MB MegaRAM mode provides Nextor disk access, standard mapper RAM, and a separate writable MegaRAM cartridge surface (`-r1` for microSD, `-r2` for USB).
 - Carnivore2-compatible RAM-mode loading lets `SROM.COM /D15` upload ROMs into the 1MB PSRAM mapper (`-c1` for microSD, `-c2` for USB).
+- Standalone USB Floppy Drive (FDD) and `.DSK` Disk Image firmware (`msxusbfdd.exe`) — use a real USB floppy drive (UFI/CBI/CB/Bulk-Only, **must be connected through an externally powered USB hub — never connect a USB FDD directly to the cartridge USB-C port, as it can damage the cartridge**) or mount `.DSK` disk images from a FAT12/FAT16/FAT32 USB flash drive with an on-screen boot menu and `CALL USB*` BASIC commands.
 - Yamanooto flash-cartridge emulation (`yamanooto.exe`) reproduces the  Yamanooto: a Konami-SCC compatible 8 MB flash cartridge with SCC/SCC+, a secondary (dual) PSG on ports `0x10`/`0x11`, a primary PSG mirror (`0xA0`/`0xA1`), and MSX-MUSIC/FM-PAC via an expanded subslot. All engines are always available and the firmware selects SCC, FM, or pure PSG on the fly, so a single image can hold a mix of SCC, FM, and PSG games.
 - Standalone OPL4 / YMF278B / MoonSound cartridge firmware (`loadrom.exe -4`): full YMF278B emulation (OPL3 FM with 18 channels plus 24 PCM voices), the 2 MB YRW801-M wave ROM embedded in the UF2, 2 MB of PCM sample RAM in PSRAM, MoonSound ports `0xC4`-`0xC7` and `0x7E`/`0x7F`, FM timer interrupts on `/INT`, and 16-bit stereo 44.1 kHz output through the I2S DAC. Optional `--22khz` reduced-rate build for extreme-polyphony songs.
 - Standalone MSX-AUDIO / Yamaha Y8950 cartridge firmware (`loadrom.exe -a`): OPL1 FM (9 channels) plus ADPCM-B, 256 KB of ADPCM sample RAM in PSRAM, the 48 KB MSX-Audio BIOS v1.3 mapped in the slot (openMSX `Boosted_audio.xml` layout, with base and expanded work RAM), ports `0xC0`/`0xC1`, FM timer interrupts on `/INT`, and 16-bit 49716 Hz output through the I2S DAC. Optional `--4mhz` Y8950 clock.
@@ -354,9 +368,11 @@ Those projects remain copyright by Oduvaldo Pavan Junior and their respective co
 
 **The .DSK disk image support in PicoVerse 2350 Explorer** was designed after studying the MSXUSB **MsxUsbFDD** driver, which is based on Konamiman's Rookie Drive USB FDD BIOS and serves `.DSK` files through a CH376 USB host. PicoVerse keeps its own RP2350 implementation, which serves the image from PSRAM through the existing Sunrise IDE emulation and Konamiman's Nextor 2.1.4 kernel.
 
+**The USB Floppy Drive (FDD) and .DSK Disk Image support on PicoVerse 2040 and PicoVerse 2350** (`2040/software/msxusbfdd` and `2350/software/msxusbfdd`) is based on the **Rookie Drive USB FDD BIOS / USBHOST NestorBIOS 2.2** created by **Konamiman (Néstor Soriano)** (2018–2022) and the **MSXUSB MsxUsbFDD** adaptation by **Cristiano Goncalves (The Retro Hacker)**. The MSX-DOS 1 kernel integration, `.DSK` boot menu, format routines, and `CALL USB*` BASIC commands are credited to Konamiman. The PicoVerse 2040 and 2350 implementations — replacing the CH376S hardware layer with the memory-mapped PicoVerse mailbox (`7D00h–7FCFh`), the dual-core RP2040/RP2350 PIO bus responder, the custom UFI (CBI/CB/Bulk-Only) USB floppy class driver with its high-rate `epx` bulk engine and multi-tier USB hub support, the FatFs R0.15 file service (FatFs © ChaN) for `.DSK` images on FAT12/FAT16/FAT32 USB flash drives, and the `msxusbfdd.exe` UF2 builder tools — are original work by **Cristiano Goncalves (The Retro Hacker)** and are licensed under CC BY-NC-SA 4.0.
+
 ## Feedback & Community
 
 Questions, test reports, and build photos are welcome. Open an issue on the public repository or reach out through the MSX retro hardware forums where PicoVerse updates are posted.
 
 Author: Cristiano Goncalves
-Last updated: 09/24/2026
+Last updated: 10/18/2026

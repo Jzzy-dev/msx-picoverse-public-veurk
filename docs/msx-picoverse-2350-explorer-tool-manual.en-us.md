@@ -447,7 +447,7 @@ MP3 decoding runs on the Pico side and streams stereo PCM to the cartridge I2S D
 Selecting a ROM entry opens a ROM details screen before running:
 
 - **Mapper**: Shows the detected mapper (for SD ROMs) and allows manual override using Left/Right. The cycle includes **ASC16X-FR**, which runs an ASCII16-X ROM with FlashROM emulation so the game can save into the cartridge; see [ASCII16-X with FlashROM](#ascii16-x-with-flashrom-asc16x-fr).
-- **Audio**: Choose an audio profile with Left/Right (None, SCC, SCC+, external SCC/SCC+, Dual PSG, MSX-MUSIC, SFG01/SFG05, SFG01/SFG05 at 4 MHz). The menu only cycles through profiles supported by the selected ROM mapper.
+- **Audio**: Choose an audio profile with Left/Right (None, SCC, SCC+, external SCC/SCC+, Dual PSG, MSX-MUSIC, SFG01/SFG05, SFG01/SFG05 at 4 MHz, SN76489 Franky). The menu only cycles through profiles supported by the selected ROM mapper.
 - **PSG**: Choose whether to mirror the MSX primary PSG writes through the cartridge DAC. The default is Yes unless saved `.PVC` options override it.
 - **Wifi**: For standalone Sunrise Nextor and Sunrise + 1MB mapper entries only, choose whether to expose the ESP8266P WiFi BIOS before running. Carnivore2 and MegaRAM Nextor entries do not expose WiFi. The default is No.
 - **SD Part**: For Sunrise Nextor SD entries only, choose the FAT16 partition up to 4 GB that Nextor will boot from. The selected partition is saved with the ROM options.
@@ -468,8 +468,9 @@ If a ROM mapper is unknown, the screen will briefly show "Detecting..." while th
 - **YM2164 SFG05 4MHZ** and **YM2151 SFG01 4MHZ**: Identical to the two profiles above, except the emulated OPM/OPP core is clocked at 4 MHz instead of the MSX 3.579545 MHz clock. Because pitch, envelopes, LFO and the FM timers are all derived from the chip clock, everything plays back `4000000 / 3579545 = 1.1174x` faster. Use these for arcade conversions and music written for arcade boards, where the YM2151 is normally clocked at 4 MHz.
 - **Dual PSG**: Enables a secondary AY-3-8910 compatible PSG on I/O ports `0x10` (register select) and `0x11` (data write), matching the common Carnivore2 / MegaFlashROM / FlashJacks style second-PSG convention. Use this for ROMs or patches that explicitly support dual PSG music.
 - **MSX-MUSIC**: Enables YM2413/MSX-MUSIC audio using an FM-PAC-compatible BIOS from the Explorer UF2 flash payload. Use this for regular ROMs that can use MSX-MUSIC ports `0x7C` and `0x7D`; supported Sunrise Nextor SYSTEM entries also expose the FM-PAC BIOS in a free expanded subslot.
+- **SN76489 Franky**: Sega-style PSG on mirrored write ports `0x48`/`0x49`, compatible with the Franky/PlaySoniq sound port convention. Includes limited NTSC counter/control behavior for VGMPlay's Franky detection, not a Sega VDP or a full PlaySoniq cartridge.
 
-Explorer treats audio profiles as mutually exclusive: a ROM can run with no extra audio, SCC, SCC+, external SCC/SCC+, Dual PSG, MSX-MUSIC, or YM2151/SFG, but not multiple cartridge audio engines at the same time.
+Explorer treats audio profiles as mutually exclusive: a ROM can run with no extra audio, SCC, SCC+, external SCC/SCC+, Dual PSG, MSX-MUSIC, YM2151/SFG, or SN76489 Franky, but not multiple cartridge audio engines at the same time.
 
 The **PSG** field is independent from the Audio profile. When set to **Yes**, Explorer mirrors writes to the primary MSX PSG ports `0xA0` and `0xA1`, generates matching AY/YM audio on the Pico, and sends that audio through the cartridge I2S DAC. The real MSX PSG is not disabled; the option provides a DAC-side copy of the main PSG. It can be combined with **None**, **SCC**, **SCC+**, external SCC/SCC+, **Dual PSG**, **MSX-MUSIC**, or **YM2151 (SFG01/SFG05)**, so PSG music can be heard through the cartridge DAC together with the selected cartridge audio profile. When **Dual PSG** and **PSG: Yes** are enabled together, Explorer routes Dual PSG to the left channel and the mirrored primary PSG to the right channel for a stereo split. The option defaults to **Yes** unless saved `.PVC` options override it.
 
@@ -482,6 +483,29 @@ The YM2151 SFG01/SFG05 profiles are available for supported non-SYSTEM ROM entri
 The Dual PSG and MSX-MUSIC profiles are available for regular non-SYSTEM ROMs that are not Konami SCC or Manbow2, and supported Sunrise Nextor SYSTEM entries can use the SYSTEM audio service for the supported SYSTEM profiles. When MSX-MUSIC is selected for supported Sunrise Nextor entries, Explorer keeps the Nextor storage layout active and places the FM-PAC BIOS/control surface in subslot 2 without WiFi or subslot 3 with WiFi. These cartridge audio profiles are not offered for NEO system entries, folders, SCC-capable ROMs, Sunrise + 1MB mapper entries, Carnivore2 entries, or MegaRAM entries.
 
 Primary PSG mirroring is intended for normal ROM launches from flash or microSD, including ROMs downloaded from File Hunter after they have been saved to the card. SYSTEM/storage entries that reserve core 1 for storage backends do not use the PSG DAC mirror path.
+
+## SN76489 music and games
+
+The SN76489 profile provides the Franky/PlaySoniq sound port convention:
+
+| Menu profile | Sound writes | Chip behavior | Available entries |
+| --- | --- | --- | --- |
+| **SN76489 Franky** | `0x48` and `0x49` (mirrors) | Sega PSG, 16-bit noise | Regular ROMs (including Konami SCC/Manbow2 and ASC16X-FR), Sunrise Nextor, Carnivore2 Nextor, and DSK |
+
+Franky is not offered for Nextor + MegaRAM or standalone MegaRAM. It retains the normal WiFi/audio and WAVEGAME exclusions and saves its selection as profile 13 in the existing `.PVC` audio byte. With **PSG: Yes**, the primary PSG is mixed with the SN chip into both DAC channels, including in Nextor sessions. **PSG: No** leaves the real MSX PSG alone and sends only SN audio through the DAC.
+
+### VGMPlay in Nextor
+
+1. Select a Sunrise Nextor SYSTEM entry. Prefer **+ 1MB Mapper**, especially on a machine with only 64 KB RAM.
+2. Select **SN76489 Franky** in **Audio**, with **Wifi: No**, then run.
+3. Run `VGMPLAY SONG.VGM` (or a VGZ file) from the Nextor command prompt. VGMPlay requires at least 128 KB main RAM and an MSX-DOS 2-compatible environment.
+4. Check that VGMPlay identifies **Franky**, rather than its internal-PSG translation fallback. Sound alone does not prove that the selected SN engine is being used.
+
+Franky does not add mapper RAM or change the selected Nextor/DSK memory layout. The former MMM profile (saved ID 14, port `0x3F`) has been removed. Old selections are unsupported and fall back to the entry's normal default audio profile; select Franky and save the options again to use it instead.
+
+The Franky profile accepts sound writes on both ports immediately. Reads provide a limited NTSC vertical/horizontal counter and idle status for sound-driver discovery. There is no Sega video rendering, VRAM, video interrupt output, Game Gear stereo control, or complete Franky/PlaySoniq peripheral emulation. Unmodified Sega console ROMs do not become MSX-compatible merely by enabling this profile.
+
+The engine uses a fixed 3.579545 MHz chip clock and 44.1 kHz DAC output. Three tone channels, noise, latch/data continuation writes, attenuation, reset/mute, and Sega noise and zero-period behavior are emulated. Only one SN chip is provided: dual-SN VGMs and songs requiring an additional FM chip are outside this profile's scope.
 
 ## SCC/SCC+ sound emulation
 

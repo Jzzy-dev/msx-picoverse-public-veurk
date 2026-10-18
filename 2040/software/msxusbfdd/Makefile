@@ -1,0 +1,60 @@
+######################################################################
+# MSX PICOVERSE 2040 USB FDD - Aggregate Makefile                     #
+#                                                                    #
+# Invokes the individual build systems for each component.          #
+# Build order matters because the tool embeds the artifacts produced #
+# by the other stages: the MSX BIOS ROM (msx) and the Pico firmware  #
+# (pico), so the tool target runs last.                              #
+######################################################################
+
+# Shared version (can be overridden on the command line)
+VERSION ?= v1.00
+
+# Sub-project locations
+MSX_DIR     := msx
+PICO_DIR    := pico/msxusbfdd
+PICO_BUILD  := $(PICO_DIR)/build
+PICO_CONFIG := $(PICO_BUILD)/CMakeCache.txt
+TOOL_DIR    := tool
+TEST_DIR    := tests
+
+# CMake options
+CMAKE ?= c:/Users/Cristiano/.pico-sdk/cmake/v3.29.9/bin/cmake
+# Use Ninja on Windows to avoid NMake and missing MinGW make.
+ifeq ($(OS),Windows_NT)
+	CMAKE_GENERATOR ?= Ninja
+	CMAKE_MAKE_PROGRAM ?= C:/Users/Cristiano/.pico-sdk/ninja/v1.12.1/ninja.exe
+else
+	CMAKE_GENERATOR ?=
+endif
+CMAKE_GENERATOR_FLAG := $(if $(CMAKE_GENERATOR),-G "$(CMAKE_GENERATOR)",)
+CMAKE_BUILD_TYPE ?= Release
+CMAKE_MAKE_PROGRAM_FLAG := $(if $(CMAKE_MAKE_PROGRAM),-DCMAKE_MAKE_PROGRAM="$(CMAKE_MAKE_PROGRAM)",)
+
+.PHONY: all msx pico tool test clean
+
+all: tool
+
+msx:
+	"$(MAKE)" -C $(MSX_DIR) VERSION=$(VERSION)
+
+pico: $(PICO_CONFIG)
+	$(CMAKE) --build $(PICO_BUILD)
+
+$(PICO_CONFIG):
+	$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S $(PICO_DIR) -B $(PICO_BUILD) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+
+tool: msx pico
+	"$(MAKE)" -C $(TOOL_DIR) VERSION=$(VERSION)
+
+# Host tests: the file system service and the BIOS ROM running in a Z80 emulator (need gcc,
+# Python and "pip install z80")
+test:
+	"$(MAKE)" -C $(TEST_DIR)
+
+clean:
+	-"$(MAKE)" -C $(MSX_DIR) clean VERSION=$(VERSION)
+	-@$(CMAKE) --build $(PICO_BUILD) --target clean
+	-"$(MAKE)" -C $(TOOL_DIR) clean VERSION=$(VERSION)
+	-"$(MAKE)" -C $(TEST_DIR) clean
+	-@$(CMAKE) -E rm -rf $(PICO_BUILD)

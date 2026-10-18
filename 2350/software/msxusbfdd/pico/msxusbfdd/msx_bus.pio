@@ -1,0 +1,39 @@
+; MSX PICOVERSE PROJECT
+; (c) 2026 Cristiano Goncalves
+; The Retro Hacker
+;
+; msx_bus.pio - PIO programs for MSX bus interface (PicoVerse 2350)
+;
+; This work is licensed under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+; License". https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+.program msx_read_responder
+
+.wrap_target
+wait_sltsl:
+    wait 0 gpio 27
+    jmp pin wait_sltsl
+    set pindirs, 1
+    in pins, 16
+    push block
+    pull block
+    out pins, 8
+    out pindirs, 8
+    set pindirs, 0 [1]
+    wait 1 gpio 24
+    set x, 0
+    mov osr, x
+    out pindirs, 8
+.wrap
+
+.program msx_write_captor
+
+.wrap_target
+wait_sltsl:
+    wait 0 gpio 27
+    jmp pin wait_sltsl
+    nop              [2]
+    mov isr, pins
+    push block
+    wait 1 gpio 25
+.wrap

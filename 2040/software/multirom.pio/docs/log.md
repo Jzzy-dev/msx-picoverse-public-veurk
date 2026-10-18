@@ -1,5 +1,11 @@
 # Change Log
 
+## PicoVerse 2040 Multirom v2.68
+
+- Version bumped to v2.68 (top-level and tool Makefiles, and the `picoverse2040.tcl` script version).
+- The MSX menu can now be driven with a joystick on either MSX joystick port. The commented-out Fusion-C `JoystickRead`/`TriggerRead` code in `msx/src/menu.c` was replaced by `poll_joystick()`, which uses the BIOS `GTSTCK`/`GTTRIG` routines through new `bios_gtstck()`/`bios_gttrig()` wrappers. Directions map to the cursor keys with a first-press delay (`JOY_FIRST_DELAY`) and auto-repeat (`JOY_REPEAT_DELAY`) so the stick is no longer too fast; fire buttons A/B on both ports act as Enter, once per press (a button held at boot is ignored until released). The help screen mentions the joystick.
+- Docs: 2040 MultiROM tool manual and `msx-picoverse-2040-menu.md`.
+
 ## PicoVerse 2040 Multirom v2.67
 
 - Version bumped to v2.67 (top-level and tool Makefiles, and the `picoverse2040.tcl` script version). Rebuilt the MSX menu (header shows `[MultiROM v2.67]`) and `tool/dist/multirom.exe`; the firmware binary is unchanged.
