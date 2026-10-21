@@ -1,0 +1,7 @@
+host_seplay
+z80_seplay
+buffers.o
+test.img
+out.wav
+ref_out.wav
+hostinc/

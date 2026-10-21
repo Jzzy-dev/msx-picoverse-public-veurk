@@ -124,7 +124,7 @@ void sunrise_sd_set_ide_ctx(sunrise_ide_t *ide)
     sd_ide_ctx = ide;
 }
 
-void __not_in_flash_func(sunrise_sd_task)(void)
+bool sunrise_sd_init(void)
 {
     // Initialise SD card via SPI
     DSTATUS stat = disk_initialize(SD_PDRV);
@@ -159,127 +159,138 @@ void __not_in_flash_func(sunrise_sd_task)(void)
         }
     }
 
-    while (true)
+    return sd_device_mounted;
+}
+
+void __not_in_flash_func(sunrise_sd_poll)(void)
+{
+    if (sd_ide_ctx == NULL)
+        return;
+
+    // --- Handle read request from Core 0 ---
+    if (usb_read_requested && sd_device_mounted)
     {
-        service_scc_audio();
+        usb_read_requested = false;
 
-        if (sd_ide_ctx == NULL)
-            continue;
+        uint32_t lba = usb_read_lba;
 
-        // --- Handle read request from Core 0 ---
-        if (usb_read_requested && sd_device_mounted)
+        if (lba >= sd_block_count)
         {
-            usb_read_requested = false;
-
-            uint32_t lba = usb_read_lba;
-
-            if (lba >= sd_block_count)
+            sd_ide_ctx->usb_read_failed = true;
+        }
+        else
+        {
+            DRESULT res = disk_read(SD_PDRV, sd_ide_ctx->sector_buffer, lba, 1);
+            if (res == RES_OK)
+            {
+                __dmb();
+                sd_ide_ctx->buffer_index = 0;
+                sd_ide_ctx->buffer_length = 512;
+                sd_ide_ctx->data_latch_valid = false;
+                sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+                sd_ide_ctx->state = IDE_STATE_READ_DATA;
+            }
+            else
             {
                 sd_ide_ctx->usb_read_failed = true;
             }
-            else
-            {
-                DRESULT res = disk_read(SD_PDRV, sd_ide_ctx->sector_buffer, lba, 1);
-                if (res == RES_OK)
-                {
-                    __dmb();
-                    sd_ide_ctx->buffer_index = 0;
-                    sd_ide_ctx->buffer_length = 512;
-                    sd_ide_ctx->data_latch_valid = false;
-                    sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
-                    sd_ide_ctx->state = IDE_STATE_READ_DATA;
-                }
-                else
-                {
-                    sd_ide_ctx->usb_read_failed = true;
-                }
-            }
         }
+    }
 
-        // --- Handle write request from Core 0 ---
-        if (usb_write_requested && sd_device_mounted)
+    // --- Handle write request from Core 0 ---
+    if (usb_write_requested && sd_device_mounted)
+    {
+        usb_write_requested = false;
+
+        uint32_t lba = usb_write_lba;
+
+        if (lba >= sd_block_count)
         {
-            usb_write_requested = false;
-
-            uint32_t lba = usb_write_lba;
-
-            if (lba >= sd_block_count)
+            sd_ide_ctx->usb_write_failed = true;
+        }
+        else
+        {
+            DRESULT res = disk_write(SD_PDRV, usb_write_buffer, lba, 1);
+            if (res == RES_OK)
+            {
+                sd_ide_ctx->usb_write_ready = true;
+            }
+            else
             {
                 sd_ide_ctx->usb_write_failed = true;
             }
-            else
-            {
-                DRESULT res = disk_write(SD_PDRV, usb_write_buffer, lba, 1);
-                if (res == RES_OK)
-                {
-                    sd_ide_ctx->usb_write_ready = true;
-                }
-                else
-                {
-                    sd_ide_ctx->usb_write_failed = true;
-                }
-            }
+        }
+    }
+
+    // --- Propagate completion status to IDE state machine ---
+    if (sd_ide_ctx->usb_read_failed)
+    {
+        sd_ide_ctx->usb_read_failed = false;
+        sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_ERR;
+        sd_ide_ctx->error = ATA_ERROR_ABRT;
+        sd_ide_ctx->state = IDE_STATE_IDLE;
+    }
+
+    if (sd_ide_ctx->usb_write_ready)
+    {
+        sd_ide_ctx->usb_write_ready = false;
+        // ide_advance_lba is static in sunrise_ide.c — replicate here
+        {
+            uint32_t cur = (uint32_t)sd_ide_ctx->sector
+                         | ((uint32_t)sd_ide_ctx->cylinder_low << 8)
+                         | ((uint32_t)sd_ide_ctx->cylinder_high << 16)
+                         | ((uint32_t)(sd_ide_ctx->device_head & 0x0F) << 24);
+            cur++;
+            sd_ide_ctx->sector = (uint8_t)(cur & 0xFF);
+            sd_ide_ctx->cylinder_low = (uint8_t)((cur >> 8) & 0xFF);
+            sd_ide_ctx->cylinder_high = (uint8_t)((cur >> 16) & 0xFF);
+            sd_ide_ctx->device_head = (sd_ide_ctx->device_head & 0xF0) | (uint8_t)((cur >> 24) & 0x0F);
         }
 
-        // --- Propagate completion status to IDE state machine ---
-        if (sd_ide_ctx->usb_read_failed)
+        if (sd_ide_ctx->sectors_remaining > 0)
         {
-            sd_ide_ctx->usb_read_failed = false;
-            sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_ERR;
-            sd_ide_ctx->error = ATA_ERROR_ABRT;
-            sd_ide_ctx->state = IDE_STATE_IDLE;
-        }
-
-        if (sd_ide_ctx->usb_write_ready)
-        {
-            sd_ide_ctx->usb_write_ready = false;
-            // ide_advance_lba is static in sunrise_ide.c — replicate here
-            {
-                uint32_t cur = (uint32_t)sd_ide_ctx->sector
-                             | ((uint32_t)sd_ide_ctx->cylinder_low << 8)
-                             | ((uint32_t)sd_ide_ctx->cylinder_high << 16)
-                             | ((uint32_t)(sd_ide_ctx->device_head & 0x0F) << 24);
-                cur++;
-                sd_ide_ctx->sector = (uint8_t)(cur & 0xFF);
-                sd_ide_ctx->cylinder_low = (uint8_t)((cur >> 8) & 0xFF);
-                sd_ide_ctx->cylinder_high = (uint8_t)((cur >> 16) & 0xFF);
-                sd_ide_ctx->device_head = (sd_ide_ctx->device_head & 0xF0) | (uint8_t)((cur >> 24) & 0x0F);
-            }
-
-            if (sd_ide_ctx->sectors_remaining > 0)
-            {
-                sd_ide_ctx->buffer_index = 0;
-                sd_ide_ctx->data_latch_valid = false;
-                sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
-                sd_ide_ctx->state = IDE_STATE_WRITE_DATA;
-            }
-            else
-            {
-                sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-                sd_ide_ctx->state = IDE_STATE_IDLE;
-            }
-        }
-
-        if (sd_ide_ctx->usb_write_failed)
-        {
-            sd_ide_ctx->usb_write_failed = false;
-            sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_ERR;
-            sd_ide_ctx->error = ATA_ERROR_ABRT;
-            sd_ide_ctx->state = IDE_STATE_IDLE;
-        }
-
-        // --- Complete a pending IDENTIFY after SD mount ---
-        if (sd_ide_ctx->usb_identify_pending && sd_device_mounted)
-        {
-            sd_ide_ctx->usb_identify_pending = false;
-            build_identify_data_sd(sd_ide_ctx->sector_buffer);
-            __dmb();
             sd_ide_ctx->buffer_index = 0;
-            sd_ide_ctx->buffer_length = 512;
             sd_ide_ctx->data_latch_valid = false;
             sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
-            sd_ide_ctx->error = 0;
-            sd_ide_ctx->state = IDE_STATE_READ_DATA;
+            sd_ide_ctx->state = IDE_STATE_WRITE_DATA;
         }
+        else
+        {
+            sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
+            sd_ide_ctx->state = IDE_STATE_IDLE;
+        }
+    }
+
+    if (sd_ide_ctx->usb_write_failed)
+    {
+        sd_ide_ctx->usb_write_failed = false;
+        sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_ERR;
+        sd_ide_ctx->error = ATA_ERROR_ABRT;
+        sd_ide_ctx->state = IDE_STATE_IDLE;
+    }
+
+    // --- Complete a pending IDENTIFY after SD mount ---
+    if (sd_ide_ctx->usb_identify_pending && sd_device_mounted)
+    {
+        sd_ide_ctx->usb_identify_pending = false;
+        build_identify_data_sd(sd_ide_ctx->sector_buffer);
+        __dmb();
+        sd_ide_ctx->buffer_index = 0;
+        sd_ide_ctx->buffer_length = 512;
+        sd_ide_ctx->data_latch_valid = false;
+        sd_ide_ctx->status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+        sd_ide_ctx->error = 0;
+        sd_ide_ctx->state = IDE_STATE_READ_DATA;
+    }
+}
+
+void __not_in_flash_func(sunrise_sd_task)(void)
+{
+    sunrise_sd_init();
+
+    while (true)
+    {
+        service_scc_audio();
+        sunrise_sd_poll();
     }
 }

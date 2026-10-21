@@ -45,6 +45,10 @@ pico_sdk_init()
 # SD card library (no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
 add_subdirectory(lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src build_sd_lib)
 
+# Helix fixed-point MP3 decoder (https://github.com/ikjordan/picomp3lib), used by
+# the SE-ONE emulation. Its decoder state is allocated from the SE-ONE arena.
+add_subdirectory(lib/picomp3lib/src picomp3lib_build)
+
 # add_compile_options(-O3)
 
 # Add executable. Default name is the project name, version 0.1
@@ -59,6 +63,10 @@ add_executable(loadrom
     storage/sunrise_sd.c
     storage/flash_sd.c
     storage/hw_config.c
+    seone/seone_bus.c
+    seone/seone_cmd.c
+    seone/seone_audio.c
+    seone/seone_hal_pico.c
     )
 
 pico_generate_pio_header(loadrom ${CMAKE_CURRENT_LIST_DIR}/msx_bus.pio)
@@ -82,7 +90,12 @@ target_link_libraries(loadrom
     hardware_uart
     tinyusb_board
     tinyusb_host
-    no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
+    no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
+    picomp3lib)
+
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/lib/picomp3lib/src/buffers.c PROPERTIES
+    COMPILE_DEFINITIONS "MPDEC_ALLOCATOR=seone_mp3_alloc"
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/seone/seone_mp3_alloc.h")
 
 target_compile_definitions(loadrom PRIVATE
     PICO_AUDIO_I2S_PIO=0

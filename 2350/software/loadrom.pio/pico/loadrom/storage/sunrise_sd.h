@@ -14,6 +14,7 @@
 #ifndef SUNRISE_SD_H
 #define SUNRISE_SD_H
 
+#include <stdbool.h>
 #include "sunrise_ide.h"
 
 // Set the pointer to the shared IDE context (call before launching core 1).
@@ -22,5 +23,10 @@ void sunrise_sd_set_ide_ctx(sunrise_ide_t *ide);
 // SD card task loop — runs on Core 1.
 // Initialises the microSD card via SPI and services IDE read/write requests.
 void __not_in_flash_func(sunrise_sd_task)(void);
+
+// Split form of sunrise_sd_task() for callers that share core 1 with other
+// work: call sunrise_sd_init() once, then sunrise_sd_poll() repeatedly.
+bool sunrise_sd_init(void);
+void __not_in_flash_func(sunrise_sd_poll)(void);
 
 #endif // SUNRISE_SD_H

@@ -39,6 +39,7 @@
 #include "storage/sunrise_sd.h"
 #include "storage/flash_sd.h"
 #include "memory/c2_emu.h"
+#include "seone/seone.h"
 
 // -----------------------------------------------------------------------
 // PIO bus context
@@ -140,7 +141,7 @@ static inline audio_mode_t resolve_audio_mode(uint8_t rom_type, uint8_t base_rom
 
 static inline bool is_system_rom_type(uint8_t base_rom_type)
 {
-    return base_rom_type >= 10u && base_rom_type <= 20u &&
+    return base_rom_type >= 10u && base_rom_type <= 21u &&
            base_rom_type != 12u && base_rom_type != 13u && base_rom_type != 14u;
 }
 
@@ -2373,6 +2374,244 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                     data = mapper_read_byte(mapper_offset);
                 }
                 // Sub-slots 2 and 3: unused, return 0xFF (not in window)
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Case 21: Sunrise IDE (microSD) + 1MB mapper + TMTLogic SE-ONE emulation
+// -----------------------------------------------------------------------
+// Same expanded-slot layout as case 16 (Nextor on sub-slot 0, 1MB PSRAM
+// mapper on sub-slot 1) plus the SE-ONE MP3 cartridge on I/O ports
+// 0x20-0x27 (see seone/seone_bus.c), so SymbOS + "SE Play" can browse and
+// play MP3/WAV files and M3U playlists from the same microSD card through
+// the I2S DAC.
+//
+// Core 1 alternates between Nextor's raw sector requests and the SE-ONE
+// command / MP3 decoding work. The upper part of the 256KB SRAM ROM cache
+// (above the 128KB Nextor kernel) is handed to the SE-ONE as its arena.
+//
+// I/O reads are not stretched with /WAIT, so they are serviced between every
+// memory-write event: a PSRAM access that stalls on the shared QMI bus while
+// core 1 fetches code from flash must never delay an I/O reply.
+static void __no_inline_not_in_flash_func(core1_seone_task)(void)
+{
+    sunrise_sd_init();
+    seone_core1_init();
+    while (true)
+    {
+        sunrise_sd_poll();
+        seone_core1_poll();
+    }
+}
+
+static inline void __not_in_flash_func(seone_drain_io_writes)(uint8_t *mapper_reg)
+{
+    uint16_t io_addr;
+    uint8_t io_data;
+    while (pio_try_get_io_write(&io_addr, &io_data))
+    {
+        uint8_t port = io_addr & 0xFFu;
+        if (port >= 0xFCu)
+            mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+        else if (seone_port_claimed(port))
+            seone_io_write(port, io_data);
+    }
+}
+
+static inline void __not_in_flash_func(seone_service_io_reads)(uint8_t *mapper_reg)
+{
+    while (!pio_sm_is_rx_fifo_empty(msx_io_bus.pio_read, msx_io_bus.sm_io_read))
+    {
+        uint8_t port = (uint8_t)(pio_sm_get(msx_io_bus.pio_read, msx_io_bus.sm_io_read) & 0xFFu);
+        bool drive = false;
+        uint8_t data = 0xFFu;
+
+        if (port >= 0xFCu)
+        {
+            drive = true;
+            data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+        }
+        else if (seone_port_claimed(port))
+        {
+            // An OUT that immediately precedes this IN may still sit in the
+            // write FIFO; apply it first so replies follow program order.
+            seone_drain_io_writes(mapper_reg);
+            drive = seone_io_read(port, &data);
+        }
+
+        pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(drive, data));
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t offset, bool cache_enable)
+{
+    // Phase 1 — Bootstrap: minimal ROM that restarts the MSX (see case 11)
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,            // 'AB' ROM header
+        0x0A, 0x40,            // INIT = 0x400A
+        0x00, 0x00,            // STATEMENT = none
+        0x00, 0x00,            // DEVICE = none
+        0x00, 0x00,            // TEXT = none
+        0xF3,                  // DI
+        0xDB, 0xF4,            // IN A, (0xF4)
+        0xF6, 0x80,            // OR 0x80
+        0xD3, 0xF4,            // OUT (0xF4), A
+        0xC7                   // RST 0x00
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        { uint16_t waddr; uint8_t wdata; while (pio_try_get_write(&waddr, &wdata)) { } }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+                restart_detected = true;
+        }
+    }
+
+    // Phase 2 — Initialise expanded-slot mapper with the MSX frozen
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+
+    // SE-ONE arena: the part of the SRAM ROM cache the Nextor kernel leaves free
+    uint32_t arena_start = (rom_cached_size + 7u) & ~7u;
+    if (arena_start > CACHE_SIZE - SEONE_ARENA_MIN_SIZE)
+    {
+        while (true) { tight_loop_contents(); }
+    }
+    seone_init(&rom_sram[arena_start], CACHE_SIZE - arena_start);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+    sunrise_sd_set_ide_ctx(&ide);
+    multicore_launch_core1_with_stack(core1_seone_task, seone_core1_stack(), SEONE_CORE1_STACK_SIZE);
+
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    mapper_fill_ff();
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        seone_service_io_reads(mapper_reg);
+
+        // Memory writes: sub-slot register, Sunrise IDE, mapper RAM
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                if (waddr == 0xFFFFu)
+                    subslot_reg = wdata;
+                else
+                {
+                    uint8_t page = (waddr >> 14) & 0x03u;
+                    uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                    if (active_subslot == 0)
+                    {
+                        if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                            sunrise_ide_handle_write(&ide, waddr, wdata);
+                    }
+                    else if (active_subslot == 1)
+                    {
+                        uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                        uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                        mapper_write_byte(mapper_offset, wdata);
+                    }
+                }
+                seone_service_io_reads(mapper_reg);
+            }
+        }
+
+        seone_drain_io_writes(mapper_reg);
+        seone_service_io_reads(mapper_reg);
+
+        // Memory reads
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = ~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
             }
 
             pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
@@ -4729,7 +4968,8 @@ int __no_inline_not_in_flash_func(main)()
 
         if ((base_rom_type == 11u || base_rom_type == 16u
             || base_rom_type == 17u || base_rom_type == 18u
-            || base_rom_type == 19u || base_rom_type == 20u) && !psram_init())
+            || base_rom_type == 19u || base_rom_type == 20u
+            || base_rom_type == 21u) && !psram_init())
     {
         while (true)
         {
@@ -4864,6 +5104,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 20:
             loadrom_sunrise_megaram_usb(ROM_RECORD_SIZE, true);
+            break;
+        case 21:
+            loadrom_sunrise_mapper_seone_sd(ROM_RECORD_SIZE, true);
             break;
         default:
             break;

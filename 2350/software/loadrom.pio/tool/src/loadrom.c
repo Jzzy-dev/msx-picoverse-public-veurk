@@ -63,7 +63,7 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
     "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC-16X", "PLN-64", "MANBW2",
-    "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM"
+    "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM"
 };
 
 static const char *rom_types[] = {
@@ -87,7 +87,8 @@ static const char *rom_types[] = {
     "Carnivore2 SD",
     "Carnivore2 USB",
     "MegaRAM SD",
-    "MegaRAM USB"
+    "MegaRAM USB",
+    "Sunrise SD+Mapper+SE-ONE"
 };
 
 #define ROM_TYPE_SUNRISE 10
@@ -101,6 +102,7 @@ static const char *rom_types[] = {
 #define ROM_TYPE_C2_USB 18
 #define ROM_TYPE_MEGARAM_SD 19
 #define ROM_TYPE_MEGARAM_USB 20
+#define ROM_TYPE_SEONE_SD 21
 
 #define NEXTOR3_SUNRISE_LABEL "Nextor Sunrise 3.0.0 Beta 2"
 #define NEXTOR3_ROM           ___resources_Nextor_3_0_0_beta2_SunriseIDE_MasterOnly_ROM
@@ -446,7 +448,7 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s1] [-m1] [-r1] [-s2] [-m2] [-r2] [-c1] [-c2] [-s3] [-4] [-a] [--4mhz] [-w] [-d] [-f] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-r1] [-s2] [-m2] [-r2] [-c1] [-c2] [-e1] [-s3] [-4] [-a] [--4mhz] [-w] [-d] [-f] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help         Show this help message\n");
@@ -458,6 +460,8 @@ static void print_usage(const char *prog_name) {
     printf("  -r2, --megaram-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + 1MB MegaRAM (USB pendrive)\n");
     printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (microSD card)\n");
     printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (USB pendrive)\n");
+    printf("  -e1, --seone-sd    Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + TMTLogic SE-ONE MP3 cartridge emulation\n");
+    printf("                     on I/O ports 0x20-0x27 (microSD card, I2S DAC) for SymbOS SE Play and other SE-ONE software\n");
     printf("  -s3, --sunrise3-sd Build UF2 with " NEXTOR3_SUNRISE_LABEL " Sunrise IDE ROM (microSD card) for testing\n");
     printf("  -4, --opl4         Build UF2 with the standalone OPL4 / YMF278B / MoonSound cartridge firmware (2MB YRW801-M ROM + 2MB PCM sample RAM)\n");
     printf("      --22khz        (with -4) Build an OPL4 image that renders at 22050 Hz instead of 44100 Hz: halves the CPU cost so\n");
@@ -476,7 +480,8 @@ static void print_usage(const char *prog_name) {
     for (i = 0; i < MAPPER_DESCRIPTION_COUNT; ++i) {
         uint8_t mapper_id = (uint8_t)(i + 1u);
         if (mapper_id == 10u || mapper_id == 11u || mapper_id == 15u || mapper_id == 16u
-            || mapper_id == 17u || mapper_id == 18u || mapper_id == 19u || mapper_id == 20u) {
+            || mapper_id == 17u || mapper_id == 18u || mapper_id == 19u || mapper_id == 20u
+            || mapper_id == 21u) {
             continue;
         }
 
@@ -653,6 +658,7 @@ int main(int argc, char *argv[])
     bool use_megaram_sd = false;
     bool use_megaram_usb = false;
     bool use_sunrise3_sd = false;
+    bool use_seone_sd = false;
     bool use_opl4 = false;
     bool opl4_22khz = false;
     bool use_msx_audio = false;
@@ -683,6 +689,8 @@ int main(int argc, char *argv[])
             use_c2_sd = true;
         } else if ((strcmp(argv[i], "-c2") == 0) || (strcmp(argv[i], "--carnivore2-usb") == 0)) {
             use_c2_usb = true;
+        } else if ((strcmp(argv[i], "-e1") == 0) || (strcmp(argv[i], "--seone-sd") == 0)) {
+            use_seone_sd = true;
         } else if ((strcmp(argv[i], "-s3") == 0) || (strcmp(argv[i], "--sunrise3-sd") == 0)) {
             use_sunrise3_sd = true;
         } else if ((strcmp(argv[i], "-4") == 0) || (strcmp(argv[i], "--opl4") == 0)) {
@@ -725,15 +733,16 @@ int main(int argc, char *argv[])
                          + (use_sunrise_usb ? 1 : 0) + (use_mapper_usb ? 1 : 0)
                          + (use_c2_sd ? 1 : 0) + (use_c2_usb ? 1 : 0)
                          + (use_megaram_sd ? 1 : 0) + (use_megaram_usb ? 1 : 0)
-                         + (use_sunrise3_sd ? 1 : 0);
+                         + (use_sunrise3_sd ? 1 : 0) + (use_seone_sd ? 1 : 0);
         if (nextor_count > 1) {
-            printf("Options -s1, -m1, -r1, -s2, -m2, -r2, -c1, -c2 and -s3 are mutually exclusive.\n");
+            printf("Options -s1, -m1, -r1, -s2, -m2, -r2, -c1, -c2, -e1 and -s3 are mutually exclusive.\n");
             return 1;
         }
     }
 
     bool use_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb
-                   || use_c2_sd || use_c2_usb || use_megaram_sd || use_megaram_usb || use_sunrise3_sd;
+                   || use_c2_sd || use_c2_usb || use_megaram_sd || use_megaram_usb || use_sunrise3_sd
+                   || use_seone_sd;
 
     if (opl4_22khz && !use_opl4) {
         printf("Option --22khz requires -4/--opl4.\n");
@@ -1011,6 +1020,9 @@ int main(int argc, char *argv[])
         } else if (use_megaram_usb) {
             rom_type = ROM_TYPE_MEGARAM_USB;
             sunrise_name = "Nextor Sunrise+Mapper+MegaRAM (USB)";
+        } else if (use_seone_sd) {
+            rom_type = ROM_TYPE_SEONE_SD;
+            sunrise_name = "Nextor Sunrise+Mapper+SE-ONE (SD)";
         } else {
             rom_type = ROM_TYPE_SUNRISE;
             sunrise_name = "Nextor Sunrise IDE (USB)";
@@ -1106,7 +1118,7 @@ int main(int argc, char *argv[])
 
             bool flashrom_from_tag = false;
             uint8_t candidate = mapper_number_from_description(mapper_token, &flashrom_from_tag);
-            if (candidate == 10 || candidate == 11 || candidate == 15 || candidate == 16 || candidate == 17 || candidate == 18) {
+            if (candidate == 10 || candidate == 11 || (candidate >= 15 && candidate <= 21)) {
                 printf("Ignoring SYSTEM mapper tag in %s (cannot be forced)\n", base_name);
             } else if (candidate != 0) {
                 mapper_forced_by_tag = true;
