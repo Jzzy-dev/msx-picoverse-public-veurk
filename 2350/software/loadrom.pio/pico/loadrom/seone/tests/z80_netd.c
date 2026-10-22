@@ -9,7 +9,7 @@
 //   * the PicoVerse SE-ONE emulation on ports 20h-27h (MP3 decoding).
 // It checks that SE Play never touches the TNC ports 40h-49h.
 //
-// usage: z80_netd SEPLAYN.EXE test.img stream.mp3   (test.img is written by host_seplay)
+// usage: z80_netd SEPLAY_NETD.EXE test.img stream.mp3
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,6 +275,18 @@ int main(int argc, char **argv)
     seone_core1_init();
 
     load(argv[1]);
+    printf("[start-up: program path written by the SymbOS loader after the code]\n");
+    {   // SE Play builds its data file names from this path (5FEBh)
+        uint16_t end = (uint16_t)(0x100 + w16(0x100));
+        uint8_t save[64]; memcpy(save, &mem[end], sizeof save);
+        const char *path = "C:\\APPS\\SEPLAY\\SEPLAYN.EXE";
+        memcpy(&mem[end], path, strlen(path) + 1);
+        bool ok = call(0x5FEB, 100000);
+        char dir[64]; uint16_t hl = (uint16_t)(cpu.h << 8 | cpu.l);
+        snprintf(dir, sizeof dir, "%s", (char *)&mem[hl]);
+        memcpy(&mem[end], save, sizeof save);
+        EXPECT(ok && !strcmp(dir, "C:\\APPS\\SEPLAY\\"), "application folder '%s'", dir);
+    }
     printf("[start-up: platform init + network card probe]\n");
     EXPECT(call(0x4C1E, 2000000), "platform init");
     s16(D(0x7599), 0);

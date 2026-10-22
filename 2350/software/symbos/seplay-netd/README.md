@@ -40,7 +40,7 @@ The findings below come from disassembling SEPLAY.EXE, which is compiled Quigs. 
 
 ## What the patch changes
 
-The patcher appends a 1818-byte block (`netd_seplay.asm`) to the code segment. It then relinks the executable using its SymbOS relocation table:
+The patcher appends a 1804-byte block (`netd_seplay.asm`) to the code segment. It then relinks the executable using its SymbOS relocation table:
 
 - every relocated pointer into the data and transfer segments moves by the block size, as do the header's code length, relocation count and 16-colour icon offset;
 - the block's own 109 relocation entries are found by assembling it twice at addresses 1000h apart.
@@ -56,11 +56,14 @@ The patcher appends a 1818-byte block (`netd_seplay.asm`) to the code segment. I
 | `1D08h` | drain TNC data | `RET` |
 | `4E7Dh` | debug text to port `40h` | `RET` |
 | `2A45h` | phone page | shows `PHONE: NO TNC` |
+| `5FEBh` | `ld hl,73E1h`: program path at the old code end | the new code end |
 
 Daemon requests are SymbOS messages:
 
 - **Request:** sent with `RST #10`. The function is in byte 0; registers AF, BC, DE, HL, IX and IY are at offsets 2-13.
 - **Answer:** fetched with `RST #18`, filtered on the daemon's process ID. Desktop messages stay queued for SE Play's main loop.
+- **Program path:** the SymbOS loader writes the program's path just past the end of the code segment. SE Play reads it from there to find `SE_*.QS2` and its other files, so the reference at `5FEBh` must follow the code's new end. Without that, start-up stops at an empty display.
+- **Daemon lookup:** SE Play asks the system manager with `SySystem_PRGSRV` and sleeps (`RST #08`) until it answers, the same way SE Play's own service lookups work.
 - **Waiting:** between polls the code gives up its time slice with `RST #30`. Unsolicited `MSR_NET_TCPEVT` messages are skipped.
 - **Timeouts:** every wait has one. If the daemon is missing, the station can't be opened and SE Play shows `URL ERROR...`. If the daemon starts later, the next station click finds it.
 
@@ -77,6 +80,7 @@ The FM, MP3, M3U and synthesizer pages are unchanged. With the hardware ID empty
 
 It checks:
 
+- the program folder SE Play derives from the path the loader writes,
 - start-up,
 - the MP3 page,
 - WRC parsing,

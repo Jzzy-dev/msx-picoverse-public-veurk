@@ -53,6 +53,10 @@ PATCHES = [
                                 ('b', 0xC3), ('w', 0x1D94)]),
     (0x4E7D, '2a7d75',   [('b', 0xC9)]),                         # DBGPRINT to port 40h
     (0x2A45, 'cd2213',   [('b', 0xC3), ('w', 'phone_na')]),     # phone page
+    # The SymbOS loader writes the program's path just past the end of the
+    # code segment. SE Play reads it from there (ld hl,code_end-1 / inc hl)
+    # to build its data file names, so this reference must follow the new end.
+    (0x5FEB, '21e173',   [('b', 0x21), ('w', 'CODE_END_M1')]),
 ]
 
 
@@ -153,7 +157,8 @@ def main():
         sys.exit('block was built for a different code size')
     n = b['size']
     blk = bytes.fromhex(b['code'])
-    syms = b['syms']
+    syms = dict(b['syms'])
+    syms['CODE_END_M1'] = code_end + n - 1
     blk_rel = [code_end + r for r in b['reloc']]
 
     # rebuild image: code + block + data + transfer

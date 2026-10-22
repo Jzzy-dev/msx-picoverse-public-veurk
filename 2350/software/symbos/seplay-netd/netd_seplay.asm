@@ -35,8 +35,8 @@ MSR_SYS_PRGSRV  equ 158
 PRC_ID_SYSTEM   equ 3
 
 RXBUF_SIZE      equ 1024
-REPLY_TIMEOUT   equ 1500                ; idle slices waiting for one daemon reply
-OPEN_TIMEOUT    equ 1500                ; idle slices waiting for "established"
+REPLY_TIMEOUT   equ 6000                ; idle slices waiting for one daemon reply
+OPEN_TIMEOUT    equ 6000                ; idle slices waiting for "established"
 
 SEONE_STREAM    equ #FF22               ; SE-ONE MP3 stream port (CPC: &FF22)
 
@@ -69,25 +69,14 @@ net_lookup
         ld ixl,a
         ld ixh,PRC_ID_SYSTEM
         rst #10
-        ld bc,REPLY_TIMEOUT
-nlk_wait
-        push bc
-        ld a,(PID)
-        ld ixl,a
+nlk_wait                                ; the system manager always answers:
+        ld a,(PID)                      ; sleep until its message arrives
+        ld ixl,a                        ; (same as SE Play's own PRGSRV calls)
         ld ixh,PRC_ID_SYSTEM
         ld iy,MSGBUF
-        rst #18
-        pop bc
+        rst #08
         dec ixl
-        jr z,nlk_got
-        push bc
-        rst #30
-        pop bc
-        dec bc
-        ld a,b
-        or c
         jr nz,nlk_wait
-        ret                             ; no answer: no daemon
 nlk_got ld a,(MSGBUF+0)
         cp MSR_SYS_PRGSRV
         jr nz,nlk_wait                  ; some other system message: ignore
