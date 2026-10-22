@@ -468,7 +468,7 @@ static void print_usage(const char *prog_name) {
     printf("                     very dense songs play without dropouts, at the cost of a duller high end\n");
     printf("  -a, --msx-audio    Build UF2 with the standalone MSX-AUDIO / Y8950 cartridge firmware (MSX-Audio BIOS + 256KB ADPCM sample RAM)\n");
     printf("      --4mhz         (with -a) Clock the emulated Y8950 at 4 MHz instead of the standard 3.579545 MHz\n");
-    printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2/-s3 only)\n");
+    printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2/-e1/-s3 only)\n");
     printf("  -d, --dual-psg     Enable secondary PSG emulation on I/O ports 0x10/0x11\n");
     printf("  -f, -fmpac         Enable MSX-MUSIC/YM2413 emulation on I/O ports 0x7C/0x7D\n");
     printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC mapper only)\n");
@@ -956,8 +956,8 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    if (use_wifi && !(use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb || use_sunrise3_sd)) {
-        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2, -m2 or -s3.\n");
+    if (use_wifi && !(use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb || use_sunrise3_sd || use_seone_sd)) {
+        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2, -m2, -e1 or -s3.\n");
         return 1;
     }
 

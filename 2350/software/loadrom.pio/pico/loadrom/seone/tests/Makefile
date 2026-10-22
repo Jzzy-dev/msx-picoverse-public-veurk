@@ -28,7 +28,7 @@ run: host_seplay
 	./host_seplay $(USB_FILES)
 
 clean:
-	rm -rf host_seplay z80_seplay buffers.o test.img out.wav hostinc
+	rm -rf host_seplay z80_seplay z80_netd buffers.o test.img out.wav hostinc
 
 # Optional: execute SE Play's own Z80 code against the emulation.
 #   make Z80DIR=<superzazu/z80 checkout> SEPLAY=<path to SEPLAY.EXE> z80
@@ -41,3 +41,16 @@ z80_seplay: z80_seplay.c host_platform.c buffers.o $(SEONE) hostinc/ffconf.h
 z80: host_seplay z80_seplay
 	./host_seplay $(USB_FILES)
 	./z80_seplay $(SEPLAY) test.img
+
+# Optional: SE Play patched for the SymbOS Network Daemon (2350/software/symbos/seplay-netd)
+# run against a simulated SymbOS kernel + network daemon serving STREAM as web radio.
+#   make Z80DIR=<superzazu/z80> SEPLAY_NETD=<SEPLAYN.EXE> STREAM=<file.mp3> netd
+SEPLAY_NETD ?= SEPLAYN.EXE
+STREAM      ?= $(USB_FILES)/AUDIO/test.mp3
+z80_netd: z80_netd.c host_platform.c buffers.o $(SEONE) hostinc/ffconf.h
+	$(CC) $(CFLAGS) -I$(Z80DIR) -o $@ z80_netd.c $(Z80DIR)/z80.c host_platform.c buffers.o $(SEONE) \
+	    $(FATSRC) $(MP3SRC) -w -lm
+
+netd: host_seplay z80_netd
+	./host_seplay $(USB_FILES)
+	./z80_netd $(SEPLAY_NETD) test.img $(STREAM)

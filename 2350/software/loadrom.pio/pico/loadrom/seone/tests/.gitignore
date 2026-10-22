@@ -5,3 +5,4 @@ test.img
 out.wav
 ref_out.wav
 hostinc/
+z80_netd

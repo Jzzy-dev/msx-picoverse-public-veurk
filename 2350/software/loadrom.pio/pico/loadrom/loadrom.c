@@ -2447,7 +2447,7 @@ static inline void __not_in_flash_func(seone_service_io_reads)(uint8_t *mapper_r
     }
 }
 
-void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t offset, bool cache_enable)
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t offset, bool cache_enable, bool wifi_enable)
 {
     // Phase 1 — Bootstrap: minimal ROM that restarts the MSX (see case 11)
     static const uint8_t bootstrap_rom[] = {
@@ -2510,6 +2510,14 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
     const uint8_t *rom_base;
     uint32_t available_length;
     prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+    const uint8_t *wifi_rom_base = rom + offset + available_length;
+
+    // Expanded-slot layout. Without WiFi: 0 = Nextor, 1 = mapper.
+    // With WiFi (-w), as in the other Sunrise WiFi modes: 0 = ESP8266P BIOS
+    // + memio UART at 0x7F05-0x7F07, 1 = Nextor, 2 = mapper.
+    const uint8_t ss_wifi   = wifi_enable ? 0u : 0xFFu;
+    const uint8_t ss_nextor = wifi_enable ? 1u : 0u;
+    const uint8_t ss_mapper = wifi_enable ? 2u : 1u;
 
     // SE-ONE arena: the part of the SRAM ROM cache the Nextor kernel leaves free
     uint32_t arena_start = (rom_cached_size + 7u) & ~7u;
@@ -2523,6 +2531,8 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
     sunrise_ide_init(&ide);
     sunrise_sd_set_ide_ctx(&ide);
     multicore_launch_core1_with_stack(core1_seone_task, seone_core1_stack(), SEONE_CORE1_STACK_SIZE);
+    if (wifi_enable)
+        wifi_uart_init_once();
 
     psram_mem_init();
     if (!psram_alloc(MAPPER_SIZE, &mapper_region))
@@ -2531,7 +2541,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
     }
 
     uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
-    uint8_t subslot_reg = 0x10;
+    uint8_t subslot_reg = (uint8_t)(ss_mapper << 4);   // page 2 -> mapper for MAP_INIT
 
     mapper_fill_ff();
 
@@ -2540,6 +2550,8 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
 
     while (true)
     {
+        if (wifi_enable)
+            wifi_service_rx();
         seone_service_io_reads(mapper_reg);
 
         // Memory writes: sub-slot register, Sunrise IDE, mapper RAM
@@ -2553,12 +2565,16 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
                 {
                     uint8_t page = (waddr >> 14) & 0x03u;
                     uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
-                    if (active_subslot == 0)
+                    if (active_subslot == ss_nextor)
                     {
                         if (waddr >= 0x4000u && waddr <= 0x7FFFu)
                             sunrise_ide_handle_write(&ide, waddr, wdata);
                     }
-                    else if (active_subslot == 1)
+                    else if (active_subslot == ss_wifi)
+                    {
+                        (void)wifi_handle_mem_write(waddr, wdata);
+                    }
+                    else if (active_subslot == ss_mapper)
                     {
                         uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                         uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
@@ -2588,7 +2604,13 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
             {
                 uint8_t page = (addr >> 14) & 0x03u;
                 uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
-                if (active_subslot == 0)
+                if (active_subslot == ss_wifi)
+                {
+                    in_window = true;
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                        data = wifi_handle_mem_read(wifi_rom_base, addr);
+                }
+                else if (active_subslot == ss_nextor)
                 {
                     if (addr >= 0x4000u && addr <= 0x7FFFu)
                     {
@@ -2605,7 +2627,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
                         }
                     }
                 }
-                else if (active_subslot == 1)
+                else if (active_subslot == ss_mapper)
                 {
                     in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
@@ -5106,7 +5128,7 @@ int __no_inline_not_in_flash_func(main)()
             loadrom_sunrise_megaram_usb(ROM_RECORD_SIZE, true);
             break;
         case 21:
-            loadrom_sunrise_mapper_seone_sd(ROM_RECORD_SIZE, true);
+            loadrom_sunrise_mapper_seone_sd(ROM_RECORD_SIZE, true, wifi_enabled);
             break;
         default:
             break;

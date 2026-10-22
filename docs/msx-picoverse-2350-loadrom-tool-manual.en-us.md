@@ -56,7 +56,7 @@ loadrom.exe [options] [romfile]
 - `-r2`, `--megaram-usb` : Same as `-r1`, but uses USB mass storage on the cartridge's USB-C port as the Nextor backend.
 - `-e1`, `--seone-sd` : Same as `-m1` plus a TMTLogic SE-ONE MP3 cartridge emulation on I/O ports `0x20`-`0x27`. SymbOS "SE Play" and other SE-ONE software can then browse and play MP3/WAV files and M3U playlists from the microSD card through the I2S DAC. See the [SE-ONE guide](./msx-picoverse-2350-seone.md). No external ROM file is needed.
 - `-s3`, `--sunrise3-sd` : Same as `-s1`, but embeds Konamiman's Nextor 3.0.0 Beta 2 Sunrise IDE MasterOnly kernel (from the [SunriseIDE Nextor driver](https://github.com/Konamiman/SunriseIDE-Nextor-driver/releases/tag/v0.1.8-blueMSX-v0.1.5-Nextor-3.0-beta.2) release) instead of Nextor 2.1.4, for testing the upcoming Nextor 3. microSD only for now. It is a beta kernel, so keep backups of the microSD card.
-- `-w`, `--wifi` : Enable ESP-01 WiFi support for `-s1`, `-m1`, `-s2`, `-m2`, or `-s3`. This adds the ESP8266P system ROM plus a memory-mapped UART backend expected by the WiFi ROM/software stack.
+- `-w`, `--wifi` : Enable ESP-01 WiFi support for `-s1`, `-m1`, `-s2`, `-m2`, `-e1`, or `-s3`. This adds the ESP8266P system ROM plus a memory-mapped UART backend expected by the WiFi ROM/software stack.
 - `-scc`, `--scc` : Enable SCC (standard) sound emulation. For embedded ROM builds, this applies to Konami SCC or Manbow2 mapper ROMs. With `-c1` or `-c2`, it enables SCC playback for Konami SCC ROMs uploaded later through `SROM.COM /D15`.
 - `-sccplus`, `--sccplus` : Enable SCC+ (enhanced) sound emulation. For embedded ROM builds, this applies to Konami SCC or Manbow2 mapper ROMs. With `-c1` or `-c2`, it enables SCC+ playback for compatible ROMs uploaded later through `SROM.COM /D15`.
 - `-d`, `--dual-psg` : Enable secondary AY-3-8910 (PSG) emulation on I/O ports `0x10` (register select) and `0x11` (data). The Pico captures `OUT (0x10/0x11),A` writes via PIO1 and streams a mixed signal to the I2S DAC alongside the host MSX's PSG. Only valid with external ROM files whose mapper is not Konami SCC or Manbow2 (those mappers carry an on-cartridge SCC chip and reserve the second audio slot for SCC emulation).
@@ -68,7 +68,7 @@ loadrom.exe [options] [romfile]
 - `-o <filename>`, `--output <filename>` : Override the UF2 output name (default `loadrom.uf2`).
 - Positional argument: the ROM file to embed. Required for normal ROM loading; not accepted with `-s1`/`-m1`/`-s2`/`-m2`/`-c1`/`-c2`/`-r1`/`-r2`/`-e1`/`-s3`.
 
-`-s1`, `-m1`, `-s2`, `-m2`, `-c1`, `-c2`, `-r1`, `-r2`, `-e1`, and `-s3` are mutually exclusive. `-w` is valid only with `-s1`, `-m1`, `-s2`, `-m2`, or `-s3`. The audio options `-scc`, `-sccplus`, `-d`, and `-f`/`-fmpac` are mutually exclusive — only one on-cartridge audio engine can be active per UF2 image. `-d` is additionally rejected for Konami SCC and Manbow2 ROMs, while `-d` and `-f`/`-fmpac` are rejected for the embedded Sunrise/Carnivore2/MegaRAM system modes. `-f`/`-fmpac` is also rejected for Konami SCC and Manbow2 mapper ROMs. If conflicting options are provided, the tool exits with an error.
+`-s1`, `-m1`, `-s2`, `-m2`, `-c1`, `-c2`, `-r1`, `-r2`, `-e1`, and `-s3` are mutually exclusive. `-w` is valid only with `-s1`, `-m1`, `-s2`, `-m2`, `-e1`, or `-s3`. The audio options `-scc`, `-sccplus`, `-d`, and `-f`/`-fmpac` are mutually exclusive — only one on-cartridge audio engine can be active per UF2 image. `-d` is additionally rejected for Konami SCC and Manbow2 ROMs, while `-d` and `-f`/`-fmpac` are rejected for the embedded Sunrise/Carnivore2/MegaRAM system modes. `-f`/`-fmpac` is also rejected for Konami SCC and Manbow2 mapper ROMs. If conflicting options are provided, the tool exits with an error.
 
 `-4`/`--opl4` is fully standalone: it cannot be combined with any other option (no Sunrise/Carnivore2 mode, no audio flag, no `-w`, and no ROM file). If `-4` is mixed with any of those, the tool exits with an error. `--22khz` is only accepted together with `-4`.
 
@@ -285,6 +285,7 @@ Notes:
 
   ```sh
   loadrom.exe -e1 -o nextor_seone_sd.uf2
+  loadrom.exe -e1 -w -o nextor_seone_sd_wifi.uf2   # + ESP-01 for SymbOS network / SE Play web radio
   ```
   Sunrise IDE + 1MB PSRAM mapper + 1MB MegaRAM (USB):
   ```

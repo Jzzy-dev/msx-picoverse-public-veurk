@@ -61,14 +61,40 @@ Connect the PicoVerse audio output to your amplifier. The SE-ONE could mix the M
 | M3U playlists | **Yes** |
 | WAV files | **Yes** |
 | FM radio | **No**: there is no tuner. Commands are accepted, the frequency display changes, and there is no sound. |
-| Web radio, Phone (VoIP), users online | **No**: these need TMTLogic's network card (TNC/SF3) on ports `0x40`-`0x49`. |
+| Web radio | **Yes, with the patched SE Play** (`SEPLAYN.EXE`, see section 5) and the PicoVerse network daemon: build with `-e1 -w` and fit an ESP-01. The original SE Play needs TMTLogic's network card. |
+| Phone (VoIP), users online | **No**: these need TMTLogic's network card (TNC/SF3) on ports `0x40`-`0x49`. The patched SE Play shows `PHONE: NO TNC`. |
 | Synthesizer | **No**: this needs the SF3's General MIDI synth. MIDI bytes sent to port `0x22` are ignored. |
 | IR remote learning | **No**: RSF3 only. |
 | `AT+MSDTALK` (SP0256 speech) and `AT+MSDSAMPLE`, for BASIC programs | **Yes**, from `/SETALK` and `/SAMPLE` |
 
-**About the network card:** SE Play checks for the TNC at start-up by reading an ID string from port `0x42` until it gets a `0x00` byte. On an MSX without the card that port reads `0xFF`, so SE Play would spin until its string space runs out. Once software writes to the TNC ports, the firmware answers with "idle, empty ID", and SE Play carries on with no network.
+**About the network card (unpatched SE Play):** SE Play checks for the TNC at start-up by reading an ID string from port `0x42` until it gets a `0x00` byte. On an MSX without the card that port reads `0xFF`, so SE Play would spin until its string space runs out. Once software writes to the TNC ports, the firmware answers with "idle, empty ID", and SE Play carries on with no network.
 
-## 5. Port and command reference
+## 5. Web radio: SE Play patched for the SymbOS network daemon
+
+SE Play 0.1 drives TMTLogic's network card directly. `2350/software/symbos/seplay-netd` contains a patcher that changes your copy of `SEPLAY.EXE` so it uses the **SymbOS Network Daemon** instead, for example the PicoVerse ESP-01 daemon [`netd-esp.exe`](https://github.com/Jzzy-dev/msx-picoverse-symbos-network-daemon). The patch also stops the start-up hang for good, because SE Play no longer touches ports `0x40`-`0x49`. See the [patcher README](../2350/software/symbos/seplay-netd/README.md) for details.
+
+1. Build the firmware with Wi-Fi: `loadrom.exe -e1 -w -o seone_wifi.uf2`. This uses the same sub-slot layout as the other `-w` modes: ESP8266P BIOS, then Nextor, then mapper. Fit and configure the ESP-01 as described in the [Wi-Fi guide](./msx-picoverse-2350-wifi.md).
+2. On a PC, run `python seplay_netd.py SEPLAY.EXE SEPLAYN.EXE` and copy `SEPLAYN.EXE` next to the other SE Play files.
+3. In SymbOS, start `netd-esp.exe` and wait until it shows an IP address. Then run `SEPLAYN.EXE` and open the **Web radio** page.
+
+Stations come from the `.WRC` files in the SE Play folder:
+
+```text
+089.147.108.034	|8000	|/radio.mp3	|PIGPEN	|www.pigpenradio.org	|Reggae	|dub	|UK|
+```
+
+- **IP address:** write it with three digits per number (`089.147.108.034`). SE Play reads these as fixed columns.
+- **Port:** follows the first `|`.
+- **Stream path:** follows the second `|`.
+- **Short name:** follows the third `|`, and is what the display shows.
+
+**Limits:**
+
+- **MP3 only.** Stations must send MP3; AAC streams stay silent.
+- **No host names or redirects.** Stations are reached by IP address only, and HTTP redirects are not followed. The station lists shipped with SE Play date from 2025, so expect to update the IP addresses.
+- **HTTPS:** the PicoVerse daemon opens connections to port 443 as TLS. Without a host name, though, many servers refuse the connection.
+
+## 6. Port and command reference
 
 ### I/O ports
 
@@ -110,7 +136,7 @@ The firmware implements the manual's REG mode functions:
 
 The FAT32 sector functions (`0x50`-`0x54`) are not available.
 
-## 6. How it works
+## 7. How it works
 
 - **Core 0** runs the expanded-slot bus loop: Nextor on sub-slot 0, the mapper on sub-slot 1, plus the SE-ONE ports. The Z80 does not wait on I/O reads, so the loop answers them between every memory write. An OUT that is still in the write FIFO is applied before the IN that follows it. The port handlers run from RAM and never block (`seone/seone_bus.c`).
 - **Core 1** alternates between three jobs:
@@ -122,11 +148,11 @@ The FAT32 sector functions (`0x50`-`0x54`) are not available.
 - **Memory:** the SE-ONE takes its buffers, the Helix MP3 decoder state (about 24 KB) and the core 1 stack from the 128 KB of the SRAM ROM cache that the Nextor kernel doesn't use.
 - **Card access:** the emulation only ever reads the card. Nextor/SymbOS write to it directly, so FatFS's sector cache is dropped before every command.
 
-## 7. Building from source
+## 8. Building from source
 
 The firmware is part of LoadROM (`2350/software/loadrom.pio/pico/loadrom`). Besides the existing `lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico`, it needs the Helix decoder in `lib/picomp3lib` ([ikjordan/picomp3lib](https://github.com/ikjordan/picomp3lib)), with the same layout Explorer uses. Build with Pico SDK 2.2.0 and pico-extras as usual. After rebuilding `dist/loadrom.bin`, regenerate `tool/src/loadrom.h` with `xxd -i` and rebuild the tool.
 
-## 8. Tests
+## 9. Tests
 
 `2350/software/loadrom.pio/pico/loadrom/seone/tests` contains a host test harness:
 
