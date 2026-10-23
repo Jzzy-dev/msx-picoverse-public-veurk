@@ -14,7 +14,7 @@
 #endif
 
 // register window + mailbox, shared by both cores
-extern volatile uint8_t pva_win[PVA_WIN_SIZE];
+extern volatile uint8_t *pva_win;
 typedef struct
 {
     volatile uint32_t post_count;   // core 0: +1 per CMD_CODE write

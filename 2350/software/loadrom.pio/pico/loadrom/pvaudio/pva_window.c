@@ -9,7 +9,7 @@
 #include <string.h>
 #include "pva_internal.h"
 
-volatile uint8_t pva_win[PVA_WIN_SIZE];
+volatile uint8_t *pva_win;              // in the arena (SRAM), allocated first
 pva_mailbox_t pva_mailbox;
 
 // ---------------------------------------------------------------- core 0
@@ -103,6 +103,7 @@ void pva_init(uint8_t *arena, size_t size)
     arena_base = arena;
     arena_size = size;
     arena_used = 0;
+    pva_win = pva_alloc(PVA_WIN_SIZE);
     memset((void *)pva_win, 0xFF, PVA_WIN_SIZE);
     memset((void *)&pva_win[PVA_R_ID], 0, 0x100);
     memcpy((void *)&pva_win[PVA_R_ID], "PVAUDIO", 7);

@@ -205,7 +205,7 @@ int main(int argc, char **argv)
     assets = argc > 1 ? argv[1] : "assets";
     build_image();
 
-    static uint8_t arena[132 * 1024];
+    static uint8_t arena[120 * 1024];     // as the firmware: 128 KB left by Nextor - 8 KB core 1 stack
     pva_init(arena, sizeof arena);
     pva_core1_init();
     host_audio_sink = sink;

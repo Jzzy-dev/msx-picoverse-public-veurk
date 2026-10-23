@@ -35,11 +35,16 @@
 // Shared state. 'arena' must stay valid forever and is not touched by core 0.
 void pva_init(uint8_t *arena, size_t arena_size);
 
+// Optional: the core 1 stack, pre-filled with 0xA5, so DIAG can report its use.
+void pva_set_stack(const uint8_t *base, size_t size);
+
 // core 0
 uint8_t pva_mem_read(uint16_t addr);
 void    pva_mem_write(uint16_t addr, uint8_t data);
 
 // core 1
+// True once the MSX has posted a command (the engine may be started lazily).
+bool pva_command_pending(void);
 void pva_core1_init(void);
 // Returns true if it did work (a command, or a block of audio). When it
 // returns false the caller may sleep briefly (50-100 us) to leave the shared

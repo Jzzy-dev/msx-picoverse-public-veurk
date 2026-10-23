@@ -11,9 +11,9 @@
 #include "pva_internal.h"
 
 #define DIR_MAX         1024u
-#define DIR_POOL        (20u * 1024u)
+#define DIR_POOL        (16u * 1024u)
 #define PL_MAX          512u
-#define PL_POOL         (24u * 1024u)
+#define PL_POOL         (16u * 1024u)
 #define PATH_MAX_LEN    240u
 #define STATUS_MS       40u
 #define HEARTBEAT_MS    5u
@@ -52,7 +52,7 @@ static uint16_t track_id;
 static pva_track_info_t info;
 static uint32_t rng = 12345;
 
-static uint8_t  args[PVA_ARGS_SIZE];
+static uint8_t *args;               // PVA_ARGS_SIZE, in the arena
 static uint8_t *reply;
 static uint32_t reply_len;
 static uint32_t handled_post;
@@ -60,6 +60,9 @@ static uint32_t last_status_ms, last_hb_ms, last_poll_ms, max_gap_ms;
 static uint8_t  hb;
 static uint8_t  seq;
 static bool     status_dirty = true;
+static const uint8_t *stack_base;
+static size_t   stack_size;
+static bool     ready;              // all buffers allocated; else only PING/LOG/DIAG
 
 // ---------------------------------------------------------------- helpers
 static void fs_refresh(void)
@@ -113,9 +116,10 @@ static void fatfs_path(char *out, size_t size, const char *path)
     snprintf(out, size, "0:%s", path[0] ? path : "/");
 }
 
+static uint32_t reply_cap = PVA_REPLY_SIZE;
 static void set_reply_byte(uint8_t b)
 {
-    if (reply_len < PVA_REPLY_SIZE) reply[reply_len++] = b;
+    if (reply_len < reply_cap) reply[reply_len++] = b;
 }
 
 static void set_reply_str(const char *s)
@@ -126,7 +130,7 @@ static void set_reply_str(const char *s)
 
 static void set_reply_text(const char *s, size_t n)
 {
-    if (n > PVA_REPLY_SIZE) n = PVA_REPLY_SIZE;
+    if (n > reply_cap) n = reply_cap;
     memcpy(reply, s, n);
     reply_len = (uint32_t)n;
 }
@@ -362,25 +366,25 @@ static bool read_line(line_reader_t *lr, char *out, size_t size)
     return any;
 }
 
+static FIL *m3u_file;
+static line_reader_t *m3u_lr;
 static int load_m3u(const char *m3u_path)
 {
-    static FIL f;
-    static line_reader_t lr;
     char fp[PATH_MAX_LEN + 8];
     fatfs_path(fp, sizeof fp, m3u_path);
     fs_refresh();
-    FRESULT fr = f_open(&f, fp, FA_READ);
+    FRESULT fr = f_open(m3u_file, fp, FA_READ);
     if (fr != FR_OK) { last_fr = (uint8_t)fr; return PVA_E_NOTFOUND; }
     pl_clear();
     pl_kind = 1;
     snprintf(pl_m3u_dir, sizeof pl_m3u_dir, "%s", m3u_path);
     char *s = strrchr(pl_m3u_dir, '/');
     if (s) *s = 0;
-    memset(&lr, 0, sizeof lr);
-    lr.f = &f;
+    memset(m3u_lr, 0, sizeof *m3u_lr);
+    m3u_lr->f = m3u_file;
     char line[PATH_MAX_LEN + 1], path[PATH_MAX_LEN + 1];
     bool first = true;
-    while (read_line(&lr, line, sizeof line))
+    while (read_line(m3u_lr, line, sizeof line))
     {
         char *p = line;
         if (first && (uint8_t)p[0] == 0xEF && (uint8_t)p[1] == 0xBB && (uint8_t)p[2] == 0xBF) p += 3;
@@ -397,7 +401,7 @@ static int load_m3u(const char *m3u_path)
         else snprintf(path, sizeof path, "%s/%s", pl_m3u_dir, p);
         if (!pl_add(path)) { pva_log("play list cut at %u", (unsigned)pl_count); break; }
     }
-    f_close(&f);
+    f_close(m3u_file);
     pva_log("M3U: %u tracks", (unsigned)pl_count);
     return pl_count ? PVA_OK : PVA_E_FORMAT;
 }
@@ -555,6 +559,16 @@ static int cmd_mode(void)
     return PVA_OK;
 }
 
+void pva_set_stack(const uint8_t *base, size_t size) { stack_base = base; stack_size = size; }
+
+static size_t stack_used(void)
+{
+    if (!stack_base) return 0;
+    size_t i = 0;
+    while (i < stack_size && stack_base[i] == 0xA5) i++;   // stack grows down to the base
+    return stack_size - i;
+}
+
 // ---------------------------------------------------------------- text replies
 static int cmd_diag(void)
 {
@@ -576,18 +590,20 @@ static int cmd_diag(void)
         "Play list: %u tracks, position %u, mode %u\r\n"
         "State %u, error %u, last FRESULT %d/%d\r\n"
         "Track: %u Hz, %u ch, %lu kbit/s, %lu s\r\n"
-        "Arena free: %lu bytes, log lines %u\r\n",
+        "Arena free: %lu bytes, stack used %lu of %lu, log lines %u\r\n",
         cur_dir[0] ? cur_dir : "/", (unsigned)dir_count,
         (unsigned)pl_count, (unsigned)pl_pos, (unsigned)mode,
         (unsigned)state, (unsigned)play_error, (int)last_fr, (int)pva_dec_last_fresult(),
         (unsigned)info.sample_rate, (unsigned)info.channels, (unsigned long)info.bitrate_kbps, (unsigned long)info.total_seconds,
-        (unsigned long)pva_arena_free(), (unsigned)pva_log_count());
+        (unsigned long)pva_arena_free(), (unsigned long)stack_used(), (unsigned long)stack_size, (unsigned)pva_log_count());
     set_reply_text(t, (size_t)n);
     return PVA_OK;
 }
 
 static int execute(uint8_t code)
 {
+    if (!ready && code != PVA_C_PING && code != PVA_C_LOG && code != PVA_C_DIAG)
+        return PVA_E_STATE;
     switch (code)
     {
         case PVA_C_PING:
@@ -602,7 +618,7 @@ static int execute(uint8_t code)
             dir_open = false;
             return do_mount() ? PVA_OK : PVA_E_NOCARD;
         case PVA_C_LOG:
-            reply_len = (uint32_t)pva_log_dump((char *)reply, PVA_REPLY_SIZE);
+            reply_len = (uint32_t)pva_log_dump((char *)reply, reply_cap);
             return PVA_OK;
         case PVA_C_DIAG:      return cmd_diag();
         case PVA_C_DIR_OPEN:  return cmd_dir_open();
@@ -667,7 +683,7 @@ static void handle_command(void)
 }
 
 // ---------------------------------------------------------------- status block
-static uint8_t st_new[PVA_STATUS_SIZE], st_pub[PVA_STATUS_SIZE];
+static uint8_t *st_new, *st_pub;    // PVA_STATUS_SIZE each, in the arena
 static void st8(uint32_t o, uint8_t v) { st_new[o] = v; }
 static void st16(uint32_t o, uint16_t v) { st8(o, (uint8_t)v); st8(o + 1, (uint8_t)(v >> 8)); }
 static void ststr(uint32_t o, const char *s, uint32_t size)
@@ -729,6 +745,11 @@ static void publish_status(void)
 // ---------------------------------------------------------------- core 1
 void pva_core1_init(void)
 {
+    args = pva_alloc(PVA_ARGS_SIZE);
+    st_new = pva_alloc(PVA_STATUS_SIZE);
+    st_pub = pva_alloc(PVA_STATUS_SIZE);
+    m3u_file = pva_alloc(sizeof(FIL));
+    m3u_lr = pva_alloc(sizeof(line_reader_t));
     dir_ent = pva_alloc(DIR_MAX * sizeof(dent_t));
     dir_pool = pva_alloc(DIR_POOL);
     pl_off = pva_alloc(PL_MAX * sizeof(uint16_t));
@@ -739,19 +760,24 @@ void pva_core1_init(void)
     bool hal_ok = pva_hal_audio_init();
     pva_hal_audio_mute(true);
     pva_log("engine %d.%d start, arena free %lu", PVA_FW_MAJOR, PVA_FW_MINOR, (unsigned long)pva_arena_free());
-    if (!dir_ent || !dir_pool || !pl_off || !pl_order || !pl_pool || !reply || !dec_ok)
-        pva_log("ERROR: arena too small");
+    static uint8_t reply_fallback[64];
+    if (!reply) { reply = reply_fallback; reply_cap = sizeof reply_fallback; }
+    ready = dir_ent && dir_pool && pl_off && pl_order && pl_pool && reply != reply_fallback && dec_ok &&
+            args && st_new && st_pub && m3u_file && m3u_lr;
+    if (!ready)
+        pva_log("ERROR: arena too small, engine disabled");
     if (!hal_ok)
         pva_log("ERROR: I2S audio init failed");
     rng ^= pva_hal_millis();
     do_mount();
-    handled_post = pva_mailbox.post_count;
+    handled_post = 0;                   // a command that started the engine is executed
     last_poll_ms = pva_hal_millis();
     publish_status();
     pva_win[PVA_R_BUSY] = 0;
 }
 
 bool pva_core1_busy(void) { return state == PVA_STATE_PLAYING; }
+bool pva_command_pending(void) { return pva_mailbox.post_count != 0; }
 
 bool pva_core1_poll(void)
 {
@@ -767,7 +793,7 @@ bool pva_core1_poll(void)
         work = true;
     }
 
-    if (state == PVA_STATE_PLAYING)
+    if (ready && state == PVA_STATE_PLAYING)
     {
         int r = pva_dec_step();
         if (r != 0) work = true;

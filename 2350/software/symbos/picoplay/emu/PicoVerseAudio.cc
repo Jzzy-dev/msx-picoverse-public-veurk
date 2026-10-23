@@ -24,7 +24,7 @@ extern uint32_t host_audio_underruns;
 
 namespace openmsx {
 
-static uint8_t arena[116 * 1024];     // same as the firmware: 128 KB minus the core 1 stack
+static uint8_t arena[120 * 1024];     // as the firmware: 128 KB minus the 8 KB core 1 stack
 
 PicoVerseAudio::PicoVerseAudio(const DeviceConfig& config)
 	: MSXDevice(config)

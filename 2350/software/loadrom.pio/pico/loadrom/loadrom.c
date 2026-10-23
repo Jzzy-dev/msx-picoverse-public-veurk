@@ -2657,12 +2657,20 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
 // the engine; it sleeps briefly whenever there is nothing to do, to leave
 // the shared buses to the core 0 bus loop.
 // -----------------------------------------------------------------------
-#define PVA_CORE1_STACK_SIZE (12u * 1024u)
+#define PVA_CORE1_STACK_SIZE (8u * 1024u)
 static uint32_t *pva_core1_stack;
 
+// The engine starts only when the MSX sends it its first command (PVTEST,
+// PicoPlay). Until then core 1 serves only the microSD card for Nextor, so
+// booting never depends on the player code.
 static void __no_inline_not_in_flash_func(core1_pva_task)(void)
 {
     sunrise_sd_init();
+    while (!pva_command_pending())
+    {
+        sunrise_sd_poll();
+        sleep_us(50);
+    }
     pva_core1_init();
     while (true)
     {
@@ -2694,8 +2702,10 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offse
         while (true) { tight_loop_contents(); }
     }
     pva_core1_stack = (uint32_t *)&rom_sram[arena_start];
+    memset(pva_core1_stack, 0xA5, PVA_CORE1_STACK_SIZE);
     arena_start += PVA_CORE1_STACK_SIZE;
     pva_init(&rom_sram[arena_start], CACHE_SIZE - arena_start);
+    pva_set_stack((const uint8_t *)pva_core1_stack, PVA_CORE1_STACK_SIZE);
 
     static sunrise_ide_t ide;
     sunrise_ide_init(&ide);

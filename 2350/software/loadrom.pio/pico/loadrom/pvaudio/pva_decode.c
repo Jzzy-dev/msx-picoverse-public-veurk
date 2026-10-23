@@ -24,7 +24,7 @@
 #define MAX_FRAME_SAMPLES   1152u
 #define INBUF_SIZE          (8u * 1024u)
 #define PVA_READ_CHUNK      (4u * 1024u)
-#define MP3_POOL_SIZE       (30u * 1024u)
+#define MP3_POOL_SIZE       (24u * 1024u + 512u)   // Helix needs 23.9 KB on the RP2350
 #define TAG_SCAN_MAX        (64u * 1024u)   // ID3v2 bytes we are willing to read for tags
 
 // ---------------- decoder memory pool (Helix MPDEC_ALLOCATOR) ----------------
@@ -46,7 +46,8 @@ void *pva_mp3_alloc(size_t size)
 static HMP3Decoder decoder;
 static uint8_t  *inbuf;
 static uint32_t  in_len, in_pos;
-static FIL       file;
+static FIL      *filep;               // in the arena
+#define file (*filep)
 static bool      file_open, file_eof;
 static uint32_t  file_size;
 static uint32_t  audio_start;          // first byte after the ID3v2 tag
@@ -68,7 +69,7 @@ static bool      have_toc;
 static uint32_t  total_s;
 static uint32_t  cbr_kbps;
 
-static int16_t   pcm[MAX_FRAME_SAMPLES * 2];
+static int16_t  *pcm;                 // MAX_FRAME_SAMPLES * 2, in the arena
 static int32_t   gain_q15 = 32768;
 static uint8_t   vu_l, vu_r;
 static uint32_t  vu_ms;
@@ -526,8 +527,10 @@ bool pva_dec_init(void)
 #endif
     inbuf = pva_alloc(INBUF_SIZE);
     mp3_pool = pva_alloc(MP3_POOL_SIZE);
+    filep = pva_alloc(sizeof(FIL));
+    pcm = pva_alloc(MAX_FRAME_SAMPLES * 2u * sizeof(int16_t));
     pva_dec_set_volume(80);
-    return inbuf && mp3_pool;
+    return inbuf && mp3_pool && filep && pcm;
 }
 
 void pva_dec_close(void)

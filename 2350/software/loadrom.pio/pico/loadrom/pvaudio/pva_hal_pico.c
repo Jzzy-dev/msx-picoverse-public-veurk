@@ -9,6 +9,10 @@
 // Never blocks: acquire returns NULL when every buffer is queued. When no
 // buffer is queued pico_audio_i2s plays silence by itself.
 //
+// The producer buffers come from the engine arena, not from the heap: the
+// LoadROM firmware has only about 15 KB of heap, and pico_malloc halts the
+// core when an allocation fails (and with it the microSD card Nextor uses).
+//
 // This work is licensed under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 // License". https://creativecommons.org/licenses/by-nc-sa/4.0/
 
@@ -16,12 +20,13 @@
 #include "pico/audio_i2s.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
+#include "pico/util/buffer.h"
 #include "pva_internal.h"
 
 #define PVA_I2S_DATA_PIN  29
 #define PVA_I2S_BCLK_PIN  30   // LRCLK = BCLK + 1 = 31
 #define PVA_I2S_MUTE_PIN  32   // high = muted
-#define PVA_I2S_BUFFERS   6    // ~157 ms of 44.1 kHz audio queued
+#define PVA_I2S_BUFFERS   5    // ~130 ms of 44.1 kHz audio queued
 #define PVA_I2S_FRAMES    1152
 
 static audio_format_t audio_format = {
@@ -38,13 +43,44 @@ static struct audio_buffer_format producer_format = {
 static struct audio_buffer_pool *pool;
 static struct audio_buffer *current;
 
+// audio_new_producer_pool() without the heap
+static struct audio_buffer_pool *new_arena_pool(void)
+{
+    audio_buffer_pool_t *ac = pva_alloc(sizeof(audio_buffer_pool_t));
+    audio_buffer_t *bufs = pva_alloc(PVA_I2S_BUFFERS * sizeof(audio_buffer_t));
+    mem_buffer_t *mems = pva_alloc(PVA_I2S_BUFFERS * sizeof(mem_buffer_t));
+    uint8_t *bytes = pva_alloc(PVA_I2S_BUFFERS * PVA_I2S_FRAMES * 4u);
+    if (!ac || !bufs || !mems || !bytes)
+        return NULL;
+    for (int i = 0; i < PVA_I2S_BUFFERS; i++)
+    {
+        mems[i].size = PVA_I2S_FRAMES * 4u;
+        mems[i].bytes = bytes + (size_t)i * PVA_I2S_FRAMES * 4u;
+        mems[i].flags = 0;
+        bufs[i].format = &producer_format;
+        bufs[i].buffer = &mems[i];
+        bufs[i].max_sample_count = PVA_I2S_FRAMES;
+        bufs[i].sample_count = 0;
+        bufs[i].next = (i != PVA_I2S_BUFFERS - 1) ? &bufs[i + 1] : NULL;
+    }
+    ac->type = ac_producer;
+    ac->format = producer_format.format;
+    ac->free_list_spin_lock = spin_lock_init(SPINLOCK_ID_AUDIO_FREE_LIST_LOCK);
+    ac->free_list = bufs;
+    ac->prepared_list_spin_lock = spin_lock_init(SPINLOCK_ID_AUDIO_PREPARED_LISTS_LOCK);
+    ac->prepared_list = NULL;
+    ac->prepared_list_tail = NULL;
+    ac->connection = NULL;          // set by audio_i2s_connect()
+    return ac;
+}
+
 bool pva_hal_audio_init(void)
 {
     gpio_init(PVA_I2S_MUTE_PIN);
     gpio_set_dir(PVA_I2S_MUTE_PIN, GPIO_OUT);
     gpio_put(PVA_I2S_MUTE_PIN, 1);
 
-    pool = audio_new_producer_pool(&producer_format, PVA_I2S_BUFFERS, PVA_I2S_FRAMES);
+    pool = new_arena_pool();
     if (!pool)
         return false;
 

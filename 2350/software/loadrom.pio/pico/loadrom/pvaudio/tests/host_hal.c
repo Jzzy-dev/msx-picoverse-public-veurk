@@ -107,7 +107,8 @@ void host_wav_close(void)
     wav = NULL;
 }
 
-bool pva_hal_audio_init(void) { return true; }
+// same arena use as the firmware HAL: 5 x 1152 stereo frames + bookkeeping
+bool pva_hal_audio_init(void) { return pva_alloc(5u * 1152u * 4u + 160u) != NULL; }
 void pva_hal_audio_mute(bool mute) { host_audio_muted = mute; }
 
 int16_t *pva_hal_audio_acquire(uint32_t *max_frames)
