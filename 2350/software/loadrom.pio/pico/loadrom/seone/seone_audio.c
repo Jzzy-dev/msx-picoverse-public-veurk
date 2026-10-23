@@ -24,6 +24,9 @@
 #include "mp3dec.h"
 #include "seone_internal.h"
 #include "seone_mp3_alloc.h"
+#ifndef SEONE_HOST_TEST
+#include "../audio/mp3_alloc_dispatch.h"
+#endif
 
 #define MAX_FRAME_SAMPLES   1152u
 #define REFILL_THRESHOLD    (SEONE_INBUF_SIZE / 2u)
@@ -466,6 +469,9 @@ static int produce_wav(uint32_t max_frames)
 // =====================================================================
 bool seone_audio_init(void)
 {
+#ifndef SEONE_HOST_TEST
+    pv_mp3_alloc_fn = seone_mp3_alloc;
+#endif
     inbuf = seone_arena_alloc(SEONE_INBUF_SIZE);
     mp3_pool = seone_arena_alloc(MP3_POOL_SIZE);
     update_gains();

@@ -46,7 +46,8 @@ pico_sdk_init()
 add_subdirectory(lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src build_sd_lib)
 
 # Helix fixed-point MP3 decoder (https://github.com/ikjordan/picomp3lib), used by
-# the SE-ONE emulation. Its decoder state is allocated from the SE-ONE arena.
+# the SE-ONE emulation and the PicoVerse Audio Engine. Its decoder state is
+# allocated from the arena of whichever engine runs (audio/mp3_alloc_dispatch.c).
 add_subdirectory(lib/picomp3lib/src picomp3lib_build)
 
 # add_compile_options(-O3)
@@ -67,6 +68,11 @@ add_executable(loadrom
     seone/seone_cmd.c
     seone/seone_audio.c
     seone/seone_hal_pico.c
+    audio/mp3_alloc_dispatch.c
+    pvaudio/pva_window.c
+    pvaudio/pva_engine.c
+    pvaudio/pva_decode.c
+    pvaudio/pva_hal_pico.c
     )
 
 pico_generate_pio_header(loadrom ${CMAKE_CURRENT_LIST_DIR}/msx_bus.pio)
@@ -94,8 +100,8 @@ target_link_libraries(loadrom
     picomp3lib)
 
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/lib/picomp3lib/src/buffers.c PROPERTIES
-    COMPILE_DEFINITIONS "MPDEC_ALLOCATOR=seone_mp3_alloc"
-    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/seone/seone_mp3_alloc.h")
+    COMPILE_DEFINITIONS "MPDEC_ALLOCATOR=pv_mp3_alloc"
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/audio/mp3_alloc_dispatch.h")
 
 target_compile_definitions(loadrom PRIVATE
     PICO_AUDIO_I2S_PIO=0

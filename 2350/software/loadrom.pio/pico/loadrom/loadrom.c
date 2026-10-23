@@ -40,6 +40,7 @@
 #include "storage/flash_sd.h"
 #include "memory/c2_emu.h"
 #include "seone/seone.h"
+#include "pvaudio/pva.h"
 
 // -----------------------------------------------------------------------
 // PIO bus context
@@ -141,7 +142,7 @@ static inline audio_mode_t resolve_audio_mode(uint8_t rom_type, uint8_t base_rom
 
 static inline bool is_system_rom_type(uint8_t base_rom_type)
 {
-    return base_rom_type >= 10u && base_rom_type <= 21u &&
+    return base_rom_type >= 10u && base_rom_type <= 22u &&
            base_rom_type != 12u && base_rom_type != 13u && base_rom_type != 14u;
 }
 
@@ -2641,6 +2642,192 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_seone_sd)(uint32_t off
     }
 }
 
+// -----------------------------------------------------------------------
+// Nextor (Sunrise IDE, microSD) + 1MB mapper + optional WiFi + PicoVerse
+// Audio Engine (ROM type 22, loadrom -a1 [-w]).
+//
+// The slot layout is the one of the hardware-confirmed SymbOS setup
+// (-m1 -w), so SymbOS drive settings do not change:
+//   sub-slot 0 = ESP8266 BIOS + memio UART (with -w, else empty)
+//   sub-slot 1 = Nextor + Sunrise IDE
+//   sub-slot 2 = 1 MB mapper RAM
+//   sub-slot 3 = PicoVerse Audio Engine register window (4000h-4FFFh)
+// The engine is reached with memory cycles only, so /WAIT protects every
+// access. Core 1 runs the microSD card (Nextor and the engine share it) and
+// the engine; it sleeps briefly whenever there is nothing to do, to leave
+// the shared buses to the core 0 bus loop.
+// -----------------------------------------------------------------------
+#define PVA_CORE1_STACK_SIZE (12u * 1024u)
+static uint32_t *pva_core1_stack;
+
+static void __no_inline_not_in_flash_func(core1_pva_task)(void)
+{
+    sunrise_sd_init();
+    pva_core1_init();
+    while (true)
+    {
+        sunrise_sd_poll();
+        if (!pva_core1_poll())
+            sleep_us(50);
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offset, bool cache_enable, bool wifi_enable)
+{
+    sunrise_wait_for_expanded_bootstrap();
+
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+    const uint8_t *wifi_rom_base = rom + offset + available_length;
+
+    // Engine arena: the part of the SRAM ROM cache the Nextor kernel leaves free
+    uint32_t arena_start = (rom_cached_size + 7u) & ~7u;
+    if (arena_start + PVA_CORE1_STACK_SIZE + PVA_ARENA_MIN_SIZE > CACHE_SIZE)
+    {
+        while (true) { tight_loop_contents(); }
+    }
+    pva_core1_stack = (uint32_t *)&rom_sram[arena_start];
+    arena_start += PVA_CORE1_STACK_SIZE;
+    pva_init(&rom_sram[arena_start], CACHE_SIZE - arena_start);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+    sunrise_sd_set_ide_ctx(&ide);
+    multicore_launch_core1_with_stack(core1_pva_task, pva_core1_stack, PVA_CORE1_STACK_SIZE);
+    if (wifi_enable)
+        wifi_uart_init_once();
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x20u;                 // page 2 -> mapper for the boot RAM probe
+
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
+    mapper_fill_ff();
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        if (wifi_enable)
+            wifi_service_rx();
+
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr == 0xFFFFu)
+            {
+                subslot_reg = wdata;
+                continue;
+            }
+            uint8_t page = (waddr >> 14) & 0x03u;
+            uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+            if (active_subslot == 0)
+            {
+                if (wifi_enable)
+                    (void)wifi_handle_mem_write(waddr, wdata);
+            }
+            else if (active_subslot == 1)
+            {
+                if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                    sunrise_ide_handle_write(&ide, waddr, wdata);
+            }
+            else if (active_subslot == 2)
+            {
+                uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                mapper_write_byte(mapper_offset, wdata);
+            }
+            else if (page == 1)
+            {
+                pva_mem_write(waddr, wdata);
+            }
+        }
+
+        {
+            uint16_t io_addr;
+            uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu)
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+            }
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = true;              // always drive the bus when our slot is selected
+
+            if (addr == 0xFFFFu)
+            {
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (wifi_enable && page == 1)
+                        data = wifi_handle_mem_read(wifi_rom_base, addr);
+                }
+                else if (active_subslot == 1)
+                {
+                    if (page == 1)
+                    {
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 2)
+                {
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+                else if (page == 1)
+                {
+                    data = pva_mem_read(addr);
+                }
+            }
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)
 {
     uint16_t bank_registers[6] = {0};
@@ -4991,7 +5178,7 @@ int __no_inline_not_in_flash_func(main)()
         if ((base_rom_type == 11u || base_rom_type == 16u
             || base_rom_type == 17u || base_rom_type == 18u
             || base_rom_type == 19u || base_rom_type == 20u
-            || base_rom_type == 21u) && !psram_init())
+            || base_rom_type == 21u || base_rom_type == 22u) && !psram_init())
     {
         while (true)
         {
@@ -5129,6 +5316,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 21:
             loadrom_sunrise_mapper_seone_sd(ROM_RECORD_SIZE, true, wifi_enabled);
+            break;
+        case 22:
+            loadrom_sunrise_mapper_pva_sd(ROM_RECORD_SIZE, true, wifi_enabled);
             break;
         default:
             break;

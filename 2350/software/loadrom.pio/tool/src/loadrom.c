@@ -103,6 +103,7 @@ static const char *rom_types[] = {
 #define ROM_TYPE_MEGARAM_SD 19
 #define ROM_TYPE_MEGARAM_USB 20
 #define ROM_TYPE_SEONE_SD 21
+#define ROM_TYPE_PVA_SD 22
 
 #define NEXTOR3_SUNRISE_LABEL "Nextor Sunrise 3.0.0 Beta 2"
 #define NEXTOR3_ROM           ___resources_Nextor_3_0_0_beta2_SunriseIDE_MasterOnly_ROM
@@ -448,7 +449,7 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s1] [-m1] [-r1] [-s2] [-m2] [-r2] [-c1] [-c2] [-e1] [-s3] [-4] [-a] [--4mhz] [-w] [-d] [-f] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-r1] [-s2] [-m2] [-r2] [-c1] [-c2] [-e1] [-p1] [-s3] [-4] [-a] [--4mhz] [-w] [-d] [-f] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help         Show this help message\n");
@@ -461,6 +462,7 @@ static void print_usage(const char *prog_name) {
     printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (microSD card)\n");
     printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (USB pendrive)\n");
     printf("  -e1, --seone-sd    Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + TMTLogic SE-ONE MP3 cartridge emulation\n");
+    printf("  -p1, --player-sd   Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + PicoVerse Audio Engine (SymbOS PicoPlay)\n");
     printf("                     on I/O ports 0x20-0x27 (microSD card, I2S DAC) for SymbOS SE Play and other SE-ONE software\n");
     printf("  -s3, --sunrise3-sd Build UF2 with " NEXTOR3_SUNRISE_LABEL " Sunrise IDE ROM (microSD card) for testing\n");
     printf("  -4, --opl4         Build UF2 with the standalone OPL4 / YMF278B / MoonSound cartridge firmware (2MB YRW801-M ROM + 2MB PCM sample RAM)\n");
@@ -468,7 +470,7 @@ static void print_usage(const char *prog_name) {
     printf("                     very dense songs play without dropouts, at the cost of a duller high end\n");
     printf("  -a, --msx-audio    Build UF2 with the standalone MSX-AUDIO / Y8950 cartridge firmware (MSX-Audio BIOS + 256KB ADPCM sample RAM)\n");
     printf("      --4mhz         (with -a) Clock the emulated Y8950 at 4 MHz instead of the standard 3.579545 MHz\n");
-    printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2/-e1/-s3 only)\n");
+    printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2/-e1/-p1/-s3 only)\n");
     printf("  -d, --dual-psg     Enable secondary PSG emulation on I/O ports 0x10/0x11\n");
     printf("  -f, -fmpac         Enable MSX-MUSIC/YM2413 emulation on I/O ports 0x7C/0x7D\n");
     printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC mapper only)\n");
@@ -659,6 +661,7 @@ int main(int argc, char *argv[])
     bool use_megaram_usb = false;
     bool use_sunrise3_sd = false;
     bool use_seone_sd = false;
+    bool use_pva_sd = false;
     bool use_opl4 = false;
     bool opl4_22khz = false;
     bool use_msx_audio = false;
@@ -691,6 +694,8 @@ int main(int argc, char *argv[])
             use_c2_usb = true;
         } else if ((strcmp(argv[i], "-e1") == 0) || (strcmp(argv[i], "--seone-sd") == 0)) {
             use_seone_sd = true;
+        } else if ((strcmp(argv[i], "-p1") == 0) || (strcmp(argv[i], "--player-sd") == 0)) {
+            use_pva_sd = true;
         } else if ((strcmp(argv[i], "-s3") == 0) || (strcmp(argv[i], "--sunrise3-sd") == 0)) {
             use_sunrise3_sd = true;
         } else if ((strcmp(argv[i], "-4") == 0) || (strcmp(argv[i], "--opl4") == 0)) {
@@ -733,16 +738,16 @@ int main(int argc, char *argv[])
                          + (use_sunrise_usb ? 1 : 0) + (use_mapper_usb ? 1 : 0)
                          + (use_c2_sd ? 1 : 0) + (use_c2_usb ? 1 : 0)
                          + (use_megaram_sd ? 1 : 0) + (use_megaram_usb ? 1 : 0)
-                         + (use_sunrise3_sd ? 1 : 0) + (use_seone_sd ? 1 : 0);
+                         + (use_sunrise3_sd ? 1 : 0) + (use_seone_sd ? 1 : 0) + (use_pva_sd ? 1 : 0);
         if (nextor_count > 1) {
-            printf("Options -s1, -m1, -r1, -s2, -m2, -r2, -c1, -c2, -e1 and -s3 are mutually exclusive.\n");
+            printf("Options -s1, -m1, -r1, -s2, -m2, -r2, -c1, -c2, -e1, -p1 and -s3 are mutually exclusive.\n");
             return 1;
         }
     }
 
     bool use_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb
                    || use_c2_sd || use_c2_usb || use_megaram_sd || use_megaram_usb || use_sunrise3_sd
-                   || use_seone_sd;
+                   || use_seone_sd || use_pva_sd;
 
     if (opl4_22khz && !use_opl4) {
         printf("Option --22khz requires -4/--opl4.\n");
@@ -956,8 +961,8 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    if (use_wifi && !(use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb || use_sunrise3_sd || use_seone_sd)) {
-        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2, -m2, -e1 or -s3.\n");
+    if (use_wifi && !(use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb || use_sunrise3_sd || use_seone_sd || use_pva_sd)) {
+        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2, -m2, -e1, -p1 or -s3.\n");
         return 1;
     }
 
@@ -1023,6 +1028,9 @@ int main(int argc, char *argv[])
         } else if (use_seone_sd) {
             rom_type = ROM_TYPE_SEONE_SD;
             sunrise_name = "Nextor Sunrise+Mapper+SE-ONE (SD)";
+        } else if (use_pva_sd) {
+            rom_type = ROM_TYPE_PVA_SD;
+            sunrise_name = "Nextor Sunrise+Mapper+Player (SD)";
         } else {
             rom_type = ROM_TYPE_SUNRISE;
             sunrise_name = "Nextor Sunrise IDE (USB)";
