@@ -191,6 +191,18 @@ static uint32_t wifi_uart_baud = WIFI_UART_DEFAULT_BAUD;
 static uint32_t wifi_tx_busy_deadline_us = 0u;
 static bool wifi_rx_underrun = false;
 
+// The PicoVerse Audio Engine (-p1 -w) borrows the ESP link for internet radio.
+// While it owns it, received bytes go to the engine's ring (written only by
+// the UART IRQ on core 0, read only by core 1) and the MSX side's memio
+// registers report an idle link: no RX data, TX dropped.
+#define PVA_ESP_RX_SIZE 4096u
+static volatile bool wifi_engine_owned = false;
+static bool wifi_link_present = false;
+static uint8_t pva_esp_rx[PVA_ESP_RX_SIZE];
+static volatile uint32_t pva_esp_rx_head = 0u;    // IRQ
+static volatile uint32_t pva_esp_rx_tail = 0u;    // core 1
+static volatile uint32_t pva_esp_rx_lost = 0u;
+
 static inline void __not_in_flash_func(wifi_reset_fifo)(void)
 {
     uint32_t irq_state = save_and_disable_interrupts();
@@ -261,7 +273,7 @@ static inline void __not_in_flash_func(wifi_pio_tx_reset)(void)
 
 static inline void __not_in_flash_func(wifi_service_rx)(void)
 {
-    if (!wifi_uart_ready)
+    if (!wifi_uart_ready || wifi_engine_owned)
     {
         return;
     }
@@ -280,6 +292,16 @@ static void __not_in_flash_func(wifi_uart_rx_irq)(void)
     while (uart_is_readable(WIFI_UART_INSTANCE))
     {
         uint8_t b = (uint8_t)uart_getc(WIFI_UART_INSTANCE);
+        if (wifi_engine_owned)
+        {
+            uint32_t h = pva_esp_rx_head;
+            uint32_t next = (h + 1u) % PVA_ESP_RX_SIZE;
+            if (next == pva_esp_rx_tail) { pva_esp_rx_lost++; continue; }
+            pva_esp_rx[h] = b;
+            __dmb();
+            pva_esp_rx_head = next;
+            continue;
+        }
         if (wifi_rx_count < WIFI_RX_FIFO_SIZE)
         {
             wifi_rx_fifo[wifi_rx_head] = b;
@@ -334,6 +356,11 @@ static inline void __not_in_flash_func(wifi_handle_cmd_write)(uint8_t cmd)
 {
     wifi_uart_init_once();
 
+    if (wifi_engine_owned)
+    {
+        if (cmd == 20u) wifi_reset_fifo();
+        return;
+    }
     if (cmd == 20u)
     {
         wifi_reset_fifo();
@@ -345,6 +372,8 @@ static inline void __not_in_flash_func(wifi_handle_cmd_write)(uint8_t cmd)
 static inline uint8_t __not_in_flash_func(wifi_status_read)(void)
 {
     wifi_uart_init_once();
+    if (wifi_engine_owned)
+        return WIFI_STATUS_QUICK_RX | WIFI_STATUS_FREE_BITS;     // idle: nothing to read
     wifi_service_rx();
 
     uint8_t status = WIFI_STATUS_QUICK_RX | WIFI_STATUS_FREE_BITS;
@@ -374,6 +403,8 @@ static inline uint8_t __not_in_flash_func(wifi_status_read)(void)
 static inline uint8_t __not_in_flash_func(wifi_data_read)(void)
 {
     wifi_uart_init_once();
+    if (wifi_engine_owned)
+        return 0xFFu;
 
     uint8_t data;
     wifi_service_rx();
@@ -411,12 +442,70 @@ static inline bool __not_in_flash_func(wifi_handle_mem_write)(uint16_t addr, uin
     if (addr == WIFI_MEM_DATA_ADDR)
     {
         wifi_uart_init_once();
+        if (wifi_engine_owned)
+            return true;                                        // the engine has the link
         uart_putc_raw(WIFI_UART_INSTANCE, (char)data);
         wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
         return true;
     }
 
     return false;
+}
+
+// ---- PicoVerse Audio Engine: ESP link and stream RAM (core 1) ----
+bool pva_hal_net_open(void)
+{
+    if (!wifi_link_present || !wifi_uart_ready)
+        return false;
+    pva_esp_rx_tail = pva_esp_rx_head;
+    pva_esp_rx_lost = 0u;
+    __dmb();
+    wifi_engine_owned = true;
+    // let a byte the MSX side had in flight finish, then start clean
+    busy_wait_us(200);
+    pva_esp_rx_tail = pva_esp_rx_head;
+    return true;
+}
+
+void pva_hal_net_close(void)
+{
+    // wait for the last request bytes to leave the UART
+    uint32_t t0 = time_us_32();
+    while (wifi_hw_tx_busy() && time_us_32() - t0 < 5000u) { }
+    wifi_engine_owned = false;
+    __dmb();
+}
+
+size_t pva_hal_net_write(const uint8_t *p, size_t n)
+{
+    size_t done = 0;
+    while (done < n && uart_is_writable(WIFI_UART_INSTANCE))
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)p[done++]);
+    return done;
+}
+
+size_t pva_hal_net_read(uint8_t *p, size_t n)
+{
+    size_t done = 0;
+    uint32_t t = pva_esp_rx_tail;
+    uint32_t h = pva_esp_rx_head;
+    __dmb();
+    while (done < n && t != h)
+    {
+        p[done++] = pva_esp_rx[t];
+        t = (t + 1u) % PVA_ESP_RX_SIZE;
+    }
+    __dmb();
+    pva_esp_rx_tail = t;
+    return done;
+}
+
+// The YM2413 table (128 KB) is not used unless MSX-MUSIC runs, and MSX-MUSIC
+// cannot run next to the engine (both need core 1 and the I2S DAC).
+uint8_t *pva_hal_stream_ram(size_t *size)
+{
+    if (msx_music_enabled) { *size = 0; return NULL; }
+    return emu2413_spare_ram(size);
 }
 
 static inline uint8_t __not_in_flash_func(wifi_read_rom_byte)(const uint8_t *wifi_rom_base, uint16_t addr)
@@ -2710,9 +2799,10 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offse
     static sunrise_ide_t ide;
     sunrise_ide_init(&ide);
     sunrise_sd_set_ide_ctx(&ide);
-    multicore_launch_core1_with_stack(core1_pva_task, pva_core1_stack, PVA_CORE1_STACK_SIZE);
+    wifi_link_present = wifi_enable;
     if (wifi_enable)
         wifi_uart_init_once();
+    multicore_launch_core1_with_stack(core1_pva_task, pva_core1_stack, PVA_CORE1_STACK_SIZE);
 
     uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
     uint8_t subslot_reg = 0x20u;                 // page 2 -> mapper for the boot RAM probe

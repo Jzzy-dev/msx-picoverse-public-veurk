@@ -46,8 +46,18 @@ C_STOP   equ #23
 C_NEXT   equ #24
 C_PREV   equ #25
 C_VOLUME equ #27
+C_PLAYU  equ #29
 
 ST_STATE equ 1
+ST_FLAGS equ 2
+ST_ERROR equ 13
+ST_NETST equ 162
+ST_BUFP  equ 163
+ST_NRATE equ 164
+ST_NERR  equ 168
+ST_HTTP  equ 169
+F_STREAM equ #10
+F_BUFFER equ #20
 ST_VOL   equ 3
 ST_ELAPS equ 4
 ST_TOTAL equ 6
@@ -120,7 +130,28 @@ start:
         djnz .copy
 .cend:  xor a
         ld (de),a
-        call mkabs
+        ; a stream URL? "http://" or "https://"
+        ld hl,argbuf
+        ld a,(hl)
+        and #df
+        cp 'H'
+        jr nz,.nourl
+        inc hl
+        ld a,(hl)
+        and #df
+        cp 'T'
+        jr nz,.nourl
+        inc hl
+        ld a,(hl)
+        and #df
+        cp 'T'
+        jr nz,.nourl
+        inc hl
+        ld a,(hl)
+        and #df
+        cp 'P'
+        jp z,playurl
+.nourl: call mkabs
         ; a folder or a file? files have a dot in the last path element
         ld hl,argbuf
         ld c,0
@@ -160,6 +191,19 @@ start:
         ld (args),hl
         ld bc,2
         ld a,C_PLAYI
+        call cmd
+        jp c,noanswer
+        jp nz,failed
+        jp playing
+
+; play a stream: args = URL, 0, station name (none), 0
+playurl:
+        ld hl,argbuf
+        call argstr
+        xor a
+        ld (de),a
+        inc bc
+        ld a,C_PLAYU
         call cmd
         jp c,noanswer
         jp nz,failed
@@ -313,11 +357,19 @@ playing:
         djnz .wait
         call status
         jr c,.keys
+        ld hl,tick
+        inc (hl)
+        ld a,(hl)
+        cp 10                   ; at least once a second (streams: buffer, rate)
+        jr nc,.show
         ld a,(st+ST_ELAPS)
         ld hl,lastsec
         cp (hl)
         jr z,.keys
-        ld (hl),a
+.show:  xor a
+        ld (tick),a
+        ld a,(st+ST_ELAPS)
+        ld (lastsec),a
         call showstatus
 .keys:  ld c,#0b                ; console status
         call BDOS
@@ -395,8 +447,21 @@ showstatus:
         dec a
         jr z,.s1
         ld de,txt_paused
-.s1:    call print
-        ld hl,(st+ST_PLPOS)
+.s1:    ld a,(st+ST_FLAGS)
+        and F_BUFFER
+        jr z,.s2
+        ld de,txt_buffer
+.s2:    call print
+        ld a,(st+ST_FLAGS)
+        and F_STREAM
+        jp nz,.stream
+        ld a,(st+ST_STATE)
+        or a
+        jr nz,.s3
+        ld a,(st+ST_ERROR)
+        cp 9
+        jp z,.neterr
+.s3:    ld hl,(st+ST_PLPOS)
         inc hl
         call printdec
         ld a,'/'
@@ -432,6 +497,74 @@ showstatus:
 .tpad:  ld a,' '
         call putc
         djnz .tpad
+        ret
+; stream: "Play 1:23 B 45% 16.1K title"
+.stream:
+        ld hl,(st+ST_ELAPS)
+        call printtime
+        ld de,txt_b
+        call print
+        ld a,(st+ST_BUFP)
+        ld l,a
+        ld h,0
+        call printdec
+        ld de,txt_pct
+        call print
+        ld hl,(st+ST_NRATE)     ; 0.1 KB/s
+        ld de,10
+        call div16              ; HL = KB/s, A = tenths
+        push af
+        call printdec
+        ld a,'.'
+        call putc
+        pop af
+        add a,'0'
+        call putc
+        ld de,txt_k
+        call print
+        ld a,(LINLEN)
+        sub 23
+        jr c,.snone
+        cp 4
+        jr nc,.sok
+.snone: ld a,4
+.sok:   ld b,a
+        ld hl,st+ST_TITLE
+        jr .t
+; a stream that failed: "Stop net error N HTTP H"
+.neterr:
+        ld de,txt_nerr
+        call print
+        ld a,(st+ST_NERR)
+        ld l,a
+        ld h,0
+        call printdec
+        ld de,txt_http
+        call print
+        ld hl,(st+ST_HTTP)
+        call printdec
+        ld a,(nerrshown)
+        or a
+        ret nz
+        inc a
+        ld (nerrshown),a
+        ld de,txt_nerrs
+        call print
+        ret
+
+; div16 - HL / DE -> HL quotient, A remainder (DE < 256)
+div16:  push bc
+        ld b,16
+        xor a
+        ld c,a
+.d1:    add hl,hl
+        rla
+        cp e
+        jr c,.d2
+        sub e
+        inc l
+.d2:    djnz .d1
+        pop bc
         ret
 
 ;------------------------------------------------------------------------------
@@ -817,6 +950,15 @@ failed: ld de,txt_failed
         cp 6
         ld de,txt_io
         jr z,.why
+        cp 9
+        ld de,txt_net
+        jr z,.why
+        cp 10
+        ld de,txt_nowifi
+        jr z,.why
+        cp 2
+        ld de,txt_args
+        jr z,.why
         call crlf
         jp exit
 .why:   call print
@@ -827,7 +969,7 @@ exit:   ld c,0
 
 ;------------------------------------------------------------------------------
 idtext:         db "PVAUDIO",0
-txt_hello:      db "PicoVerse Audio Engine test 0.1",13,10,"$"
+txt_hello:      db "PicoVerse Audio Engine test 0.2",13,10,"$"
 txt_found:      db "Engine found in slot $"
 txt_notfound:   db "No PicoVerse Audio Engine found. Flash LoadROM -p1.",13,10,"$"
 txt_noanswer:   db "The engine does not answer (3 s).",13,10,"$"
@@ -836,10 +978,20 @@ txt_nocard:     db ": microSD not mounted",13,10,"$"
 txt_nf:         db ": not found",13,10,"$"
 txt_fmt:        db ": not a playable file",13,10,"$"
 txt_io:         db ": read error",13,10,"$"
+txt_net:        db ": network error (L shows the log)",13,10,"$"
+txt_nowifi:     db ": no WiFi link (flash LoadROM -p1 -w)",13,10,"$"
+txt_args:       db ": bad path or URL",13,10,"$"
+txt_buffer:     db "Buf  $"
+txt_b:          db " B$"
+txt_pct:        db "% $"
+txt_k:          db "K $"
+txt_nerr:       db "net error $"
+txt_http:       db " HTTP $"
+txt_nerrs:      db 13,10,"(1 WiFi 2 DNS 3 connect 4 HTTP 5 format 6 timeout 7 closed 8 URL)",13,10,"L log, ESC quit",13,10,"$"
 txt_folder:     db "Folder $"
 txt_entries:    db ", entries: $"
 txt_root:       db "/",0
-txt_usage:      db 13,10,"PVTEST <folder> or PVTEST <file.mp3|.wav|.m3u> to play.",13,10,"$"
+txt_usage:      db 13,10,"PVTEST <folder> or PVTEST <file.mp3|.wav|.m3u> to play,",13,10,"PVTEST http://... for an MP3 stream.",13,10,"$"
 txt_keys:       db "SPACE pause N/P next/prev S stop",13,10,"+/- volume L log ESC quit",13,10,"$"
 txt_playing:    db "Play $"
 txt_paused:     db "Paus $"
@@ -852,6 +1004,8 @@ result:         db 0
 seq:            db 0
 etype:          db 0
 lastsec:        db 0
+tick:           db 0
+nerrshown:      db 0
 t0:             dw 0
 rlen:           dw 0
 count:          dw 0

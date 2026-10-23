@@ -22,6 +22,16 @@ void host_advance_ms(uint32_t ms);
 extern uint32_t host_audio_frames, host_audio_last_rate, host_audio_underruns;
 extern bool host_audio_muted, host_audio_unlimited;
 extern void (*host_audio_sink)(const int16_t *pcm, uint32_t frames, uint32_t rate);
+// simulated ESP (host_esp.c)
+int  host_esp_load_audio(const char *mp3_path);
+void host_esp_reset(void);
+int  host_esp_open_conns(void);
+bool host_esp_owned(void);
+extern bool host_esp_present;
+extern uint8_t host_esp_wifi_state;
+extern uint32_t host_esp_server_bps, host_esp_drop_after, host_esp_stall_at, host_esp_stall_ms, host_esp_tls_ms;
+extern uint32_t host_esp_opens, host_esp_closes, host_esp_tls_opens, host_esp_requests;
+extern char host_esp_last_sni[64], host_esp_last_get[300];
 
 static int failures, checks;
 #define CHECK(cond, ...) do { checks++; if (!(cond)) { failures++; printf("  FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } else if (verbose) { printf("  ok: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -164,6 +174,10 @@ static void build_image(void)
     put_file("0:/MUSIC/readme.txt", "tone.wav");
     put_file("0:/MUSIC/._long.mp3", "tone.wav");
     put("0:/SYMBOS/SYM.COM", "x", 1);
+    {
+        const char *r = "#EXTM3U\r\n#EXTINF:-1,Test FM\r\nhttp://radio.test/stream.mp3\r\n#EXTINF:-1,Secure Radio\r\nhttps://secure.test/stream.mp3\r\n";
+        put("0:/SYMBOS/RADIO.M3U", r, strlen(r));
+    }
     const char *m3u =
         "\xEF\xBB\xBF#EXTM3U\r\n"
         "#EXTINF:20,Sine\r\n"
@@ -171,7 +185,8 @@ static void build_image(void)
         "\r\n"
         "missing track.mp3\r\n"
         "C:\\Users\\me\\Music\\long.mp3\r\n"
-        "http://example.com/stream.mp3\r\n"
+        "#EXTINF:-1,Plain Radio\r\n"
+        "http://radio.test/plain\r\n"
         "/MUSIC/Caf\xC3\xA9 del Mar/04 Tone.wav\r\n";
     put("0:/MUSIC/Mix.m3u", m3u, strlen(m3u));
     // many files in one folder
@@ -204,6 +219,11 @@ int main(int argc, char **argv)
 {
     assets = argc > 1 ? argv[1] : "assets";
     build_image();
+    {
+        char sp[300];
+        snprintf(sp, sizeof sp, "%s/cbr128_v23.mp3", assets);
+        host_esp_load_audio(sp);
+    }
 
     static uint8_t arena[120 * 1024];     // as the firmware: 128 KB left by Nextor - 8 KB core 1 stack
     pva_init(arena, sizeof arena);
@@ -374,7 +394,7 @@ int main(int argc, char **argv)
     CHECK(cmd_u16(PVA_C_PLAY_INDEX, (uint16_t)find(n, "Mix.m3u")) == PVA_OK, "play Mix.m3u");
     run_ms(200);
     read_status();
-    CHECK(st16(PVA_ST_PL_COUNT) == 4 && st[PVA_ST_PL_KIND] == 1, "4 tracks (comments, blank line and URL skipped), %u", st16(PVA_ST_PL_COUNT));
+    CHECK(st16(PVA_ST_PL_COUNT) == 5 && st[PVA_ST_PL_KIND] == 1, "5 entries (comments and blank line skipped, stream URL kept), %u", st16(PVA_ST_PL_COUNT));
     CHECK(!strcmp(ststr(PVA_ST_TITLE), "Sine Cafe Song"), "relative UTF-8 path plays");
     cmd(PVA_C_NEXT, NULL, 0);
     run_ms(200);
@@ -382,9 +402,14 @@ int main(int argc, char **argv)
     CHECK(!strcmp(ststr(PVA_ST_TITLE), "Long One") && st16(PVA_ST_PL_POS) == 2, "missing entry skipped, Windows path found by name");
     CHECK(st16(PVA_ST_TOTAL) >= 239 && st16(PVA_ST_TOTAL) <= 241, "CBR 192k length %u s", st16(PVA_ST_TOTAL));
     cmd(PVA_C_NEXT, NULL, 0);
+    run_ms(300);
+    read_status();
+    CHECK((st[PVA_ST_FLAGS] & PVA_F_STREAM) && !strcmp(ststr(PVA_ST_ALBUM), "Plain Radio") && !strcmp(ststr(PVA_ST_TITLE), "Plain Radio"),
+          "stream entry in the M3U, named by #EXTINF ('%s')", ststr(PVA_ST_TITLE));
+    cmd(PVA_C_NEXT, NULL, 0);
     run_ms(200);
     read_status();
-    CHECK(!strcmp(ststr(PVA_ST_TITLE), "04 Tone"), "absolute path plays");
+    CHECK(!strcmp(ststr(PVA_ST_TITLE), "04 Tone") && !(st[PVA_ST_FLAGS] & PVA_F_STREAM), "absolute path plays after the stream");
     cmd(PVA_C_STOP, NULL, 0);
 
     printf("[play by path, errors]\n");
@@ -413,6 +438,208 @@ int main(int argc, char **argv)
     CHECK(cmd_str(PVA_C_DIR_OPEN, "/") == PVA_E_NOCARD, "DIR_OPEN without a card -> NOCARD");
     host_disk_open("pva_test.img", 0);
     CHECK(cmd_str(PVA_C_DIR_OPEN, "/MUSIC") == PVA_OK, "DIR_OPEN mounts the card again");
+
+
+    printf("[internet radio through the simulated ESP]\n");
+    {
+        char p2[300];
+        snprintf(p2, sizeof p2, "%s/cbr128_v23.mp3", assets);
+        CHECK(host_esp_load_audio(p2) == 0, "stream source %s", p2);
+    }
+    host_audio_unlimited = false;
+    host_audio_underruns = 0;
+    host_esp_server_bps = 24000;
+    {
+        static const char a1[] = "http://radio.test/stream.mp3\0";
+        CHECK(cmd(PVA_C_PLAY_URL, a1, sizeof a1) == PVA_OK, "PLAY_URL accepted at once (the connection is made in the background)");
+    }
+    read_status();
+    CHECK((st[PVA_ST_FLAGS] & PVA_F_STREAM) && (st[PVA_ST_FLAGS] & PVA_F_BUFFERING) && st[PVA_ST_PL_KIND] == 2 && st[PVA_ST_FORMAT] == PVA_DE_URL,
+          "stream flags, buffering, play list kind 2, net state %u", st[PVA_ST_NET_STATE]);
+    CHECK(host_esp_owned(), "the engine owns the ESP link");
+    uint32_t sf0 = host_audio_frames;
+    run_ms(3000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && !(st[PVA_ST_FLAGS] & PVA_F_BUFFERING) && st[PVA_ST_NET_STATE] == PVA_NET_STREAM,
+          "playing after the prefill, net state %u, buffer %u%%", st[PVA_ST_NET_STATE], st[PVA_ST_BUF_PCT]);
+    CHECK(!strcmp(ststr(PVA_ST_ALBUM), "Test FM") && !strcmp(ststr(PVA_ST_TITLE), "Song A") && !strcmp(ststr(PVA_ST_ARTIST), "Artist One"),
+          "station '%s', ICY title split into artist '%s' and title '%s'", ststr(PVA_ST_ALBUM), ststr(PVA_ST_ARTIST), ststr(PVA_ST_TITLE));
+    CHECK(strstr(host_esp_last_get, "GET /stream.mp3 HTTP/1.0\r\nHost: radio.test\r\n") && strstr(host_esp_last_get, "Icy-MetaData: 1"),
+          "HTTP/1.0 request with Host and Icy-MetaData");
+    CHECK(st16(PVA_ST_BITRATE) == 128 && st16(PVA_ST_RATE) > 0 && st16(PVA_ST_TOTAL) == 0 && !(st[PVA_ST_FLAGS] & PVA_F_SEEKABLE),
+          "128 kbit/s, %u Hz, no length, not seekable", st16(PVA_ST_RATE) * 10);
+    CHECK(st16(PVA_ST_BUF_KB) == 96, "96 KB stream buffer (from the spare RAM)");
+    uint32_t rate_hz = st16(PVA_ST_RATE) * 10u;
+    bool seen_b = false;
+    uint32_t f1 = host_audio_frames;
+    for (int i = 0; i < 20; i++)
+    {
+        run_ms(500);
+        read_status();
+        if (!strcmp(ststr(PVA_ST_TITLE), "Song B")) seen_b = true;
+    }
+    uint32_t splayed = host_audio_frames - f1;
+    CHECK(splayed > rate_hz * 95u / 10u && splayed < rate_hz * 105u / 10u, "10 s of audio in 10 s (%u frames)", splayed);
+    CHECK(host_audio_underruns == 0 && st16(PVA_ST_UNDERRUNS) == 0, "no underruns (audio %u, stream %u)", host_audio_underruns, st16(PVA_ST_UNDERRUNS));
+    CHECK(seen_b, "the stream title changes (Song B)");
+    CHECK(st16(PVA_ST_NET_RATE) >= 150 && st16(PVA_ST_NET_RATE) <= 260, "receive rate %u.%u KB/s", st16(PVA_ST_NET_RATE) / 10, st16(PVA_ST_NET_RATE) % 10);
+    CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "Stream: radio.test") && strstr((char *)reply, "KB/s"), "DIAG has the stream:\n%s", reply);
+    (void)sf0;
+
+    printf("[pause a stream, the buffer fills, no false reconnect]\n");
+    cmd(PVA_C_PAUSE, NULL, 0);
+    run_ms(15000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PAUSED && st[PVA_ST_BUF_PCT] >= 95 && st16(PVA_ST_RECONNECTS) == 0,
+          "paused 15 s: buffer %u%%, reconnects %u", st[PVA_ST_BUF_PCT], st16(PVA_ST_RECONNECTS));
+    host_audio_underruns = 0;
+    cmd(PVA_C_PAUSE, NULL, 0);
+    run_ms(3000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && host_audio_underruns == 0, "resumed from the buffer");
+    CHECK(cmd(PVA_C_SEEK, "\x10\x00", 2) == PVA_E_STATE, "seeking a stream is refused");
+    cmd(PVA_C_STOP, NULL, 0);
+    run_ms(50);
+    CHECK(host_esp_open_conns() == 0 && !host_esp_owned(), "STOP closes the connection and gives the ESP back");
+
+    printf("[connection drops: the buffer covers the reconnect]\n");
+    host_esp_drop_after = 150000;
+    host_audio_underruns = 0;
+    {
+        static const char a2[] = "http://radio.test/stream.mp3\0My Station\0";
+        CHECK(cmd(PVA_C_PLAY_URL, a2, sizeof a2) == PVA_OK, "PLAY_URL with a station name");
+    }
+    run_ms(16000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st16(PVA_ST_RECONNECTS) >= 1 && host_audio_underruns == 0 && st16(PVA_ST_UNDERRUNS) == 0,
+          "still playing after %u reconnect(s), underruns %u/%u", st16(PVA_ST_RECONNECTS), host_audio_underruns, st16(PVA_ST_UNDERRUNS));
+    CHECK(!strcmp(ststr(PVA_ST_ALBUM), "My Station"), "the given station name wins over icy-name ('%s')", ststr(PVA_ST_ALBUM));
+    host_esp_drop_after = 0;
+    cmd(PVA_C_STOP, NULL, 0);
+
+    printf("[server stalls longer than the buffer]\n");
+    host_esp_stall_at = 60000;
+    host_esp_stall_ms = 14000;
+    {
+        static const char a3[] = "http://radio.test/plain\0";
+        cmd(PVA_C_PLAY_URL, a3, sizeof a3);
+    }
+    run_ms(30000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st16(PVA_ST_UNDERRUNS) >= 1 && st16(PVA_ST_RECONNECTS) >= 1 && !(st[PVA_ST_FLAGS] & PVA_F_BUFFERING),
+          "no data for 14 s: watchdog reconnect, refill, playing again (underruns %u, reconnects %u)", st16(PVA_ST_UNDERRUNS), st16(PVA_ST_RECONNECTS));
+    host_esp_stall_at = 0;
+    cmd(PVA_C_STOP, NULL, 0);
+
+    printf("[server slower than the bitrate]\n");
+    host_esp_server_bps = 12000;
+    {
+        static const char a4[] = "http://radio.test/plain\0";
+        cmd(PVA_C_PLAY_URL, a4, sizeof a4);
+    }
+    run_ms(20000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st16(PVA_ST_UNDERRUNS) >= 1, "keeps going with refills (%u underruns)", st16(PVA_ST_UNDERRUNS));
+    host_esp_server_bps = 24000;
+    cmd(PVA_C_STOP, NULL, 0);
+
+    printf("[redirects, .pls play list, HTTPS]\n");
+    {
+        static const char a5[] = "http://radio.test/redirect\0";
+        cmd(PVA_C_PLAY_URL, a5, sizeof a5);
+    }
+    run_ms(2500);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st[PVA_ST_NET_STATE] == PVA_NET_STREAM && st16(PVA_ST_HTTP) == 200, "302 to radio2.test:8000 followed");
+    CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "Stream: radio2.test"), "now on radio2.test");
+    {
+        static const char a6[] = "http://radio.test/relative\0";
+        cmd(PVA_C_PLAY_URL, a6, sizeof a6);
+    }
+    run_ms(2500);
+    read_status();
+    CHECK(st[PVA_ST_NET_STATE] == PVA_NET_STREAM && !strcmp(ststr(PVA_ST_ALBUM), "Test FM"), "relative Location followed");
+    CHECK(cmd_str(PVA_C_PLAY_PATH, "http://radio.test/list.pls") == PVA_OK, "PLAY_PATH takes a URL too");
+    run_ms(3000);
+    read_status();
+    CHECK(st[PVA_ST_NET_STATE] == PVA_NET_STREAM && !strcmp(ststr(PVA_ST_ALBUM), "Test FM"), ".pls play list opened ('%s')", ststr(PVA_ST_ALBUM));
+    uint32_t tls0 = host_esp_tls_opens;
+    {
+        static const char a7[] = "https://secure.test/stream.mp3\0";
+        cmd(PVA_C_PLAY_URL, a7, sizeof a7);
+    }
+    run_ms(5000);
+    read_status();
+    CHECK(host_esp_tls_opens == tls0 + 1 && !strcmp(host_esp_last_sni, "secure.test"), "TLS open with the host name for SNI ('%s')", host_esp_last_sni);
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && !strcmp(ststr(PVA_ST_ALBUM), "Secure Radio"), "HTTPS stream plays");
+    CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "(TLS)"), "DIAG shows TLS and the open time");
+    cmd(PVA_C_STOP, NULL, 0);
+
+    printf("[next station while a stream plays]\n");
+    {
+        static const char an[] = "http://radio.test/stream.mp3\0";
+        cmd(PVA_C_PLAY_URL, an, sizeof an);
+        run_ms(3000);
+        int r = cmd(PVA_C_NEXT, NULL, 0);
+        CHECK(r == PVA_OK, "NEXT on a playing stream answers (%d)", r);
+        run_ms(3000);
+        read_status();
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st[PVA_ST_NET_STATE] == PVA_NET_STREAM && st16(PVA_ST_TRACK_ID) > 0,
+              "the station started again (net state %u)", st[PVA_ST_NET_STATE]);
+        cmd(PVA_C_STOP, NULL, 0);
+        CHECK(cmd_str(PVA_C_PLAY_PATH, "/SYMBOS/RADIO.M3U") == PVA_OK, "M3U with two stations");
+        run_ms(4000);
+        read_status();
+        CHECK(!strcmp(ststr(PVA_ST_ALBUM), "Test FM") && st[PVA_ST_NET_STATE] == PVA_NET_STREAM, "first station '%s'", ststr(PVA_ST_ALBUM));
+        r = cmd(PVA_C_NEXT, NULL, 0);
+        CHECK(r == PVA_OK, "NEXT to the HTTPS station answers (%d)", r);
+        for (int i = 0; i < 8; i++) { run_ms(1000); read_status(); printf("    t+%ds state %u net %u buf %u%% album '%s' title '%s'\n", i + 1, st[PVA_ST_STATE], st[PVA_ST_NET_STATE], st[PVA_ST_BUF_PCT], ststr(PVA_ST_ALBUM), ststr(PVA_ST_TITLE)); }
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && !strcmp(ststr(PVA_ST_ALBUM), "Secure Radio") && st[PVA_ST_NET_STATE] == PVA_NET_STREAM,
+              "second station plays ('%s')", ststr(PVA_ST_ALBUM));
+        cmd(PVA_C_STOP, NULL, 0);
+    }
+
+    printf("[stream errors]\n");
+    struct { const char *u; uint8_t nerr; uint16_t http; const char *what; } errs[] = {
+        { "http://radio.test/aac", PVA_NERR_FORMAT, 200, "AAC refused" },
+        { "http://radio.test/missing", PVA_NERR_HTTP, 404, "404" },
+        { "http://nowhere.test/x.mp3", PVA_NERR_DNS, 0, "unknown host" },
+        { "http://radio2.test:9999/live", PVA_NERR_CONNECT, 0, "connection refused" },
+    };
+    for (unsigned i = 0; i < sizeof errs / sizeof errs[0]; i++)
+    {
+        char a[300];
+        size_t l = strlen(errs[i].u);
+        memcpy(a, errs[i].u, l + 1);
+        a[l + 1] = 0;
+        cmd(PVA_C_PLAY_URL, a, l + 2);
+        run_ms(1500);
+        read_status();
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_STOPPED && st[PVA_ST_ERROR] == PVA_E_NET && st[PVA_ST_NET_ERR] == errs[i].nerr &&
+              (!errs[i].http || st16(PVA_ST_HTTP) == errs[i].http) && !host_esp_owned(),
+              "%s: stopped, net error %u, HTTP %u", errs[i].what, st[PVA_ST_NET_ERR], st16(PVA_ST_HTTP));
+    }
+    host_esp_wifi_state = 1;
+    {
+        static const char a8[] = "http://radio.test/plain\0";
+        cmd(PVA_C_PLAY_URL, a8, sizeof a8);
+    }
+    run_ms(10000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_STOPPED && st[PVA_ST_NET_ERR] == PVA_NERR_NOWIFI, "WiFi not connected: gives up after a while");
+    host_esp_wifi_state = 2;
+    host_esp_present = false;
+    {
+        static const char a9[] = "http://radio.test/plain\0";
+        CHECK(cmd(PVA_C_PLAY_URL, a9, sizeof a9) == PVA_E_NOWIFI, "no ESP (image without -w): NOWIFI");
+    }
+    host_esp_present = true;
+    CHECK(cmd_str(PVA_C_PLAY_URL, "ftp://radio.test/x") == PVA_E_ARGS, "only http and https");
+    CHECK(cmd(PVA_C_LOG, NULL, 0) == PVA_OK && strstr((char *)reply, "stream:"), "the log tells the story:\n%s", reply);
+    run_ms(100);
+    CHECK(host_esp_open_conns() == 0 && !host_esp_owned() && host_esp_opens == host_esp_closes,
+          "no ESP connection left open (%u opened, %u closed, %d open)", host_esp_opens, host_esp_closes, host_esp_open_conns());
+    host_audio_unlimited = true;
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -331,71 +331,136 @@ static void activate_row(unsigned short row)
 unsigned short shown_track = 0xFFFF, shown_elapsed = 0xFFFF, shown_total = 0xFFFF;
 unsigned char shown_state = 0xFF, shown_prog = 0xFF, shown_mode = 0xFF, shown_vol = 0xFF;
 
+/* copy 'src' into a control text and redraw it, only when it changed */
+static void put_text(char *dst, unsigned short size, char *src, unsigned char ctl)
+{
+    if (!strncmp(dst, src, size - 1))
+        return;
+    strncpy(dst, src, size - 1);
+    dst[size - 1] = 0;
+    redraw(ctl);
+}
+
+static char *net_reason(unsigned char e)
+{
+    switch (e) {
+    case PVA_NERR_NOWIFI:  return "WiFi not connected";
+    case PVA_NERR_DNS:     return "host not found";
+    case PVA_NERR_CONNECT: return "connection refused";
+    case PVA_NERR_HTTP:    return "server error";
+    case PVA_NERR_FORMAT:  return "not MP3 (AAC/Ogg/HLS)";
+    case PVA_NERR_TIMEOUT: return "no answer";
+    case PVA_NERR_CLOSED:  return "closed by the server";
+    case PVA_NERR_URL:     return "bad address";
+    }
+    return "network error";
+}
+
+static unsigned char shown_err;
+/* Streams change their buffer level and rate all the time. Each redraw costs
+   the desktop a lot of time on a Z80, and when the desktop's message queue is
+   full a redraw request waits (spinning) for room: the desktop locks up. So
+   those details are refreshed at most once a second, in coarse steps. */
+static unsigned char slow_ticks, shown_rate_ticks;
+
 static void update_display(void)
 {
-    char t[24], t2[12];
+    char t[84], t2[12];
     unsigned short el, tot;
-    unsigned char state, prog;
+    unsigned char state, prog, flags, stream, bufp;
     unsigned short tid;
 
     if (!read_status())
         return;
     state = (unsigned char)st[PVA_ST_STATE];
+    flags = (unsigned char)st[PVA_ST_FLAGS];
+    stream = (flags & PVA_F_STREAM) != 0;
     tid = ST16(PVA_ST_TRACK_ID);
     el = ST16(PVA_ST_ELAPSED);
     tot = ST16(PVA_ST_TOTAL);
+    if (stream && el == shown_elapsed && tid == shown_track && state == shown_state && ++slow_ticks < 5)
+        return;                                 /* nothing that must be shown now */
+    slow_ticks = 0;
+    bufp = (unsigned char)((((unsigned char)st[PVA_ST_BUF_PCT] + 2) / 5) * 5);
 
-    if (tid != shown_track || state != shown_state) {
-        if (state == PVA_STATE_STOPPED && st[PVA_ST_TITLE] == 0) {
-            strcpy(txt_title, "No track");
-            txt_artist[0] = 0;
-            txt_fmt[0] = 0;
-        } else {
-            strncpy(txt_title, st + PVA_ST_TITLE, TXT_TITLE_SIZE - 1);
-            txt_title[TXT_TITLE_SIZE - 1] = 0;
-            txt_artist[0] = 0;
-            if (st[PVA_ST_ARTIST]) {
-                strcpy(txt_artist, st + PVA_ST_ARTIST);
-                if (st[PVA_ST_ALBUM]) {
-                    strcat(txt_artist, " - ");
-                    strcat(txt_artist, st + PVA_ST_ALBUM);
-                }
+    /* title, second line, format */
+    if (state == PVA_STATE_STOPPED && st[PVA_ST_TITLE] == 0) {
+        put_text(txt_title, TXT_TITLE_SIZE, "No track", C_TITLE);
+        put_text(txt_artist, TXT_ARTIST_SIZE, "", C_ARTIST);
+        put_text(txt_fmt, TXT_FMT_SIZE, "", C_FMT);
+    } else {
+        put_text(txt_title, TXT_TITLE_SIZE, st + PVA_ST_TITLE, C_TITLE);
+        t[0] = 0;
+        if (st[PVA_ST_ARTIST]) {
+            strcpy(t, st + PVA_ST_ARTIST);
+            if (st[PVA_ST_ALBUM]) {
+                strcat(t, " - ");
+                strcat(t, st + PVA_ST_ALBUM);
             }
-            sprintf(txt_fmt, "%s %uk %u.%ukHz%s", st[PVA_ST_FORMAT] == PVA_DE_WAV ? "WAV" : "MP3",
+        } else if (stream && strcmp(st + PVA_ST_ALBUM, st + PVA_ST_TITLE))
+            strcpy(t, st + PVA_ST_ALBUM);           /* the station under the stream title */
+        put_text(txt_artist, TXT_ARTIST_SIZE, t, C_ARTIST);
+        if (stream && (flags & PVA_F_BUFFERING))
+            sprintf(t, "Buffering %u%%", bufp);
+        else if (stream)
+            sprintf(t, "%uk %u.%ukHz %u%%", ST16(PVA_ST_BITRATE), ST16(PVA_ST_RATE) / 100,
+                    (ST16(PVA_ST_RATE) / 10) % 10, bufp);
+        else
+            sprintf(t, "%s %uk %u.%ukHz%s", st[PVA_ST_FORMAT] == PVA_DE_WAV ? "WAV" : "MP3",
                     ST16(PVA_ST_BITRATE), ST16(PVA_ST_RATE) / 100, (ST16(PVA_ST_RATE) / 10) % 10,
                     st[PVA_ST_CHANNELS] == 1 ? " mono" : "");
-        }
-        redraw(C_TITLE);
-        redraw(C_ARTIST);
-        redraw(C_FMT);
+        put_text(txt_fmt, TXT_FMT_SIZE, t, C_FMT);
     }
+
+    /* play button, status bar */
     if (state != shown_state) {
         strcpy(txt_play, state == PVA_STATE_PLAYING ? "Pause" : "Play");
         redraw(C_PLAY);
-        if (state == PVA_STATE_PLAYING) {
-            sprintf(t, "Playing %u of %u", ST16(PVA_ST_PL_POS) + 1, ST16(PVA_ST_PL_COUNT));
-            set_status(t);
-        } else if (state == PVA_STATE_PAUSED)
-            set_status("Paused");
-        else if (shown_state != 0xFF)
-            set_status("Stopped");
-    } else if (state == PVA_STATE_PLAYING && tid != shown_track) {
-        sprintf(t, "Playing %u of %u", ST16(PVA_ST_PL_POS) + 1, ST16(PVA_ST_PL_COUNT));
-        set_status(t);
     }
-    if (el != shown_elapsed || tot != shown_total || tid != shown_track) {
+    t[0] = 0;
+    if (state == PVA_STATE_PLAYING) {
+        sprintf(t, "Playing %u of %u", ST16(PVA_ST_PL_POS) + 1, ST16(PVA_ST_PL_COUNT));
+        if (stream) {
+            unsigned char ns = (unsigned char)st[PVA_ST_NET_STATE];
+            if (ns == PVA_NET_LOOKUP || ns == PVA_NET_CONNECT || ns == PVA_NET_REQUEST)
+                strcat(t, ns == PVA_NET_CONNECT ? " - connecting" : " - opening");
+            else if (ns == PVA_NET_RETRY)
+                strcat(t, " - reconnecting");
+            else if (++shown_rate_ticks >= 2 || !strstr(txt_status, "KB/s")) {
+                shown_rate_ticks = 0;           /* the rate: every 2 s */
+                sprintf(t + strlen(t), " - %u.%u KB/s", ST16(PVA_ST_NET_RATE) / 10, ST16(PVA_ST_NET_RATE) % 10);
+            } else
+                t[0] = 0;                       /* keep the status as it is */
+        }
+    } else if (state == PVA_STATE_PAUSED)
+        strcpy(t, "Paused");
+    else if ((unsigned char)st[PVA_ST_ERROR] == PVA_E_NET) {
+        sprintf(t, "Stream stopped: %s", net_reason((unsigned char)st[PVA_ST_NET_ERR]));
+        if ((unsigned char)st[PVA_ST_NET_ERR] == PVA_NERR_HTTP)
+            sprintf(t + strlen(t), " %u", ST16(PVA_ST_HTTP));
+    } else if (shown_state != 0xFF && (shown_state != state || shown_err == PVA_E_NET))
+        strcpy(t, "Stopped");
+    shown_err = (unsigned char)st[PVA_ST_ERROR];
+    if (t[0] && strcmp(t, txt_status))
+        set_status(t);
+
+    /* time and progress (a stream shows its buffer fill) */
+    if (el != shown_elapsed || tot != shown_total || tid != shown_track || stream) {
         if (state == PVA_STATE_STOPPED && st[PVA_ST_TITLE] == 0)
-            strcpy(txt_time, "--:-- / --:--");
+            strcpy(t, "--:-- / --:--");
         else {
             fmt_time(t, el);
             if (tot) {
                 fmt_time(t2, tot);
-                sprintf(txt_time, "%s / %s", t, t2);
-            } else
-                strcpy(txt_time, t);
+                strcat(t, " / ");
+                strcat(t, t2);
+            }
         }
-        redraw(C_TIME);
-        prog = tot ? (unsigned char)(((unsigned long)el * 255UL) / tot) : 0;
+        put_text(txt_time, TXT_TIME_SIZE, t, C_TIME);
+        if (stream)
+            prog = (unsigned char)(((unsigned short)bufp * 255U) / 100U);
+        else
+            prog = tot ? (unsigned char)(((unsigned long)el * 255UL) / tot) : 0;
         if (prog != shown_prog) {
             ctl_prog.param = ((unsigned short)prog << 8) | PROG_COLORS;
             redraw(C_PROG);

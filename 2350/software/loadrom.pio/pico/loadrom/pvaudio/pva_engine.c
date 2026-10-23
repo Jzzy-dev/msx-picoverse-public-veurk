@@ -64,6 +64,16 @@ static const uint8_t *stack_base;
 static size_t   stack_size;
 static bool     ready;              // all buffers allocated; else only PING/LOG/DIAG
 
+// streams: play list entries "http(s)://...", optionally followed by
+// STATION_SEP and a station name (from #EXTINF or PLAY_URL)
+#define STATION_SEP     '\x1f'
+#define URL_MAX_LEN     255u
+static bool     buffering;          // a stream fills its buffer, no decoding
+static uint32_t prefill;            // bytes to wait for before decoding
+static uint16_t stream_underruns;
+static uint8_t  shown_title_gen;
+static char     given_station[PVA_ST_ALBUM_LEN];
+
 // ---------------------------------------------------------------- helpers
 static void fs_refresh(void)
 {
@@ -400,7 +410,8 @@ static int load_m3u(const char *m3u_path)
     if (s) *s = 0;
     memset(m3u_lr, 0, sizeof *m3u_lr);
     m3u_lr->f = m3u_file;
-    char line[PATH_MAX_LEN + 1], path[PATH_MAX_LEN + 1];
+    char line[URL_MAX_LEN + 8], path[PATH_MAX_LEN + 1];
+    char extinf[PVA_ST_ALBUM_LEN] = "";
     bool first = true;
     while (read_line(m3u_lr, line, sizeof line))
     {
@@ -410,8 +421,25 @@ static int load_m3u(const char *m3u_path)
         while (*p == ' ' || *p == '\t') p++;
         size_t l = strlen(p);
         while (l && (p[l - 1] == ' ' || p[l - 1] == '\t')) p[--l] = 0;
+        if (!strncmp(p, "#EXTINF:", 8))
+        {
+            const char *c = strchr(p, ',');
+            if (c) pva_copy_ascii(extinf, sizeof extinf, c + 1, strlen(c + 1));
+            continue;
+        }
         if (!*p || *p == '#') continue;
-        if (strstr(p, "://")) continue;          // stream URLs: later
+        if (strstr(p, "://"))
+        {
+            if (strncmp(p, "http://", 7) && strncmp(p, "https://", 8)) { extinf[0] = 0; continue; }
+            char e[URL_MAX_LEN + PVA_ST_ALBUM_LEN + 2];
+            if (strlen(p) > URL_MAX_LEN) { extinf[0] = 0; continue; }
+            int n = snprintf(e, sizeof e, "%s", p);
+            if (extinf[0]) snprintf(e + n, sizeof e - (size_t)n, "%c%s", STATION_SEP, extinf);
+            extinf[0] = 0;
+            if (!pl_add(e)) { pva_log("play list cut at %u", (unsigned)pl_count); break; }
+            continue;
+        }
+        extinf[0] = 0;
         for (char *q = p; *q; q++) if (*q == '\\') *q = '/';
         if (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':') p += 2;
         if (!pva_kind_from_name(p) || pva_kind_from_name(p) == PVA_DE_M3U) continue;
@@ -436,8 +464,56 @@ static void set_title_from_path(const char *path)
     memcpy(info.title, tmp, sizeof info.title);
 }
 
+static bool is_url(const char *p) { return !strncmp(p, "http://", 7) || !strncmp(p, "https://", 8); }
+
+static void split_stream_title(const char *t)
+{
+    // "Artist - Title" -> artist, title
+    const char *d = strstr(t, " - ");
+    if (d && d != t)
+    {
+        size_t a = (size_t)(d - t);
+        if (a >= sizeof info.artist) a = sizeof info.artist - 1;
+        memcpy(info.artist, t, a);
+        info.artist[a] = 0;
+        snprintf(info.title, sizeof info.title, "%s", d + 3);
+    }
+    else
+    {
+        snprintf(info.title, sizeof info.title, "%s", t);
+        info.artist[0] = 0;
+    }
+}
+
+static int open_stream(const char *entry)
+{
+    char u[URL_MAX_LEN + 1];
+    const char *sep = strchr(entry, STATION_SEP);
+    size_t n = sep ? (size_t)(sep - entry) : strlen(entry);
+    if (n > URL_MAX_LEN) return PVA_E_ARGS;
+    memcpy(u, entry, n);
+    u[n] = 0;
+    given_station[0] = 0;
+    if (sep) snprintf(given_station, sizeof given_station, "%s", sep + 1);
+    int r = pva_net_start(u);
+    if (r != PVA_OK) return r;
+    r = pva_dec_open_stream(&info);
+    if (r != PVA_OK) { pva_net_stop(); return r; }
+    snprintf(info.album, sizeof info.album, "%s", given_station);
+    snprintf(info.title, sizeof info.title, "%s", given_station[0] ? given_station : pva_net_host());
+    buffering = true;
+    prefill = (uint32_t)(pva_net_capacity() / 4u);
+    if (prefill > 24u * 1024u) prefill = 24u * 1024u;
+    stream_underruns = 0;
+    shown_title_gen = 0;
+    return PVA_OK;
+}
+
 static int open_track(const char *path)
 {
+    if (is_url(path)) return open_stream(path);
+    buffering = false;
+    if (pva_net_active()) pva_net_stop();
     char fp[PATH_MAX_LEN + 8];
     fatfs_path(fp, sizeof fp, path);
     fs_refresh();
@@ -471,7 +547,7 @@ static int play_pos(uint16_t pos)
             track_id++;
             play_error = 0;
             state = PVA_STATE_PLAYING;
-            pva_hal_audio_mute(false);
+            pva_hal_audio_mute(buffering);      // a stream stays silent until its buffer is filled
             pva_log("play %u/%u %.32s", (unsigned)(p + 1), (unsigned)pl_count, info.title);
             status_dirty = true;
             return PVA_OK;
@@ -486,6 +562,8 @@ static int play_pos(uint16_t pos)
 
 static void stop_playback(void)
 {
+    if (pva_dec_is_stream() || pva_net_active()) pva_net_stop();
+    buffering = false;
     pva_dec_close();
     state = PVA_STATE_STOPPED;
     pva_hal_audio_mute(true);
@@ -494,6 +572,14 @@ static void stop_playback(void)
 
 static void track_ended(void)
 {
+    if (pva_dec_is_stream())
+    {
+        // a stream only ends when it failed for good
+        play_error = PVA_E_NET;
+        stop_playback();
+        pva_log("stream ended (error %u)", (unsigned)pva_net_stats()->err);
+        return;
+    }
     if (mode & PVA_MODE_REPEAT_ONE) { play_pos(pl_pos); return; }
     if (pl_pos + 1u < pl_count) { play_pos((uint16_t)(pl_pos + 1u)); return; }
     if (mode & PVA_MODE_REPEAT_ALL)
@@ -543,10 +629,34 @@ static int cmd_play_index(void)
     return play_pos(start);
 }
 
+// args: URL, 0, optional station name, 0
+static int cmd_play_url(void)
+{
+    args[PVA_ARGS_SIZE - 1] = 0;
+    const char *u = (const char *)args;
+    size_t ul = strlen(u);
+    if (!is_url(u) || ul > URL_MAX_LEN) return PVA_E_ARGS;
+    const char *name = ul + 1 < PVA_ARGS_SIZE ? u + ul + 1 : "";
+    char e[URL_MAX_LEN + PVA_ST_ALBUM_LEN + 2];
+    int n = snprintf(e, sizeof e, "%s", u);
+    if (name[0])
+    {
+        char nm[PVA_ST_ALBUM_LEN];
+        pva_copy_ascii(nm, sizeof nm, name, strlen(name));
+        snprintf(e + n, sizeof e - (size_t)n, "%c%s", STATION_SEP, nm);
+    }
+    stop_playback();
+    pl_clear();
+    pl_kind = 2;
+    pl_add(e);
+    return play_pos(0);
+}
+
 static int cmd_play_path(void)
 {
     char path[PATH_MAX_LEN + 1];
     args[PVA_ARGS_SIZE - 1] = 0;
+    if (is_url((const char *)args)) return cmd_play_url();
     if (!normalise_path(path, sizeof path, (const char *)args) || !path[0]) return PVA_E_ARGS;
     if (!mounted && !do_mount()) return PVA_E_NOCARD;
     stop_playback();
@@ -590,7 +700,7 @@ static size_t stack_used(void)
 // ---------------------------------------------------------------- text replies
 static int cmd_diag(void)
 {
-    char t[1024];
+    char t[1400];
     uint32_t up = pva_hal_millis() / 1000u;
     int n = snprintf(t, sizeof t,
         "PicoVerse Audio Engine %d.%d (API %d)\r\n"
@@ -614,6 +724,22 @@ static int cmd_diag(void)
         (unsigned)state, (unsigned)play_error, (int)last_fr, (int)pva_dec_last_fresult(),
         (unsigned)info.sample_rate, (unsigned)info.channels, (unsigned long)info.bitrate_kbps, (unsigned long)info.total_seconds,
         (unsigned long)pva_arena_free(), (unsigned long)stack_used(), (unsigned long)stack_size, (unsigned)pva_log_count());
+    const pva_net_stats_t *ns = pva_net_stats();
+    if (pva_net_active() || ns->rx_bytes || ns->err)
+        n += snprintf(t + n, sizeof t - (size_t)n,
+            "Stream: %.40s%s, net state %u, error %u, HTTP %u\r\n"
+            "  %lu.%lu KB/s, %lu KB received, buffer %lu/%lu KB%s\r\n"
+            "  reconnects %u, gaps %lu (longest %lu ms), underruns %u\r\n"
+            "  DNS %lu ms, open %lu ms, read size %u, ESP errors %lu, lost %lu\r\n",
+            pva_net_host(), ns->tls ? " (TLS)" : "", (unsigned)ns->state, (unsigned)ns->err, (unsigned)ns->http,
+            (unsigned long)(ns->rate_bps / 1000u), (unsigned long)((ns->rate_bps / 100u) % 10u),
+            (unsigned long)(ns->rx_bytes / 1024u), (unsigned long)(pva_net_buffered() / 1024u),
+            (unsigned long)(pva_net_capacity() / 1024u), buffering ? " filling" : "",
+            (unsigned)ns->reconnects, (unsigned long)ns->gaps, (unsigned long)ns->longest_gap_ms, (unsigned)stream_underruns,
+            (unsigned long)ns->dns_ms, (unsigned long)ns->open_ms, (unsigned)ns->rcv_max,
+            (unsigned long)ns->esp_errors, (unsigned long)ns->overflow);
+    else if (!pva_net_capacity())
+        n += snprintf(t + n, sizeof t - (size_t)n, "Streams: no buffer memory\r\n");
     set_reply_text(t, (size_t)n);
     return PVA_OK;
 }
@@ -644,14 +770,16 @@ static int execute(uint8_t code)
         case PVA_C_DIR_ENTER: return cmd_dir_enter();
         case PVA_C_PLAY_INDEX: return cmd_play_index();
         case PVA_C_PLAY_PATH: return cmd_play_path();
+        case PVA_C_PLAY_URL:  return cmd_play_url();
         case PVA_C_PAUSE:
             if (state == PVA_STATE_PLAYING) { state = PVA_STATE_PAUSED; pva_hal_audio_mute(true); }
-            else if (state == PVA_STATE_PAUSED) { state = PVA_STATE_PLAYING; pva_hal_audio_mute(false); }
+            else if (state == PVA_STATE_PAUSED) { state = PVA_STATE_PLAYING; pva_hal_audio_mute(buffering); }
             else if (state == PVA_STATE_STOPPED && pl_count) return play_pos(pl_pos);
             else return PVA_E_STATE;
             return PVA_OK;
         case PVA_C_STOP:
             stop_playback();
+            play_error = 0;
             return PVA_OK;
         case PVA_C_NEXT:
             if (!pl_count) return PVA_E_STATE;
@@ -719,9 +847,12 @@ static void publish_status(void)
     uint8_t vl = 0, vr = 0;
     if (state == PVA_STATE_PLAYING) pva_dec_vu(&vl, &vr);
     bool active = pva_dec_active();
+    bool strm = active && pva_dec_is_stream();
+    if (strm) pva_dec_frame_info(&info);
     st8(PVA_ST_STATE, state);
     st8(PVA_ST_FLAGS, (uint8_t)((mounted ? PVA_F_MOUNTED : 0) | (info.tagged && active ? PVA_F_TAGS : 0) |
-                                (info.seekable && active ? PVA_F_SEEKABLE : 0) | (dir_open ? PVA_F_DIR_OPEN : 0)));
+                                (info.seekable && active ? PVA_F_SEEKABLE : 0) | (dir_open ? PVA_F_DIR_OPEN : 0) |
+                                (strm ? PVA_F_STREAM : 0) | (strm && buffering ? PVA_F_BUFFERING : 0)));
     st8(PVA_ST_VOLUME, volume);
     st16(PVA_ST_ELAPSED, active ? (uint16_t)pva_dec_elapsed() : 0);
     st16(PVA_ST_TOTAL, active ? (uint16_t)info.total_seconds : 0);
@@ -736,7 +867,7 @@ static void publish_status(void)
     st16(PVA_ST_PL_POS, pl_pos);
     st16(PVA_ST_PL_COUNT, pl_count);
     st8(PVA_ST_MODE, mode);
-    st16(PVA_ST_UNDERRUNS, 0);
+    st16(PVA_ST_UNDERRUNS, stream_underruns);
     st8(PVA_ST_MOUNT_FR, mount_fr);
     st8(PVA_ST_DIR_GEN, dir_gen);
     st16(PVA_ST_UPTIME, (uint16_t)(pva_hal_millis() / 1000u));
@@ -746,6 +877,17 @@ static void publish_status(void)
     ststr(PVA_ST_ALBUM, active ? info.album : "", PVA_ST_ALBUM_LEN);
     st8(PVA_ST_FORMAT, active ? info.format : 0);
     st8(PVA_ST_PL_KIND, pl_kind);
+    {
+        const pva_net_stats_t *ns = pva_net_stats();
+        size_t cap = pva_net_capacity();
+        st8(PVA_ST_NET_STATE, strm ? ns->state : 0);
+        st8(PVA_ST_BUF_PCT, strm && cap ? (uint8_t)(pva_net_buffered() * 100u / cap) : 0);
+        st16(PVA_ST_NET_RATE, strm ? (uint16_t)(ns->rate_bps / 100u) : 0);
+        st16(PVA_ST_RECONNECTS, strm ? ns->reconnects : 0);
+        st8(PVA_ST_NET_ERR, ns->err);
+        st16(PVA_ST_HTTP, ns->http);
+        st16(PVA_ST_BUF_KB, (uint16_t)(cap / 1024u));
+    }
     st_new[PVA_ST_SEQ] = st_pub[PVA_ST_SEQ];
     if (!memcmp(st_new, st_pub, PVA_STATUS_SIZE)) return;
     seq = (uint8_t)(seq | 1u);
@@ -775,13 +917,14 @@ void pva_core1_init(void)
     pl_pool = pva_alloc(PL_POOL);
     reply = pva_alloc(PVA_REPLY_SIZE);
     bool dec_ok = pva_dec_init();
+    bool net_ok = pva_net_init();
     bool hal_ok = pva_hal_audio_init();
     pva_hal_audio_mute(true);
     pva_log("engine %d.%d start, arena free %lu", PVA_FW_MAJOR, PVA_FW_MINOR, (unsigned long)pva_arena_free());
     static uint8_t reply_fallback[64];
     if (!reply) { reply = reply_fallback; reply_cap = sizeof reply_fallback; }
     ready = dir_ent && dir_pool && pl_off && pl_order && pl_pool && reply != reply_fallback && dec_ok &&
-            args && st_new && st_pub && m3u_file && m3u_lr;
+            args && st_new && st_pub && m3u_file && m3u_lr && net_ok;
     if (!ready)
         pva_log("ERROR: arena too small, engine disabled");
     if (!hal_ok)
@@ -794,7 +937,7 @@ void pva_core1_init(void)
     pva_win[PVA_R_BUSY] = 0;
 }
 
-bool pva_core1_busy(void) { return state == PVA_STATE_PLAYING; }
+bool pva_core1_busy(void) { return state == PVA_STATE_PLAYING || pva_net_active(); }
 bool pva_command_pending(void) { return pva_mailbox.post_count != 0; }
 
 bool pva_core1_poll(void)
@@ -811,9 +954,52 @@ bool pva_core1_poll(void)
         work = true;
     }
 
-    if (ready && state == PVA_STATE_PLAYING)
+    if (pva_net_active())
+    {
+        pva_net_poll();
+        const pva_net_stats_t *ns = pva_net_stats();
+        if (ns->title_gen != shown_title_gen && pva_dec_is_stream())
+        {
+            shown_title_gen = ns->title_gen;
+            split_stream_title(pva_net_stream_title());
+            status_dirty = true;
+        }
+        if (pva_dec_is_stream() && !given_station[0] && pva_net_station()[0] && strcmp(info.album, pva_net_station()))
+        {
+            snprintf(info.album, sizeof info.album, "%s", pva_net_station());
+            if (!info.artist[0] && !shown_title_gen) snprintf(info.title, sizeof info.title, "%s", info.album);
+            status_dirty = true;
+        }
+    }
+
+    if (ready && state == PVA_STATE_PLAYING && pva_dec_is_stream() && buffering)
+    {
+        // wait until the buffer has 'prefill' bytes (or the stream gave up)
+        size_t b = pva_net_buffered();
+        if (b >= prefill || (pva_net_stats()->state == PVA_NET_FAILED && b))
+        {
+            buffering = false;
+            pva_hal_audio_mute(false);
+            status_dirty = true;
+            pva_log("stream: playing, buffer %lu KB", (unsigned long)(b / 1024u));
+        }
+        else if (pva_net_ended())
+            track_ended();
+    }
+    else if (ready && state == PVA_STATE_PLAYING)
     {
         int r = pva_dec_step();
+        if (r == 0 && pva_dec_is_stream() && pva_net_buffered() < 2048u && !pva_net_ended())
+        {
+            // the buffer ran dry: fill it again (more this time)
+            buffering = true;
+            pva_hal_audio_mute(true);
+            stream_underruns++;
+            prefill = (uint32_t)(pva_net_capacity() / 2u);
+            if (prefill > 48u * 1024u) prefill = 48u * 1024u;
+            status_dirty = true;
+            pva_log("stream: buffer empty, refilling");
+        }
         if (r != 0) work = true;
         if (r < 0)
         {

@@ -6,9 +6,12 @@ _transfer char icon[19] = { 0x02, 0x08, 0x08, 0x00, 0x00, 0x33, 0x00, 0x37, 0x08
 
 #define TXT_TITLE_SIZE 50
 _data char txt_title[TXT_TITLE_SIZE];
-_data char txt_artist[84];
-_data char txt_time[20];
-_data char txt_fmt[24];
+#define TXT_ARTIST_SIZE 84
+_data char txt_artist[TXT_ARTIST_SIZE];
+#define TXT_TIME_SIZE 20
+_data char txt_time[TXT_TIME_SIZE];
+#define TXT_FMT_SIZE 24
+_data char txt_fmt[TXT_FMT_SIZE];
 #define TXT_PATH_SIZE 64
 _data char txt_path[TXT_PATH_SIZE];
 #define TXT_STATUS_SIZE 80

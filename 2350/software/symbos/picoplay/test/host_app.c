@@ -30,6 +30,9 @@ unsigned char _sympid = 5, _symbank = 1;
 unsigned char pv_prim, pv_sub;
 
 static int engine_present = 1, engine_frozen = 0;
+static int stream_phase;
+static const char *stream_src;
+int host_esp_load_audio(const char *mp3_path);
 static unsigned long accesses, msgboxes, redraws[32], idles;
 static void eng_ms(unsigned n)
 {
@@ -224,7 +227,41 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
             ev_menu(M_LOG);
             return 1;
         case 17:
-            CHECK(cd_tlist.lines >= 3, "Engine log window: %u lines", cd_tlist.lines);
+            if (stream_phase == 0) {
+                CHECK(cd_tlist.lines >= 3, "Engine log window: %u lines", cd_tlist.lines);
+                if (stream_src) {
+                    printf("[internet radio stream]\n");
+                    static char u[] = "http://radio.test/stream.mp3\0";
+                    CHECK(pv_cmd(PVA_C_PLAY_URL, u, sizeof u) == PVA_OK, "PLAY_URL");
+                    stream_phase = 1;
+                    ticks_left = 2;
+                    step--;                         // come back to this step
+                    return 0;
+                }
+            } else if (stream_phase == 1) {
+                CHECK(!strncmp(txt_fmt, "Buffering", 9) || strstr(txt_status, "opening") || strstr(txt_status, "connecting"),
+                      "while connecting: '%s' / '%s'", txt_fmt, txt_status);
+                stream_phase = 2;
+                ticks_left = 25;                    // 5 s
+                step--;
+                return 0;
+            } else if (stream_phase == 2) {
+                CHECK(!strcmp(txt_title, "Song A") || !strcmp(txt_title, "Song B"), "stream title '%s'", txt_title);
+                CHECK(strstr(txt_artist, " - Test FM") != NULL, "artist - station '%s'", txt_artist);
+                CHECK(!strncmp(txt_fmt, "128k 44.1kHz", 12), "format line '%s'", txt_fmt);
+                CHECK(strstr(txt_status, "Playing 1 of 1 - ") && strstr(txt_status, "KB/s"), "status '%s'", txt_status);
+                CHECK((ctl_prog.param >> 8) > 0 && strncmp(txt_time, "00:0", 4) == 0 && !strchr(txt_time, '/'),
+                      "progress bar = buffer %lu/255, time '%s' without a length", (unsigned long)(ctl_prog.param >> 8), txt_time);
+                static char bad[] = "http://radio.test/aac\0";
+                pv_cmd(PVA_C_PLAY_URL, bad, sizeof bad);
+                stream_phase = 3;
+                ticks_left = 10;
+                step--;
+                return 0;
+            } else if (stream_phase == 3) {
+                CHECK(!strcmp(txt_status, "Stream stopped: not MP3 (AAC/Ogg/HLS)"), "failed stream: '%s'", txt_status);
+                stream_phase = 4;
+            }
             ev_click(C_STOP, 0, 0);
             ticks_left = 2;
             return 1;
@@ -258,6 +295,8 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
 int main(int argc, char **argv)
 {
     host_disk_open(argv[1], 0);
+    stream_src = argc > 2 ? argv[2] : NULL;         // MP3 for the simulated ESP (optional)
+    if (stream_src) host_esp_load_audio(stream_src);
     static uint8_t arena[116 * 1024];
     host_audio_unlimited = false;
     pva_init(arena, sizeof arena);

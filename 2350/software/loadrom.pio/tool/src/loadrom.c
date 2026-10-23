@@ -464,6 +464,7 @@ static void print_usage(const char *prog_name) {
     printf("  -e1, --seone-sd    Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + TMTLogic SE-ONE MP3 cartridge emulation\n");
     printf("                     on I/O ports 0x20-0x27 (microSD card, I2S DAC) for SymbOS SE Play and other SE-ONE software\n");
     printf("  -p1, --player-sd   Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + PicoVerse Audio Engine (SymbOS PicoPlay)\n");
+    printf("                     (MP3/WAV/M3U from the microSD card; MP3 internet radio with -w)\n");
     printf("  -s3, --sunrise3-sd Build UF2 with " NEXTOR3_SUNRISE_LABEL " Sunrise IDE ROM (microSD card) for testing\n");
     printf("  -4, --opl4         Build UF2 with the standalone OPL4 / YMF278B / MoonSound cartridge firmware (2MB YRW801-M ROM + 2MB PCM sample RAM)\n");
     printf("      --22khz        (with -4) Build an OPL4 image that renders at 22050 Hz instead of 44100 Hz: halves the CPU cost so\n");

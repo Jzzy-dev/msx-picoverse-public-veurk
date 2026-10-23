@@ -122,6 +122,11 @@ int main(int argc, char **argv)
     fclose(f);
     printf("loaded %zu bytes\n", n);
     if (host_disk_open(argv[2], 0)) { printf("no image\n"); return 2; }
+    {
+        extern int host_esp_load_audio(const char *mp3_path);
+        const char *sp = getenv("PVA_STREAM");          // MP3 the simulated ESP streams
+        if (sp && host_esp_load_audio(sp)) { printf("no stream source %s\n", sp); return 2; }
+    }
     static uint8_t arena[116 * 1024];
     host_audio_unlimited = false;
     pva_init(arena, sizeof arena);

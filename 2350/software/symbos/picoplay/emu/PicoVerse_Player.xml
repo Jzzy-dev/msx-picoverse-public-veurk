@@ -35,6 +35,7 @@
           <mem base="0x4000" size="0x4000"/>
           <image>/home/claude/rig/work/hd.dsk</image>
           <wav>/home/claude/rig/work/out.wav</wav>
+          <stream>/home/claude/rig/assets/cbr128_v23.mp3</stream>
         </PicoVerseAudio>
       </secondary>
     </primary>

@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        1
+#define PVA_FW_MINOR        2
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -79,6 +79,8 @@
 #define PVA_C_SEEK          0x26    // args: u16 seconds
 #define PVA_C_VOLUME        0x27    // args: u8 0..100
 #define PVA_C_MODE          0x28    // args: u8 PVA_MODE_xxx bits
+#define PVA_C_PLAY_URL      0x29    // args: URL (http:// or https://, 0-terminated), then an
+                                    // optional station name (0-terminated); MP3 streams
 
 // results
 #define PVA_OK              0x00
@@ -90,6 +92,8 @@
 #define PVA_E_IO            0x06    // read error (see PVA_ST_FRESULT)
 #define PVA_E_RANGE         0x07    // index out of range
 #define PVA_E_STATE         0x08    // not possible in this state
+#define PVA_E_NET           0x09    // network failure (see PVA_ST_NET_ERR)
+#define PVA_E_NOWIFI        0x0A    // no ESP WiFi link in this firmware (-w), or no memory for streams
 
 // directory entry in a DIR_READ reply: u8 type, u32 size, u8 len, name[len]
 #define PVA_DE_DIR          1
@@ -97,6 +101,7 @@
 #define PVA_DE_WAV          3
 #define PVA_DE_M3U          4
 #define PVA_DE_PARENT       5       // ".." (not in the root)
+#define PVA_DE_URL          6       // stream (PVA_ST_FORMAT while a stream plays)
 #define PVA_NAME_MAX        63      // longest name in a reply (longer ones are cut)
 
 // play modes
@@ -134,7 +139,15 @@
 #define PVA_ST_ARTIST_LEN   40
 #define PVA_ST_ALBUM_LEN    40
 #define PVA_ST_FORMAT       160     // u8  PVA_DE_MP3 / PVA_DE_WAV of the track
-#define PVA_ST_PL_KIND      161     // u8  0 = folder, 1 = M3U play list
+#define PVA_ST_PL_KIND      161     // u8  0 = folder, 1 = M3U play list, 2 = URL
+// streams (all 0 when no stream plays)
+#define PVA_ST_NET_STATE    162     // u8  PVA_NET_xxx
+#define PVA_ST_BUF_PCT      163     // u8  stream buffer fill, 0..100
+#define PVA_ST_NET_RATE     164     // u16 received bytes per second / 100 (0.1 KB/s)
+#define PVA_ST_RECONNECTS   166     // u16
+#define PVA_ST_NET_ERR      168     // u8  PVA_NERR_xxx of the last failure
+#define PVA_ST_HTTP         169     // u16 last HTTP status
+#define PVA_ST_BUF_KB       171     // u16 buffer size in KB
 
 #define PVA_STATE_STOPPED   0
 #define PVA_STATE_PLAYING   1
@@ -145,5 +158,25 @@
 #define PVA_F_TAGS          0x02    // title/artist come from a tag
 #define PVA_F_SEEKABLE      0x04
 #define PVA_F_DIR_OPEN      0x08
+#define PVA_F_STREAM        0x10    // a stream plays (title = stream title, album = station)
+#define PVA_F_BUFFERING     0x20    // the stream is filling its buffer (no audio yet)
+
+#define PVA_NET_IDLE        0
+#define PVA_NET_LOOKUP      1       // DNS
+#define PVA_NET_CONNECT     2       // TCP / TLS open
+#define PVA_NET_REQUEST     3       // HTTP request and headers
+#define PVA_NET_STREAM      4       // receiving audio
+#define PVA_NET_RETRY       5       // waiting before a reconnect
+#define PVA_NET_FAILED      6
+
+#define PVA_NERR_NONE       0
+#define PVA_NERR_NOWIFI     1       // no ESP or not connected to an access point
+#define PVA_NERR_DNS        2
+#define PVA_NERR_CONNECT    3       // TCP/TLS open refused
+#define PVA_NERR_HTTP       4       // HTTP status not 200 (see PVA_ST_HTTP)
+#define PVA_NERR_FORMAT     5       // not MP3 (AAC, Ogg, HLS ...)
+#define PVA_NERR_TIMEOUT    6       // the ESP or the server stopped answering
+#define PVA_NERR_CLOSED     7       // the server closed the stream
+#define PVA_NERR_URL        8       // bad URL, too many redirects
 
 #endif

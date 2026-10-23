@@ -57,6 +57,8 @@ static uint32_t  rate = 44100;
 static uint64_t  samples_out;
 static uint32_t  seek_base_s;          // elapsed time at the last seek
 static uint8_t   bad_frames;
+static bool      stream;              // input from pva_net_read() instead of a file
+static MP3FrameInfo last_fi;
 static uint8_t   last_fr;
 
 static uint16_t  wav_channels, wav_bits;
@@ -255,6 +257,14 @@ static void compact_input(void)
 
 static void refill(void)
 {
+    if (stream)
+    {
+        if ((in_len - in_pos) >= INBUF_SIZE / 2u) return;
+        compact_input();
+        in_len += (uint32_t)pva_net_read(inbuf + in_len, INBUF_SIZE - in_len);
+        if (pva_net_ended() && in_len == in_pos) file_eof = true;
+        return;
+    }
     if (!file_open || file_eof || (in_len - in_pos) >= INBUF_SIZE / 2u)
         return;
     compact_input();
@@ -337,7 +347,7 @@ static int produce_mp3(void)
         refill();
         uint32_t avail = in_len - in_pos;
         if (avail < 4u)
-            return file_eof ? -1 : 0;
+            return (file_eof || (stream && pva_net_ended())) ? -1 : 0;
         int off = MP3FindSyncWord(inbuf + in_pos, (int)avail);
         if (off < 0)
         {
@@ -351,6 +361,8 @@ static int produce_mp3(void)
         {
             refill();
             avail = in_len - in_pos;
+            // a stream decodes only whole frames (the largest is 1441 bytes)
+            if (stream && avail < 1800u) return pva_net_ended() ? -1 : 0;
         }
         unsigned char *p = inbuf + in_pos;
         int left = (int)avail;
@@ -360,6 +372,7 @@ static int produce_mp3(void)
         {
             MP3FrameInfo fi;
             MP3GetLastFrameInfo(decoder, &fi);
+            last_fi = fi;
             if (fi.nChans < 1 || fi.outputSamps <= 0) continue;
             uint32_t frames = (uint32_t)fi.outputSamps / (uint32_t)fi.nChans;
             if (frames > MAX_FRAME_SAMPLES) frames = MAX_FRAME_SAMPLES;
@@ -536,6 +549,7 @@ bool pva_dec_init(void)
 void pva_dec_close(void)
 {
     close_file();
+    stream = false;
     format = 0;
     vu_l = vu_r = 0;
 }
@@ -594,6 +608,36 @@ int pva_dec_open(const char *path, pva_track_info_t *info)
     return PVA_OK;
 }
 
+// MP3 from the network buffer: no tags, no length, no seeking. Rate, channels
+// and bitrate are known after the first frame (pva_dec_frame_info).
+int pva_dec_open_stream(pva_track_info_t *info)
+{
+    pva_dec_close();
+    memset(info, 0, sizeof *info);
+    in_len = in_pos = 0;
+    samples_out = 0;
+    seek_base_s = 0;
+    total_s = 0;
+    audio_start = audio_end = 0;
+    file_eof = false;
+    memset(&last_fi, 0, sizeof last_fi);
+    if (!reset_decoder()) { pva_log("decoder alloc failed"); return PVA_E_IO; }
+    stream = true;
+    format = PVA_DE_MP3;
+    info->format = PVA_DE_URL;
+    return PVA_OK;
+}
+
+bool pva_dec_is_stream(void) { return stream; }
+
+void pva_dec_frame_info(pva_track_info_t *info)
+{
+    if (last_fi.samprate <= 0) return;
+    info->sample_rate = (uint32_t)last_fi.samprate;
+    info->channels = (uint8_t)last_fi.nChans;
+    info->bitrate_kbps = (uint32_t)last_fi.bitrate / 1000u;
+}
+
 int pva_dec_step(void)
 {
     if (!format) return -1;
@@ -617,7 +661,7 @@ uint32_t pva_dec_elapsed(void)
 
 int pva_dec_seek(uint32_t seconds)
 {
-    if (!format || !file_open) return PVA_E_STATE;
+    if (!format || !file_open || stream) return PVA_E_STATE;
     if (total_s && seconds >= total_s) seconds = total_s ? total_s - 1u : 0u;
     uint32_t target;
     if (format == PVA_DE_WAV)

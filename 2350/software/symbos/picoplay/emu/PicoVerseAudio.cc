@@ -14,6 +14,7 @@ uint8_t pva_mem_read(uint16_t addr);
 void pva_mem_write(uint16_t addr, uint8_t data);
 void pva_core1_init(void);
 bool pva_core1_poll(void);
+int  host_esp_load_audio(const char *mp3_path);
 int  host_disk_open(const char* path, uint32_t create_sectors);
 void host_advance_ms(uint32_t ms);
 void host_wav_open(const char* path);
@@ -34,6 +35,10 @@ PicoVerseAudio::PicoVerseAudio(const DeviceConfig& config)
 	std::string image(config.getChildData("image"));
 	if (host_disk_open(image.c_str(), 0) != 0) {
 		fprintf(stderr, "PicoVerseAudio: cannot open image %s\n", image.c_str());
+	}
+	std::string stream(config.getChildData("stream", ""));
+	if (!stream.empty() && host_esp_load_audio(stream.c_str()) != 0) {
+		fprintf(stderr, "PicoVerseAudio: cannot open stream source %s\n", stream.c_str());
 	}
 	std::string wav(config.getChildData("wav", ""));
 	if (!wav.empty()) host_wav_open(wav.c_str());

@@ -7,7 +7,8 @@ M=$L/lib/picomp3lib/src
 T=$L/pvaudio/tests
 mkdir -p obj
 CF="-O2 -g -DPVA_HOST -I$L/pvaudio -I$T/hostinc -I$F/include -I$F/ff15/source -I$M -w"
-for f in $L/pvaudio/pva_window.c $L/pvaudio/pva_engine.c $L/pvaudio/pva_decode.c $T/host_hal.c \
+for f in $L/pvaudio/pva_window.c $L/pvaudio/pva_engine.c $L/pvaudio/pva_decode.c $L/pvaudio/pva_net.c \
+         $T/host_hal.c $T/host_esp.c \
          $F/ff15/source/ff.c $F/ff15/source/ffunicode.c $F/ff15/source/ffsystem.c $(ls $M/*.c | grep -v buffers.c); do
   gcc $CF -c $f -o obj/$(basename $f .c).o
 done

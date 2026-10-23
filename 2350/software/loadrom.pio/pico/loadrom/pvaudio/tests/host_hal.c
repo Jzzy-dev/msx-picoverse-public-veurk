@@ -136,9 +136,12 @@ static uint32_t fake_ms;
 uint32_t pva_hal_millis(void) { return fake_ms; }
 
 // advance simulated time; the consumer drains the queue at the last rate
+void host_esp_tick(uint32_t now);
+
 void host_advance_ms(uint32_t ms)
 {
     fake_ms += ms;
+    host_esp_tick(fake_ms);
     if (host_audio_unlimited) return;
     uint32_t drain = (host_audio_last_rate ? host_audio_last_rate : 44100) * ms / 1000u;
     if (queue_buffers && queued_frames <= drain) { if (!host_audio_muted) host_audio_underruns++; }

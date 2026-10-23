@@ -130,6 +130,11 @@ typedef struct __OPLL {
 } OPLL;
 
 OPLL *OPLL_new(uint32_t clk, uint32_t rate);
+
+/* PicoVerse: the TL table is large and only used once OPLL_new() ran; other
+   engines may use its RAM when MSX-MUSIC is off. */
+#include <stddef.h>
+uint8_t *emu2413_spare_ram(size_t *size);
 void OPLL_delete(OPLL *);
 
 void OPLL_reset(OPLL *);

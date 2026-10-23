@@ -1,3 +1,6 @@
+#define TXT_ARTIST_SIZE 84
+#define TXT_TIME_SIZE 20
+#define TXT_FMT_SIZE 24
 #define TXT_TITLE_SIZE 50
 #define TXT_PATH_SIZE 64
 #define TXT_STATUS_SIZE 80
