@@ -4,13 +4,16 @@
 _transfer char icon[19] = { 0x02, 0x08, 0x08, 0x00, 0x00, 0x33, 0x00, 0x37, 0x08, 0x37, 0x08,
                             0x34, 0x08, 0x34, 0x08, 0x74, 0x08, 0xF0, 0x00 };
 
-_data char txt_title[50] = "No track";
-_data char txt_artist[84] = "";
-_data char txt_time[20] = "--:-- / --:--";
-_data char txt_fmt[24] = "";
-_data char txt_path[64] = "/";
-_data char txt_status[80] = "Looking for the PicoVerse Audio Engine...";
-_data char txt_play[8] = "Play";
+#define TXT_TITLE_SIZE 50
+_data char txt_title[TXT_TITLE_SIZE];
+_data char txt_artist[84];
+_data char txt_time[20];
+_data char txt_fmt[24];
+#define TXT_PATH_SIZE 64
+_data char txt_path[TXT_PATH_SIZE];
+#define TXT_STATUS_SIZE 80
+_data char txt_status[TXT_STATUS_SIZE];
+_data char txt_play[8];
 
 _transfer Ctrl_Text cd_title  = { txt_title,  (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
 _transfer Ctrl_Text cd_artist = { txt_artist, (COLOR_RED << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
@@ -51,7 +54,7 @@ enum {
 };
 
 #define WIN_W 252
-#define WIN_H 186
+#define WIN_H 166
 #define PROG_X 4
 #define PROG_W 244
 
@@ -70,7 +73,7 @@ _transfer Ctrl ctl_rep    = { C_REP,    C_CHECK,    -1, (unsigned short)&cd_repe
 _transfer Ctrl ctl_volt   = { C_VOLT,   C_TEXT,     -1, (unsigned short)&cd_vol, 184, 48, 16, 8 };
 _transfer Ctrl ctl_vol    = { C_VOL,    C_SLIDER,   -1, (unsigned short)&cd_volume, 200, 48, 48, 8 };
 _transfer Ctrl ctl_path   = { C_PATH,   C_TEXT,     -1, (unsigned short)&cd_path, 4, 64, 244, 8 };
-_transfer Ctrl ctl_list   = { C_LIST,   C_LISTFULL, -1, (unsigned short)&cd_list, 4, 74, 244, 108 };
+_transfer Ctrl ctl_list   = { C_LIST,   C_LISTFULL, -1, (unsigned short)&cd_list, 4, 74, 244, 88 };
 
 _transfer Ctrl_Group ctrls = { C_COUNT, 0, &ctl_bg };
 
@@ -98,7 +101,7 @@ _transfer Window win_main = {
     WIN_NORMAL,
     WIN_CLOSE | WIN_TITLE | WIN_ICON | WIN_MENU | WIN_STATUS,
     0,
-    40, 10,
+    40, 1,
     WIN_W, WIN_H,
     0, 0,
     WIN_W, WIN_H,
@@ -121,7 +124,7 @@ _transfer Ctrl tctl_bg   = { 0, C_AREA,    -1, COLOR_ORANGE, 0, 0, 10000, 10000 
 _transfer Ctrl tctl_list = { 1, C_LISTBOX, -1, (unsigned short)&cd_tlist, 2, 2, 312, 128 };
 _transfer Ctrl tctl_ok   = { 2, C_BUTTON,  -1, (unsigned short)"Close", 134, 134, 48, 12 };
 _transfer Ctrl_Group tctrls = { 3, 0, &tctl_bg };
-_data char txt_twin[32] = "Diagnostics";
+_data char txt_twin[32];
 _transfer Window win_text = {
     WIN_NORMAL,
     WIN_CLOSE | WIN_TITLE | WIN_ICON,
@@ -138,3 +141,17 @@ _transfer Window win_text = {
     0,
     &tctrls };
 
+/* SCC gives initialized _data char arrays no storage of their own (they all
+   land on one address, on top of the next buffer), so the texts are declared
+   uninitialized and filled in at startup. */
+static void gui_texts_init(void)
+{
+    strcpy(txt_title, "No track");
+    strcpy(txt_artist, "");
+    strcpy(txt_time, "--:-- / --:--");
+    strcpy(txt_fmt, "");
+    strcpy(txt_path, "/");
+    strcpy(txt_status, "Looking for the PicoVerse Audio Engine...");
+    strcpy(txt_play, "Play");
+    strcpy(txt_twin, "Diagnostics");
+}

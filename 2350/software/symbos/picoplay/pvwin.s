@@ -90,8 +90,10 @@ pv_enter:
 	pop bc
 	ret
 
-; pv_leave - normal SymbOS slot layout, interrupts on. Keeps BC,DE,HL.
+; pv_leave - normal SymbOS slot layout, interrupts on. Keeps A,BC,DE,HL
+; (pv_peek returns the byte it read in A).
 pv_leave:
+	push af
 	ld a,(pv_open)
 	or a
 	jr z,pv_leave9
@@ -108,6 +110,7 @@ pv_leave:
 	xor a
 	ld (pv_open),a
 pv_leave9:
+	pop af
 	ei
 	ret
 

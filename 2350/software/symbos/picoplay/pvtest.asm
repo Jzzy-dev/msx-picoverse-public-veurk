@@ -21,6 +21,7 @@ RDSLT   equ #000C
 WRSLT   equ #0014
 EXPTBL  equ #FCC1
 JIFFY   equ #FC9E
+LINLEN  equ #F3B0
 
 W_ID     equ #4000
 W_TOKEN  equ #4010
@@ -411,9 +412,15 @@ showstatus:
         call printtime
         ld a,' '
         call putc
-        ; title, at most 40 characters, then blanks
+        ; title: what fits on the line (LINLEN - 21 columns), then blanks
+        ld a,(LINLEN)
+        sub 21
+        jr c,.tnone
+        cp 4
+        jr nc,.tok
+.tnone: ld a,4
+.tok:   ld b,a
         ld hl,st+ST_TITLE
-        ld b,40
 .t:     ld a,(hl)
         or a
         jr z,.tpad
@@ -766,10 +773,10 @@ txt_folder:     db "Folder $"
 txt_entries:    db ", entries: $"
 txt_root:       db "/",0
 txt_usage:      db 13,10,"PVTEST <folder> or PVTEST <file.mp3|.wav|.m3u> to play.",13,10,"$"
-txt_keys:       db "SPACE pause, N next, P previous, S stop, +/- volume, L log, ESC quit",13,10,"$"
-txt_playing:    db "Play  $"
-txt_paused:     db "Pause $"
-txt_stopped:    db "Stop  $"
+txt_keys:       db "SPACE pause N/P next/prev S stop",13,10,"+/- volume L log ESC quit",13,10,"$"
+txt_playing:    db "Play $"
+txt_paused:     db "Paus $"
+txt_stopped:    db "Stop $"
 
 slot:           db 0
 token:          db 0

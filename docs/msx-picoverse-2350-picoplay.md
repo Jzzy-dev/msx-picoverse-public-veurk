@@ -67,7 +67,7 @@ Copy `PICOPLAY.EXE` to the SymbOS drive and start it from SymbOS.
 - **Folders:** double-click a folder (`[name]`) to open it, and `[..]` to go up. Folders with more than 120 entries show `>> more entries` / `<< previous entries` rows. *File > Refresh folder* reads the folder again. The engine remembers the last folder, even after PicoPlay is closed.
 - **Playing:** double-click a track (or select it and press Enter) to play it. The folder's tracks become the play list. Double-click an `.M3U` file to play it as a list.
 - **Controls:** `|<` previous (restarts the track after 3 s), `Play`/`Pause`, `Stop`, `>|` next, *Shuffle*, *Repeat*, the volume slider, and a click on the progress bar to seek.
-- **Keys:** `SPACE` play/pause, `N` next, `P` previous, `S` stop, `+`/`-` volume, `Enter` open or play.
+- **Keys:** `Up`/`Down` select (`Left`/`Right` a page), `Enter` open or play, `Backspace` parent folder, `SPACE` play/pause, `N` next, `P` previous, `S` stop, `+`/`-` volume, `D` diagnostics, `L` engine log.
 - **Status:** the window shows title, artist and album, the time, format, bitrate and sample rate. The status bar shows the play list position or the latest problem in plain words.
 - **Diagnostics:** *File > Diagnostics* shows the engine version, uptime, heartbeat, microSD mount result, volume type, play list and errors. *File > Engine log* shows the engine's last 32 log lines. *File > Remount microSD* mounts the card again.
 - **Music keeps playing** when you close PicoPlay; start it again to take control.

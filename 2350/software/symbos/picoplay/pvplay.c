@@ -141,8 +141,8 @@ static void app_quit(void)
 /* ------------------------------------------------------------ helpers */
 static void set_status(char *s)
 {
-    strncpy(txt_status, s, sizeof txt_status - 1);
-    txt_status[sizeof txt_status - 1] = 0;
+    strncpy(txt_status, s, TXT_STATUS_SIZE - 1);
+    txt_status[TXT_STATUS_SIZE - 1] = 0;
     if (win_id >= 0)
         Win_Redraw_Status(win_id);
 }
@@ -246,17 +246,41 @@ static void fill_page(void)
         rows[i].value1 = row_name[i];
         rows[i].value2 = row_info[i];
     }
+    if (r)
+        rows[0].flags |= ROW_MARKED;
     cd_list.lines = r;
     cd_list.scroll = 0;
     cd_list.clicked = 0;
     redraw(C_LIST);
 }
 
+/* keyboard selection: move the marked row and keep it in view */
+#define LIST_VISIBLE 9
+static void select_row(short n)
+{
+    unsigned short i;
+    if (!cd_list.lines)
+        return;
+    if (n < 0)
+        n = 0;
+    if (n >= (short)cd_list.lines)
+        n = cd_list.lines - 1;
+    for (i = 0; i < cd_list.lines; ++i)
+        rows[i].flags &= ~ROW_MARKED;
+    rows[n].flags |= ROW_MARKED;
+    cd_list.clicked = n;
+    if (n < (short)cd_list.scroll)
+        cd_list.scroll = n;
+    else if (n >= (short)(cd_list.scroll + LIST_VISIBLE))
+        cd_list.scroll = n - LIST_VISIBLE + 1;
+    redraw(C_LIST);
+}
+
 static void show_folder_reply(void)
 {
     dir_count = (unsigned char)xbuf[0] | ((unsigned short)(unsigned char)xbuf[1] << 8);
-    strncpy(txt_path, xbuf + 2, sizeof txt_path - 1);
-    txt_path[sizeof txt_path - 1] = 0;
+    strncpy(txt_path, xbuf + 2, TXT_PATH_SIZE - 1);
+    txt_path[TXT_PATH_SIZE - 1] = 0;
     redraw(C_PATH);
     page_first = 0;
     fill_page();
@@ -327,8 +351,8 @@ static void update_display(void)
             txt_artist[0] = 0;
             txt_fmt[0] = 0;
         } else {
-            strncpy(txt_title, st + PVA_ST_TITLE, sizeof txt_title - 1);
-            txt_title[sizeof txt_title - 1] = 0;
+            strncpy(txt_title, st + PVA_ST_TITLE, TXT_TITLE_SIZE - 1);
+            txt_title[TXT_TITLE_SIZE - 1] = 0;
             txt_artist[0] = 0;
             if (st[PVA_ST_ARTIST]) {
                 strcpy(txt_artist, st + PVA_ST_ARTIST);
@@ -397,9 +421,17 @@ static void update_display(void)
 }
 
 /* called 5 times per second */
+/* A status redraw asked for right after Win_Open, before the desktop has
+   drawn the window, is lost; repeat it on the first timer ticks. */
+unsigned char status_redraws = 2;
+
 static void tick(void)
 {
     unsigned char hb;
+    if (status_redraws) {
+        --status_redraws;
+        Win_Redraw_Status(win_id);
+    }
     if (engine_ok == 0)
         return;
     hb = pv_peek(W(PVA_R_HEARTBEAT));
@@ -547,6 +579,16 @@ static void key_press(unsigned char k)
     case 'p': case 'P': control_click(C_PREV, 0, 0); break;
     case 's': case 'S': control_click(C_STOP, 0, 0); break;
     case 13: activate_row(cd_list.clicked); break;
+    case KEY_UP: select_row((short)cd_list.clicked - 1); break;
+    case KEY_DOWN: select_row((short)cd_list.clicked + 1); break;
+    case KEY_LEFT: select_row((short)cd_list.clicked - LIST_VISIBLE); break;
+    case KEY_RIGHT: select_row((short)cd_list.clicked + LIST_VISIBLE); break;
+    case 'd': case 'D': menu_action(M_DIAG); break;
+    case 'l': case 'L': menu_action(M_LOG); break;
+    case 8:                                     /* backspace: parent folder */
+        if (cd_list.lines && row_type[0] == PVA_DE_PARENT)
+            activate_row(0);
+        break;
     case '+':
         cd_volume.value = cd_volume.value <= 95 ? cd_volume.value + 5 : 100;
         control_click(C_VOL, 0, 0);
@@ -565,6 +607,7 @@ int main(int argc, char *argv[])
     char t[80];
     int r;
 
+    gui_texts_init();
     win_id = Win_Open(_symbank, &win_main);
     if (win_id < 0)
         return 1;

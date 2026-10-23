@@ -47,3 +47,10 @@ unsigned short Sys_Counter16(void);
 void host_exit(int code);
 #define main app_main
 #endif
+#ifndef ROW_MARKED
+#define ROW_MARKED 0x8000
+#define KEY_UP 136
+#define KEY_DOWN 137
+#define KEY_LEFT 138
+#define KEY_RIGHT 139
+#endif

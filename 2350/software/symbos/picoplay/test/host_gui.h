@@ -1,3 +1,6 @@
+#define TXT_TITLE_SIZE 50
+#define TXT_PATH_SIZE 64
+#define TXT_STATUS_SIZE 80
 /* PicoPlay window data for the PC test (same names as pvgui.h, no desktop) */
 #define LIST_PAGE  120
 #define LIST_ROWS  (LIST_PAGE + 2)
@@ -36,3 +39,4 @@ char tline[TEXT_LINES][TEXT_LEN + 1];
 List_Row trows[TEXT_LINES];
 List cd_tlist;
 char txt_twin[32];
+static void gui_texts_init(void) {}
