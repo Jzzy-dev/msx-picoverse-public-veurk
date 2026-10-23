@@ -397,7 +397,12 @@ int main(int argc, char **argv)
     CHECK(cmd_str(PVA_C_PLAY_PATH, "/MUSIC/none.mp3") == PVA_E_NOTFOUND, "missing file -> NOTFOUND");
     read_status();
     CHECK(st[PVA_ST_STATE] == PVA_STATE_STOPPED, "stopped after the failed play");
-    CHECK(cmd_str(PVA_C_PLAY_PATH, "relative.mp3") == PVA_E_ARGS, "relative path refused");
+    CHECK(cmd_str(PVA_C_PLAY_PATH, "MUSIC\\long.mp3") == PVA_OK, "path without leading separator plays from the root");
+    CHECK(cmd_str(PVA_C_PLAY_PATH, "A:\\MUSIC\\.\\Cafe del Mar\\..\\long.mp3") == PVA_OK, "drive, '.', '..' and backslashes");
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING, "playing after a DOS style path");
+    cmd(PVA_C_STOP, NULL, 0);
+    CHECK(cmd_str(PVA_C_PLAY_PATH, "A:\\") == PVA_E_ARGS, "the root is not a file");
     CHECK(cmd(PVA_C_LOG, NULL, 0) == PVA_OK && strstr((char *)reply, "open"), "LOG has the failures:\n%s", reply);
 
     printf("[card removed / remounted]\n");

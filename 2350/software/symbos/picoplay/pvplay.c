@@ -520,8 +520,18 @@ static void menu_action(unsigned short v)
             error_status("Log", r);
         break;
     case M_ABOUT:
-        MsgBox("PicoPlay " APP_VERSION " for SymbOS", "Music player for the MSX PicoVerse 2350",
-               "The cartridge plays, SymbOS stays free.", COLOR_BLACK, BUTTON_OK | TITLE_INFO, 0, 0, &win_main);
+        /* Not MsgBox: it blocks this loop until the box is closed, while the
+           wake timer keeps posting messages; on SymbOS 4.0 that stalls the
+           desktop (half-drawn box, frozen mouse and keys). */
+        show_text("About PicoPlay",
+                  "PicoPlay " APP_VERSION " for SymbOS\n"
+                  "Music player for the MSX PicoVerse 2350\n"
+                  "The cartridge decodes and plays, SymbOS stays free.\n"
+                  "\n"
+                  "Up/Down select, Left/Right page, Enter open/play\n"
+                  "Backspace parent folder\n"
+                  "Space play/pause, N next, P previous, S stop\n"
+                  "+/- volume, D diagnostics, L engine log");
         break;
     case M_QUIT:
         app_quit();
@@ -584,6 +594,7 @@ static void key_press(unsigned char k)
     case KEY_LEFT: select_row((short)cd_list.clicked - LIST_VISIBLE); break;
     case KEY_RIGHT: select_row((short)cd_list.clicked + LIST_VISIBLE); break;
     case 'd': case 'D': menu_action(M_DIAG); break;
+    case 'a': case 'A': menu_action(M_ABOUT); break;
     case 'l': case 'L': menu_action(M_LOG); break;
     case 8:                                     /* backspace: parent folder */
         if (cd_list.lines && row_type[0] == PVA_DE_PARENT)
@@ -645,10 +656,12 @@ int main(int argc, char *argv[])
             continue;
         wid = (unsigned char)_symmsg[1];
         if (text_id >= 0 && wid == (unsigned char)text_id) {
-            if (_symmsg[2] == DSK_ACT_CLOSE || (_symmsg[2] == DSK_ACT_CONTENT && _symmsg[8] == 2)) {
+            if (_symmsg[2] == DSK_ACT_CLOSE || (_symmsg[2] == DSK_ACT_CONTENT && _symmsg[8] == 2) ||
+                (_symmsg[2] == DSK_ACT_KEY && (unsigned char)_symmsg[4] == KEY_ESC)) {
                 Win_Close(text_id);
                 text_id = -1;
-            }
+            } else if (_symmsg[2] == DSK_ACT_KEY)
+                key_press((unsigned char)_symmsg[4]);   /* player keys work here too */
             continue;
         }
         switch (_symmsg[2]) {

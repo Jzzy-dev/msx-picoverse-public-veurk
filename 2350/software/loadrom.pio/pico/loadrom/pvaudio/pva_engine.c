@@ -205,20 +205,38 @@ static void reply_dir_header(void)
     set_reply_str(shown);
 }
 
-// normalise an MSX path: "\" -> "/", no trailing "/", "" for the root
+// Path from the MSX side to an absolute "/A/B" path on the card ("" = root).
+// Accepts '\\' or '/', an optional drive ("A:"), no leading separator
+// (taken from the root), repeated separators, "." and "..".
 static bool normalise_path(char *out, size_t size, const char *in)
 {
     size_t o = 0;
-    if (in[0] != '/' && in[0] != '\\') { if (size) out[0] = 0; return false; }
-    for (size_t i = 0; in[i]; i++)
+    if (!size) return false;
+    if (((in[0] >= 'A' && in[0] <= 'Z') || (in[0] >= 'a' && in[0] <= 'z')) && in[1] == ':') in += 2;
+    out[0] = 0;
+    while (*in)
     {
-        char c = in[i] == '\\' ? '/' : in[i];
-        if (c == '/' && o > 0 && out[o - 1] == '/') continue;
-        if (o + 1 >= size) return false;
-        out[o++] = c;
+        while (*in == '/' || *in == '\\') in++;
+        if (!*in) break;
+        const char *e = in;
+        while (*e && *e != '/' && *e != '\\') e++;
+        size_t n = (size_t)(e - in);
+        if (n == 1 && in[0] == '.') { in = e; continue; }
+        if (n == 2 && in[0] == '.' && in[1] == '.')
+        {
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+            out[o] = 0;
+            in = e;
+            continue;
+        }
+        if (o + 1 + n + 1 > size) return false;
+        out[o++] = '/';
+        memcpy(out + o, in, n);
+        o += n;
+        out[o] = 0;
+        in = e;
     }
-    while (o > 0 && out[o - 1] == '/') o--;
-    out[o] = 0;
     return true;
 }
 

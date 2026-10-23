@@ -2,7 +2,7 @@
 
 LoadROM's `-p1` firmware gives the PicoVerse 2350 its own audio engine, the **PicoVerse Audio Engine**. The cartridge reads MP3, WAV and M3U files from its microSD card, decodes them and plays them through its I2S DAC. **PicoPlay** is the SymbOS program that browses the card and controls playback. **PVTEST.COM** checks the engine from the MSX-DOS / Nextor prompt.
 
-> **Status:** the engine, PicoPlay's logic and PVTEST.COM pass PC tests against the real engine code. The firmware builds for the RP2350. **None of it has been confirmed on real MSX hardware yet**, and PicoPlay has not yet run under real SymbOS. Please report results.
+> **Status:** confirmed on a Philips NMS 8245 with the PicoVerse 2350: Nextor boots, PVTEST plays folders, and PicoPlay under SymbOS 4.0 browses, plays, pauses, skips, shuffles, repeats and sets the volume. Also tested in openMSX with a model of the engine, and with PC tests against the real engine code.
 
 ## Why this design
 
@@ -56,6 +56,8 @@ A quick check of the cartridge, without SymbOS:
 PVTEST                     find the engine, show diagnostics and the root folder
 PVTEST /MUSIC              list a folder and play its tracks
 PVTEST /MUSIC/SONG.MP3     play a file (or an .M3U play list)
+PVTEST SONG.MP3            relative to the current folder (CD MUSIC first)
+PVTEST A:\MUSIC\SONG.MP3   with a drive letter and backslashes
 ```
 
 While playing: `SPACE` pause, `N` next, `P` previous, `S` stop, `+`/`-` volume, `L` engine log, `ESC` quit. After you quit, the music keeps playing: the cartridge plays it, not the MSX.

@@ -49,6 +49,7 @@ void host_exit(int code);
 #endif
 #ifndef ROW_MARKED
 #define ROW_MARKED 0x8000
+#define KEY_ESC 27
 #define KEY_UP 136
 #define KEY_DOWN 137
 #define KEY_LEFT 138

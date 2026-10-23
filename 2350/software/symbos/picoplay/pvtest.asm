@@ -120,6 +120,7 @@ start:
         djnz .copy
 .cend:  xor a
         ld (de),a
+        call mkabs
         ; a folder or a file? files have a dot in the last path element
         ld hl,argbuf
         ld c,0
@@ -457,6 +458,72 @@ status: ld b,5
 
 ;------------------------------------------------------------------------------
 ; argstr - copy the 0-terminated string HL to 'args', BC = length incl. 0
+;------------------------------------------------------------------------------
+; mkabs - make argbuf an absolute path: "A:" is dropped, and a path without a
+; leading \ or / gets the current folder of that drive (Nextor _GETCD) in
+; front, so "PVTEST SONG.MP3" works inside A:\MUSIC. The engine then sees
+; "\MUSIC\SONG.MP3".
+mkabs:  ld hl,argbuf
+        ld b,0                  ; drive: 0 = default
+        inc hl
+        ld a,(hl)
+        dec hl
+        cp ':'
+        jr nz,.nodrv
+        ld a,(hl)
+        and #df                 ; upper case
+        sub 'A'-1
+        ld b,a
+        inc hl
+        inc hl
+.nodrv: ld a,(hl)
+        cp '\'
+        jr z,.abs
+        cp '/'
+        jr z,.abs
+        ; relative: tmpbuf = "\" + current folder (+ "\") + rest
+        push hl
+        ld de,tmpbuf+1
+        ld c,#59                ; _GETCD: B = drive, DE = 64 byte buffer
+        call BDOS
+        pop hl
+        or a
+        jr z,.cdok
+        xor a
+        ld (tmpbuf+1),a         ; no current folder (error): from the root
+.cdok:  ld a,'\'
+        ld (tmpbuf),a
+        ld de,tmpbuf
+.cdend: ld a,(de)
+        or a
+        jr z,.cdz
+        inc de
+        jr .cdend
+.cdz:   dec de                  ; DE = last char ("\" when at the root)
+        ld a,(de)
+        inc de
+        cp '\'
+        jr z,.rest
+        ld a,'\'
+        ld (de),a
+        inc de
+.rest:  ld a,(hl)
+        ld (de),a
+        inc hl
+        inc de
+        or a
+        jr nz,.rest
+        ld hl,tmpbuf
+.abs:   ; copy HL (inside argbuf or tmpbuf) to argbuf
+        ld de,argbuf
+.cp:    ld a,(hl)
+        ld (de),a
+        inc hl
+        inc de
+        or a
+        jr nz,.cp
+        ret
+
 argstr: ld de,args
         ld bc,0
 .c:     ld a,(hl)
@@ -791,6 +858,7 @@ count:          dw 0
 index:          dw 0
 firsttrack:     dw 0
 argbuf:         ds 128
+tmpbuf:         ds 200
 args:           ds 260
 st:             ds 224
 reply:          ds 2049
