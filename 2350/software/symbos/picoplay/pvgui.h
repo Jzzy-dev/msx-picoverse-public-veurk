@@ -24,6 +24,8 @@ _transfer Ctrl_Text cd_time   = { txt_time,   (COLOR_BLACK << 2) | COLOR_ORANGE 
 _transfer Ctrl_Text cd_fmt    = { txt_fmt,    (COLOR_RED << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_RIGHT };
 _transfer Ctrl_Text cd_path   = { txt_path,   (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
 _transfer Ctrl_Text cd_vol    = { "Vol",      (COLOR_BLACK << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_hname  = { "Name",     (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_hsize  = { "Size",     (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_RIGHT };
 
 _transfer char chk_shuffle = 0;
 _transfer char chk_repeat = 0;
@@ -53,7 +55,7 @@ _transfer List cd_list = { 0, 0, rows, 0, 2, 0, cols, 0, LIST_SCROLL };
 enum {
     C_BG, C_TITLE, C_ARTIST, C_TIME, C_FMT, C_PROG,
     C_PREV, C_PLAY, C_STOP, C_NEXT, C_SHUF, C_REP, C_VOLT, C_VOL,
-    C_PATH, C_LIST, C_COUNT
+    C_PATH, C_HNAME, C_HSIZE, C_LIST, C_COUNT
 };
 
 #define WIN_W 252
@@ -76,7 +78,13 @@ _transfer Ctrl ctl_rep    = { C_REP,    C_CHECK,    -1, (unsigned short)&cd_repe
 _transfer Ctrl ctl_volt   = { C_VOLT,   C_TEXT,     -1, (unsigned short)&cd_vol, 184, 48, 16, 8 };
 _transfer Ctrl ctl_vol    = { C_VOL,    C_SLIDER,   -1, (unsigned short)&cd_volume, 200, 48, 48, 8 };
 _transfer Ctrl ctl_path   = { C_PATH,   C_TEXT,     -1, (unsigned short)&cd_path, 4, 64, 244, 8 };
-_transfer Ctrl ctl_list   = { C_LIST,   C_LISTFULL, -1, (unsigned short)&cd_list, 4, 74, 244, 88 };
+/* The column titles are plain texts over a list box without titles: in a
+   C_LISTFULL a click on a title makes the desktop sort the rows itself, and
+   that locked up the desktop (and would mix up '..', the page rows and the
+   engine's order). Folders come sorted by name from the engine already. */
+_transfer Ctrl ctl_hname  = { C_HNAME,  C_TEXT,     -1, (unsigned short)&cd_hname, 6, 74, 100, 8 };
+_transfer Ctrl ctl_hsize  = { C_HSIZE,  C_TEXT,     -1, (unsigned short)&cd_hsize, 196, 74, 40, 8 };
+_transfer Ctrl ctl_list   = { C_LIST,   C_LISTBOX,  -1, (unsigned short)&cd_list, 4, 83, 244, 79 };
 
 _transfer Ctrl_Group ctrls = { C_COUNT, 0, &ctl_bg };
 
