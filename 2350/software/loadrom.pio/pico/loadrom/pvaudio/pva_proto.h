@@ -148,6 +148,11 @@
 #define PVA_ST_NET_ERR      168     // u8  PVA_NERR_xxx of the last failure
 #define PVA_ST_HTTP         169     // u16 last HTTP status
 #define PVA_ST_BUF_KB       171     // u16 buffer size in KB
+// for a player that redraws only what changed
+#define PVA_ST_DISP_GEN     173     // u8  +1 whenever something a player shows changed (not VU,
+                                    //     uptime or log count; the buffer and rate below are coarse)
+#define PVA_ST_DISP_BUF     174     // u8  buffer fill in steps of 10 %, with a dead band
+#define PVA_ST_DISP_RATE    175     // u16 receive rate (0.1 KB/s), sampled every 5 s
 
 #define PVA_STATE_STOPPED   0
 #define PVA_STATE_PLAYING   1

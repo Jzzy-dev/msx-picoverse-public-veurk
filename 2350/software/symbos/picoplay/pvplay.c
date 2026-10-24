@@ -139,12 +139,46 @@ static void app_quit(void)
 }
 
 /* ------------------------------------------------------------ helpers */
+/* Redraw requests without waiting. SCC's Win_Redraw() spins until the
+   desktop's message queue has room; when the desktop is busy (another window
+   opening, the Task Manager) that spinning starves it and the desktop locks
+   up. Here a request that does not fit is kept and sent on a later tick, and
+   at most MAX_SENDS requests go out per tick. */
+#define MAX_SENDS 3
+_transfer char rmsg[14];
+unsigned short redraw_pending;              /* one bit per control */
+unsigned char status_pending, sends_left = MAX_SENDS;
+
+static unsigned char desk_send(unsigned char cmd, unsigned char what)
+{
+#ifdef PV_HOST_TEST
+    if (cmd == 34) Win_Redraw(win_id, (signed char)what, 0); else Win_Redraw_Status(win_id);
+    return 1;
+#else
+    rmsg[0] = cmd;
+    rmsg[1] = (char)win_id;
+    rmsg[2] = (char)what;
+    rmsg[3] = 0;
+    return Msg_Send(_sympid, 2, rmsg) != 0;
+#endif
+}
+
+static void redraw_status(void)
+{
+    if (win_id < 0)
+        return;
+    if (sends_left && desk_send(37, 0)) {
+        --sends_left;
+        status_pending = 0;
+    } else
+        status_pending = 1;
+}
+
 static void set_status(char *s)
 {
     strncpy(txt_status, s, TXT_STATUS_SIZE - 1);
     txt_status[TXT_STATUS_SIZE - 1] = 0;
-    if (win_id >= 0)
-        Win_Redraw_Status(win_id);
+    redraw_status();
 }
 
 static void error_status(char *what, int r)
@@ -165,18 +199,65 @@ static void error_status(char *what, int r)
     set_status(t);
 }
 
+/* numbers without sprintf: SCC's printf formats through 32-bit division,
+   which is slow on a Z80 */
+static char *put_u(char *d, unsigned short v)
+{
+    char b[6];
+    unsigned char n = 0;
+    do {
+        b[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    while (n)
+        *d++ = b[--n];
+    *d = 0;
+    return d;
+}
+
+static char *put2(char *d, unsigned char v)
+{
+    *d++ = (char)('0' + v / 10);
+    *d++ = (char)('0' + v % 10);
+    *d = 0;
+    return d;
+}
+
 static void fmt_time(char *d, unsigned short s)
 {
-    if (s >= 3600)
-        sprintf(d, "%u:%02u:%02u", s / 3600, (s / 60) % 60, s % 60);
-    else
-        sprintf(d, "%02u:%02u", s / 60, s % 60);
+    unsigned short m = s / 60;
+    unsigned char sec = (unsigned char)(s % 60);
+    if (m >= 60) {
+        d = put_u(d, m / 60);
+        *d++ = ':';
+        m %= 60;
+    }
+    d = put2(d, (unsigned char)m);
+    *d++ = ':';
+    put2(d, sec);
 }
 
 static void redraw(unsigned char c)
 {
-    if (win_id >= 0)
-        Win_Redraw(win_id, c, 0);
+    if (win_id < 0)
+        return;
+    if (sends_left && desk_send(34, c)) {
+        --sends_left;
+        redraw_pending &= (unsigned short)~(1U << c);
+    } else
+        redraw_pending |= (unsigned short)(1U << c);
+}
+
+/* start of a tick: a new budget, then what is still waiting */
+static void flush_redraws(void)
+{
+    unsigned char c;
+    sends_left = MAX_SENDS;
+    if (status_pending)
+        redraw_status();
+    for (c = 0; c < C_COUNT && redraw_pending && sends_left; ++c)
+        if (redraw_pending & (1U << c))
+            redraw(c);
 }
 
 /* ------------------------------------------------------------ folder list */
@@ -357,37 +438,54 @@ static char *net_reason(unsigned char e)
 }
 
 static unsigned char shown_err;
-/* Streams change their buffer level and rate all the time. Each redraw costs
-   the desktop a lot of time on a Z80, and when the desktop's message queue is
-   full a redraw request waits (spinning) for room: the desktop locks up. So
-   those details are refreshed at most once a second, in coarse steps. */
-static unsigned char slow_ticks, shown_rate_ticks;
+/* The engine counts a display generation: it changes only when something
+   PicoPlay shows changed (not the VU levels or the uptime; the buffer level
+   and the rate come in coarse steps). So a tick reads one byte, and only when
+   it moved the whole block. The texts are rebuilt only when their own inputs
+   changed: every sprintf and every redraw costs a Z80 a lot. */
+static unsigned char shown_gen, force_update = 1, quiet_ticks;
+static unsigned short key_fmt[4], key_st[6];
+
+static unsigned char changed(unsigned short *key, unsigned short *now, unsigned char n)
+{
+    unsigned char i, c = 0;
+    for (i = 0; i < n; ++i)
+        if (key[i] != now[i]) {
+            key[i] = now[i];
+            c = 1;
+        }
+    return c;
+}
 
 static void update_display(void)
 {
     char t[84], t2[12];
-    unsigned short el, tot;
-    unsigned char state, prog, flags, stream, bufp;
+    unsigned short el, tot, kf[4], ks[6];
+    unsigned char state, prog, flags, stream, bufp, g;
     unsigned short tid;
 
+    g = pv_peek(W(PVA_R_STATUS + PVA_ST_DISP_GEN));
+    if (!force_update && g == shown_gen && ++quiet_ticks < 25)
+        return;                                 /* nothing new (a full look every 5 s anyway) */
+    quiet_ticks = 0;
     if (!read_status())
         return;
+    force_update = 0;
+    shown_gen = (unsigned char)st[PVA_ST_DISP_GEN];
     state = (unsigned char)st[PVA_ST_STATE];
     flags = (unsigned char)st[PVA_ST_FLAGS];
     stream = (flags & PVA_F_STREAM) != 0;
     tid = ST16(PVA_ST_TRACK_ID);
     el = ST16(PVA_ST_ELAPSED);
     tot = ST16(PVA_ST_TOTAL);
-    if (stream && el == shown_elapsed && tid == shown_track && state == shown_state && ++slow_ticks < 5)
-        return;                                 /* nothing that must be shown now */
-    slow_ticks = 0;
-    bufp = (unsigned char)((((unsigned char)st[PVA_ST_BUF_PCT] + 2) / 5) * 5);
+    bufp = (unsigned char)st[PVA_ST_DISP_BUF];
 
     /* title, second line, format */
     if (state == PVA_STATE_STOPPED && st[PVA_ST_TITLE] == 0) {
         put_text(txt_title, TXT_TITLE_SIZE, "No track", C_TITLE);
         put_text(txt_artist, TXT_ARTIST_SIZE, "", C_ARTIST);
         put_text(txt_fmt, TXT_FMT_SIZE, "", C_FMT);
+        key_fmt[0] = 0xFFFF;
     } else {
         put_text(txt_title, TXT_TITLE_SIZE, st + PVA_ST_TITLE, C_TITLE);
         t[0] = 0;
@@ -400,16 +498,22 @@ static void update_display(void)
         } else if (stream && strcmp(st + PVA_ST_ALBUM, st + PVA_ST_TITLE))
             strcpy(t, st + PVA_ST_ALBUM);           /* the station under the stream title */
         put_text(txt_artist, TXT_ARTIST_SIZE, t, C_ARTIST);
-        if (stream && (flags & PVA_F_BUFFERING))
-            sprintf(t, "Buffering %u%%", bufp);
-        else if (stream)
-            sprintf(t, "%uk %u.%ukHz %u%%", ST16(PVA_ST_BITRATE), ST16(PVA_ST_RATE) / 100,
-                    (ST16(PVA_ST_RATE) / 10) % 10, bufp);
-        else
-            sprintf(t, "%s %uk %u.%ukHz%s", st[PVA_ST_FORMAT] == PVA_DE_WAV ? "WAV" : "MP3",
-                    ST16(PVA_ST_BITRATE), ST16(PVA_ST_RATE) / 100, (ST16(PVA_ST_RATE) / 10) % 10,
-                    st[PVA_ST_CHANNELS] == 1 ? " mono" : "");
-        put_text(txt_fmt, TXT_FMT_SIZE, t, C_FMT);
+        kf[0] = (unsigned short)(flags & (PVA_F_STREAM | PVA_F_BUFFERING)) | ((unsigned short)(unsigned char)st[PVA_ST_FORMAT] << 8);
+        kf[1] = ST16(PVA_ST_BITRATE);
+        kf[2] = ST16(PVA_ST_RATE) | ((unsigned short)(unsigned char)st[PVA_ST_CHANNELS] << 14);
+        kf[3] = (flags & PVA_F_BUFFERING) ? bufp : 0;
+        if (changed(key_fmt, kf, 4)) {
+            if (stream && (flags & PVA_F_BUFFERING))
+                sprintf(t, "Buffering %u%%", bufp);
+            else if (stream)
+                sprintf(t, "%uk %u.%ukHz", ST16(PVA_ST_BITRATE), ST16(PVA_ST_RATE) / 100,
+                        (ST16(PVA_ST_RATE) / 10) % 10);
+            else
+                sprintf(t, "%s %uk %u.%ukHz%s", st[PVA_ST_FORMAT] == PVA_DE_WAV ? "WAV" : "MP3",
+                        ST16(PVA_ST_BITRATE), ST16(PVA_ST_RATE) / 100, (ST16(PVA_ST_RATE) / 10) % 10,
+                        st[PVA_ST_CHANNELS] == 1 ? " mono" : "");
+            put_text(txt_fmt, TXT_FMT_SIZE, t, C_FMT);
+        }
     }
 
     /* play button, status bar */
@@ -417,38 +521,42 @@ static void update_display(void)
         strcpy(txt_play, state == PVA_STATE_PLAYING ? "Pause" : "Play");
         redraw(C_PLAY);
     }
-    t[0] = 0;
-    if (state == PVA_STATE_PLAYING) {
-        sprintf(t, "Playing %u of %u", ST16(PVA_ST_PL_POS) + 1, ST16(PVA_ST_PL_COUNT));
-        if (stream) {
-            unsigned char ns = (unsigned char)st[PVA_ST_NET_STATE];
-            if (ns == PVA_NET_LOOKUP || ns == PVA_NET_CONNECT || ns == PVA_NET_REQUEST)
-                strcat(t, ns == PVA_NET_CONNECT ? " - connecting" : " - opening");
-            else if (ns == PVA_NET_RETRY)
-                strcat(t, " - reconnecting");
-            else if (++shown_rate_ticks >= 2 || !strstr(txt_status, "KB/s")) {
+    ks[0] = state | ((unsigned short)(unsigned char)st[PVA_ST_ERROR] << 8);
+    ks[1] = ST16(PVA_ST_PL_POS);
+    ks[2] = ST16(PVA_ST_PL_COUNT);
+    ks[3] = stream ? ((unsigned short)(unsigned char)st[PVA_ST_NET_STATE] | ((unsigned short)(unsigned char)st[PVA_ST_NET_ERR] << 8)) : 0;
+    ks[4] = stream ? ST16(PVA_ST_DISP_RATE) : 0;
+    ks[5] = (stream ? ST16(PVA_ST_UNDERRUNS) : 0) ^ ST16(PVA_ST_HTTP);
+    if (changed(key_st, ks, 6) || shown_state == 0xFF) {
+        t[0] = 0;
+        if (state == PVA_STATE_PLAYING) {
+            sprintf(t, "Playing %u of %u", ST16(PVA_ST_PL_POS) + 1, ST16(PVA_ST_PL_COUNT));
+            if (stream) {
+                unsigned char ns = (unsigned char)st[PVA_ST_NET_STATE];
+                unsigned short rate = ST16(PVA_ST_DISP_RATE);
                 unsigned short need = (unsigned short)(ST16(PVA_ST_BITRATE) * 10U / 8U);   /* 0.1 KB/s */
-                shown_rate_ticks = 0;           /* the rate: every 2 s */
-                if (ST16(PVA_ST_UNDERRUNS) && ST16(PVA_ST_NET_RATE) < need - need / 20U)
+                if (ns == PVA_NET_LOOKUP || ns == PVA_NET_CONNECT || ns == PVA_NET_REQUEST)
+                    strcat(t, ns == PVA_NET_CONNECT ? " - connecting" : " - opening");
+                else if (ns == PVA_NET_RETRY)
+                    strcat(t, " - reconnecting");
+                else if (ST16(PVA_ST_UNDERRUNS) && rate < need - need / 20U)
                     /* the link is slower than the stream (a far server): say so */
-                    sprintf(t + strlen(t), " - too slow: %u.%u of %u.%u KB/s", ST16(PVA_ST_NET_RATE) / 10,
-                            ST16(PVA_ST_NET_RATE) % 10, need / 10, need % 10);
-                else
-                    sprintf(t + strlen(t), " - %u.%u KB/s", ST16(PVA_ST_NET_RATE) / 10, ST16(PVA_ST_NET_RATE) % 10);
-            } else
-                t[0] = 0;                       /* keep the status as it is */
-        }
-    } else if (state == PVA_STATE_PAUSED)
-        strcpy(t, "Paused");
-    else if ((unsigned char)st[PVA_ST_ERROR] == PVA_E_NET) {
-        sprintf(t, "Stream stopped: %s", net_reason((unsigned char)st[PVA_ST_NET_ERR]));
-        if ((unsigned char)st[PVA_ST_NET_ERR] == PVA_NERR_HTTP)
-            sprintf(t + strlen(t), " %u", ST16(PVA_ST_HTTP));
-    } else if (shown_state != 0xFF && (shown_state != state || shown_err == PVA_E_NET))
-        strcpy(t, "Stopped");
-    shown_err = (unsigned char)st[PVA_ST_ERROR];
-    if (t[0] && strcmp(t, txt_status))
-        set_status(t);
+                    sprintf(t + strlen(t), " - too slow: %u.%u of %u.%u KB/s", rate / 10, rate % 10, need / 10, need % 10);
+                else if (rate)
+                    sprintf(t + strlen(t), " - %u.%u KB/s", rate / 10, rate % 10);
+            }
+        } else if (state == PVA_STATE_PAUSED)
+            strcpy(t, "Paused");
+        else if ((unsigned char)st[PVA_ST_ERROR] == PVA_E_NET) {
+            sprintf(t, "Stream stopped: %s", net_reason((unsigned char)st[PVA_ST_NET_ERR]));
+            if ((unsigned char)st[PVA_ST_NET_ERR] == PVA_NERR_HTTP)
+                sprintf(t + strlen(t), " %u", ST16(PVA_ST_HTTP));
+        } else if (shown_state != 0xFF && (shown_state != state || shown_err == PVA_E_NET))
+            strcpy(t, "Stopped");
+        shown_err = (unsigned char)st[PVA_ST_ERROR];
+        if (t[0] && strcmp(t, txt_status))
+            set_status(t);
+    }
 
     /* time and progress (a stream shows its buffer fill) */
     if (el != shown_elapsed || tot != shown_total || tid != shown_track || stream) {
@@ -499,9 +607,10 @@ unsigned char status_redraws = 2;
 static void tick(void)
 {
     unsigned char hb;
+    flush_redraws();
     if (status_redraws) {
         --status_redraws;
-        Win_Redraw_Status(win_id);
+        redraw_status();
     }
     if (engine_ok == 0)
         return;

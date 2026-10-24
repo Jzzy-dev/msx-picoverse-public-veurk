@@ -432,6 +432,16 @@ int main(int argc, char **argv)
     CHECK(cmd_str(PVA_C_PLAY_PATH, "A:\\") == PVA_E_ARGS, "the root is not a file");
     CHECK(cmd(PVA_C_LOG, NULL, 0) == PVA_OK && strstr((char *)reply, "open"), "LOG has the failures:\n%s", reply);
 
+    {
+        cmd(PVA_C_STOP, NULL, 0);
+        run_ms(200);
+        read_status();
+        uint8_t g0 = st[PVA_ST_DISP_GEN];
+        run_ms(3000);
+        read_status();
+        CHECK(st[PVA_ST_DISP_GEN] == g0, "stopped: the display generation stays put for 3 s (%u -> %u)", g0, st[PVA_ST_DISP_GEN]);
+    }
+
     printf("[card removed / remounted]\n");
     host_disk_open("/nonexistent/none.img", 0);
     CHECK(cmd(PVA_C_MOUNT, NULL, 0) == PVA_E_NOCARD, "MOUNT without a card -> NOCARD");
@@ -487,6 +497,17 @@ int main(int argc, char **argv)
     CHECK(st16(PVA_ST_NET_RATE) >= 150 && st16(PVA_ST_NET_RATE) <= 260, "receive rate %u.%u KB/s", st16(PVA_ST_NET_RATE) / 10, st16(PVA_ST_NET_RATE) % 10);
     CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "Stream: radio.test") && strstr((char *)reply, "KB/s"), "DIAG has the stream:\n%s", reply);
     (void)sf0;
+
+    {
+        // the display generation: about once a second (elapsed), not with every buffer wobble
+        read_status();
+        uint8_t g0 = st[PVA_ST_DISP_GEN];
+        int changes = 0;
+        uint8_t last = g0;
+        for (int i = 0; i < 100; i++) { run_ms(50); read_status(); if (st[PVA_ST_DISP_GEN] != last) { changes++; last = st[PVA_ST_DISP_GEN]; } }
+        CHECK(changes >= 4 && changes <= 8, "display generation changed %d times in 5 s of streaming (buffer %u%%, shown %u%%)",
+              changes, st[PVA_ST_BUF_PCT], st[PVA_ST_DISP_BUF]);
+    }
 
     printf("[pause a stream, the buffer fills, no false reconnect]\n");
     cmd(PVA_C_PAUSE, NULL, 0);

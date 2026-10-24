@@ -851,6 +851,9 @@ static void handle_command(void)
 
 // ---------------------------------------------------------------- status block
 static uint8_t *st_new, *st_pub;    // PVA_STATUS_SIZE each, in the arena
+static uint8_t  disp_gen, disp_buf;
+static uint16_t disp_rate;
+static uint32_t disp_rate_ms;
 static void st8(uint32_t o, uint8_t v) { st_new[o] = v; }
 static void st16(uint32_t o, uint16_t v) { st8(o, (uint8_t)v); st8(o + 1, (uint8_t)(v >> 8)); }
 static void ststr(uint32_t o, const char *s, uint32_t size)
@@ -908,6 +911,38 @@ static void publish_status(void)
         st8(PVA_ST_NET_ERR, ns->err);
         st16(PVA_ST_HTTP, ns->http);
         st16(PVA_ST_BUF_KB, (uint16_t)(cap / 1024u));
+    }
+    // display fields: coarse buffer level and rate, then the generation
+    {
+        uint8_t pct = st_new[PVA_ST_BUF_PCT];
+        if (!strm) disp_buf = 0;
+        else if (pct >= 99) disp_buf = 100;
+        else if (pct + 5u < disp_buf || pct >= disp_buf + 10u) disp_buf = (uint8_t)((pct / 10u) * 10u);
+        uint32_t now = pva_hal_millis();
+        if (!strm) disp_rate = 0;
+        else if (now - disp_rate_ms >= 5000u || !disp_rate)
+        {
+            disp_rate = (uint16_t)(st_new[PVA_ST_NET_RATE] | (st_new[PVA_ST_NET_RATE + 1] << 8));
+            disp_rate_ms = now;
+        }
+        st8(PVA_ST_DISP_BUF, disp_buf);
+        st16(PVA_ST_DISP_RATE, disp_rate);
+        // compare everything except the sequence, VU levels, uptime, log count,
+        // the raw buffer level and rate, and the generation itself
+        static uint8_t view[PVA_STATUS_SIZE];
+        uint8_t tmp[PVA_STATUS_SIZE];
+        memcpy(tmp, st_new, PVA_STATUS_SIZE);
+        tmp[PVA_ST_SEQ] = tmp[PVA_ST_VU_L] = tmp[PVA_ST_VU_R] = 0;
+        tmp[PVA_ST_UPTIME] = tmp[PVA_ST_UPTIME + 1] = 0;
+        tmp[PVA_ST_LOG_COUNT] = tmp[PVA_ST_LOG_COUNT + 1] = 0;
+        tmp[PVA_ST_BUF_PCT] = tmp[PVA_ST_NET_RATE] = tmp[PVA_ST_NET_RATE + 1] = 0;
+        tmp[PVA_ST_DISP_GEN] = 0;
+        if (memcmp(tmp, view, PVA_STATUS_SIZE))
+        {
+            memcpy(view, tmp, PVA_STATUS_SIZE);
+            disp_gen++;
+        }
+        st8(PVA_ST_DISP_GEN, disp_gen);
     }
     st_new[PVA_ST_SEQ] = st_pub[PVA_ST_SEQ];
     if (!memcmp(st_new, st_pub, PVA_STATUS_SIZE)) return;
