@@ -930,7 +930,66 @@ notfound:
 noanswer:
         ld de,txt_noanswer
         call print
+        ; what core 1 left in the window (engine 0.4 and later)
+        ld de,txt_where
+        call print
+        ld hl,#4018
+        call rd
+        ld l,a
+        ld h,0
+        call printdec
+        ld de,txt_lastcmd
+        call print
+        ld hl,#4019
+        call rd
+        call printhex
+        ld de,txt_fault
+        call print
+        ld hl,#401A
+        call rd
+        push af
+        ld l,a
+        ld h,0
+        call printdec
+        pop af
+        or a
+        jr z,.nofault
+        ld de,txt_pc
+        call print
+        ld hl,#401F
+        ld b,4
+.pc:    call rd
+        call printhex
+        dec hl
+        djnz .pc
+        call crlf
+        ld hl,#4F00
+        ld b,64
+.txt:   call rd
+        or a
+        jr z,.nofault
+        call putc
+        inc hl
+        djnz .txt
+.nofault:
+        call crlf
         jp exit
+
+; printhex - A as two hex digits
+printhex:
+        push af
+        rrca
+        rrca
+        rrca
+        rrca
+        call .nib
+        pop af
+.nib:   and #0F
+        add a,'0'
+        cp '9'+1
+        jr c,.p
+        add a,7
+.p:     jp putc
 failed: ld de,txt_failed
         call print
         ld a,(result)
@@ -969,10 +1028,14 @@ exit:   ld c,0
 
 ;------------------------------------------------------------------------------
 idtext:         db "PVAUDIO",0
-txt_hello:      db "PicoVerse Audio Engine test 0.2",13,10,"$"
+txt_hello:      db "PicoVerse Audio Engine test 0.3",13,10,"$"
 txt_found:      db "Engine found in slot $"
 txt_notfound:   db "No PicoVerse Audio Engine found. Flash LoadROM -p1.",13,10,"$"
 txt_noanswer:   db "The engine does not answer (3 s).",13,10,"$"
+txt_where:      db "Core 1 was at $"
+txt_lastcmd:    db " (1 loop 2 command 3 stream 4 radio 5 decode 6 status 7 card), last command $"
+txt_fault:      db "h, fault $"
+txt_pc:         db ", PC $"
 txt_failed:     db "Engine error $"
 txt_nocard:     db ": microSD not mounted",13,10,"$"
 txt_nf:         db ": not found",13,10,"$"

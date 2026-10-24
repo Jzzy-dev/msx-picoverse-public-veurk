@@ -903,7 +903,7 @@ int main(int argc, char *argv[])
             read_status();
             open_folder("");
         } else
-            error_status("Engine", r);
+            if (r < 0) engine_stopped(); else error_status("Engine", r);
     }
 
     timer_id = Timer_Wake(_sympid, 200, 10);

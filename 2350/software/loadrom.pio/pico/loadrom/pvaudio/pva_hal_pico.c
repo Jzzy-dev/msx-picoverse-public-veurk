@@ -21,7 +21,8 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "pico/util/buffer.h"
-#include "hardware/exception.h"
+#include "hardware/structs/scb.h"
+#include "hardware/sync.h"
 #include "pva_internal.h"
 
 #define PVA_I2S_DATA_PIN  29
@@ -173,7 +174,14 @@ void __attribute__((naked)) pva_hardfault_entry(void)
 // leaves the note first. Installed by core 1 for the shared vector table.
 void pva_hal_install_fault_handler(void)
 {
-    exception_restore_handler(HARDFAULT_EXCEPTION, pva_hardfault_entry);
+    // straight into the (RAM) vector table: the SDK's exception_*_handler()
+    // calls assert that no handler is installed yet, and crash.c has one
+    uint32_t vtor = scb_hw->vtor;
+    if (vtor < 0x20000000u || vtor >= 0x20082000u) return;     // not in SRAM: leave it
+    uint32_t save = save_and_disable_interrupts();
+    ((void (**)(void))vtor)[3] = pva_hardfault_entry;          // vector 3 = HardFault
+    __dmb();
+    restore_interrupts(save);
 }
 
 void __attribute__((used)) pva_panic(const char *fmt)

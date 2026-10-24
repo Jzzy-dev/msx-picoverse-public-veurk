@@ -97,7 +97,6 @@ target_link_libraries(loadrom
     hardware_dma
     hardware_pio
     hardware_uart
-    hardware_exception
     tinyusb_board
     tinyusb_host
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
