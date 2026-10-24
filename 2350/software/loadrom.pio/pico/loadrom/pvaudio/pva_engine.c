@@ -500,7 +500,17 @@ static int open_stream(const char *entry)
     r = pva_dec_open_stream(&info);
     if (r != PVA_OK) { pva_net_stop(); return r; }
     snprintf(info.album, sizeof info.album, "%s", given_station);
-    snprintf(info.title, sizeof info.title, "%s", given_station[0] ? given_station : pva_net_host());
+    if (given_station[0]) snprintf(info.title, sizeof info.title, "%s", given_station);
+    else
+    {
+        // the host name until the station tells its name
+        const char *h = strstr(u, "://");
+        h = h ? h + 3 : u;
+        size_t k = 0;
+        while (h[k] && h[k] != '/' && h[k] != ':' && k + 1 < sizeof info.title) k++;
+        memcpy(info.title, h, k);
+        info.title[k] = 0;
+    }
     buffering = true;
     prefill = (uint32_t)(pva_net_capacity() / 4u);
     if (prefill > 24u * 1024u) prefill = 24u * 1024u;
@@ -702,6 +712,7 @@ static int cmd_diag(void)
 {
     char t[1400];
     uint32_t up = pva_hal_millis() / 1000u;
+    // lines of at most ~56 characters: PicoPlay's text window wraps at 60
     int n = snprintf(t, sizeof t,
         "PicoVerse Audio Engine %d.%d (API %d)\r\n"
         "Uptime %lu s, heartbeat %u, longest gap %lu ms\r\n"
@@ -714,11 +725,11 @@ static int cmd_diag(void)
                       fs.fs_type == FS_FAT12 ? "12" : fs.fs_type == FS_FAT16 ? "16" : fs.fs_type == FS_FAT32 ? "32" : "ex",
                       (unsigned long)((fs.n_fatent - 2u) * fs.csize), (unsigned)(fs.csize / 2u));
     n += snprintf(t + n, sizeof t - (size_t)n,
-        "Folder: %.60s (%u entries)\r\n"
-        "Play list: %u tracks, position %u, mode %u\r\n"
+        "Folder: %.36s (%u entries)\r\n"
+        "Play list: %u, position %u, mode %u\r\n"
         "State %u, error %u, last FRESULT %d/%d\r\n"
         "Track: %u Hz, %u ch, %lu kbit/s, %lu s\r\n"
-        "Arena free: %lu bytes, stack used %lu of %lu, log lines %u\r\n",
+        "Arena free %lu, stack %lu/%lu, log %u lines\r\n",
         cur_dir[0] ? cur_dir : "/", (unsigned)dir_count,
         (unsigned)pl_count, (unsigned)pl_pos, (unsigned)mode,
         (unsigned)state, (unsigned)play_error, (int)last_fr, (int)pva_dec_last_fresult(),
@@ -726,18 +737,24 @@ static int cmd_diag(void)
         (unsigned long)pva_arena_free(), (unsigned long)stack_used(), (unsigned long)stack_size, (unsigned)pva_log_count());
     const pva_net_stats_t *ns = pva_net_stats();
     if (pva_net_active() || ns->rx_bytes || ns->err)
+    {
+        uint32_t need = info.bitrate_kbps * 10u / 8u;      // 0.1 KB/s
         n += snprintf(t + n, sizeof t - (size_t)n,
-            "Stream: %.40s%s, net state %u, error %u, HTTP %u\r\n"
-            "  %lu.%lu KB/s, %lu KB received, buffer %lu/%lu KB%s\r\n"
-            "  reconnects %u, gaps %lu (longest %lu ms), underruns %u\r\n"
-            "  DNS %lu ms, open %lu ms, read size %u, ESP errors %lu, lost %lu\r\n",
-            pva_net_host(), ns->tls ? " (TLS)" : "", (unsigned)ns->state, (unsigned)ns->err, (unsigned)ns->http,
+            "Stream: %.40s%s\r\n"
+            "  net state %u, error %u, HTTP %u\r\n"
+            "  %lu.%lu KB/s (needs %lu.%lu), %lu KB received\r\n"
+            "  buffer %lu/%lu KB%s, underruns %u, reconnects %u\r\n"
+            "  gaps %lu, longest %lu ms, ESP errors %lu, lost %lu\r\n"
+            "  DNS %lu ms, open %lu ms, read size %u\r\n",
+            pva_net_host(), ns->tls ? " (TLS)" : "",
+            (unsigned)ns->state, (unsigned)ns->err, (unsigned)ns->http,
             (unsigned long)(ns->rate_bps / 1000u), (unsigned long)((ns->rate_bps / 100u) % 10u),
-            (unsigned long)(ns->rx_bytes / 1024u), (unsigned long)(pva_net_buffered() / 1024u),
-            (unsigned long)(pva_net_capacity() / 1024u), buffering ? " filling" : "",
-            (unsigned)ns->reconnects, (unsigned long)ns->gaps, (unsigned long)ns->longest_gap_ms, (unsigned)stream_underruns,
-            (unsigned long)ns->dns_ms, (unsigned long)ns->open_ms, (unsigned)ns->rcv_max,
-            (unsigned long)ns->esp_errors, (unsigned long)ns->overflow);
+            (unsigned long)(need / 10u), (unsigned long)(need % 10u), (unsigned long)(ns->rx_bytes / 1024u),
+            (unsigned long)(pva_net_buffered() / 1024u), (unsigned long)(pva_net_capacity() / 1024u), buffering ? " filling" : "",
+            (unsigned)stream_underruns, (unsigned)ns->reconnects,
+            (unsigned long)ns->gaps, (unsigned long)ns->longest_gap_ms, (unsigned long)ns->esp_errors, (unsigned long)ns->overflow,
+            (unsigned long)ns->dns_ms, (unsigned long)ns->open_ms, (unsigned)ns->rcv_max);
+    }
     else if (!pva_net_capacity())
         n += snprintf(t + n, sizeof t - (size_t)n, "Streams: no buffer memory\r\n");
     set_reply_text(t, (size_t)n);
@@ -806,6 +823,8 @@ static int execute(uint8_t code)
     }
 }
 
+static void publish_status(void);
+
 static void handle_command(void)
 {
     uint32_t post = pva_mailbox.post_count;
@@ -822,7 +841,9 @@ static void handle_command(void)
     pva_win[PVA_R_RESULT] = (uint8_t)r;
     pva_win[PVA_R_REPLY_LEN] = (uint8_t)(reply_len & 0xFF);
     pva_win[PVA_R_REPLY_LEN + 1] = (uint8_t)(reply_len >> 8);
-    status_dirty = true;
+    // the status must already show what the command did when the MSX sees it done
+    publish_status();
+    status_dirty = false;
     pva_barrier();
     pva_win[PVA_R_DONE_TOKEN] = token;
     pva_win[PVA_R_BUSY] = 0;
@@ -998,7 +1019,11 @@ bool pva_core1_poll(void)
             prefill = (uint32_t)(pva_net_capacity() / 2u);
             if (prefill > 48u * 1024u) prefill = 48u * 1024u;
             status_dirty = true;
-            pva_log("stream: buffer empty, refilling");
+            {
+                uint32_t have = pva_net_stats()->rate_bps / 100u, need = info.bitrate_kbps * 10u / 8u;
+                pva_log("stream: empty, got %lu.%lu KB/s, needs %lu.%lu",
+                        (unsigned long)(have / 10u), (unsigned long)(have % 10u), (unsigned long)(need / 10u), (unsigned long)(need % 10u));
+            }
         }
         if (r != 0) work = true;
         if (r < 0)

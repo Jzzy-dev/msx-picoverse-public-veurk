@@ -36,6 +36,7 @@ uint32_t host_esp_drop_after = 0;           // close each stream after this many
 uint32_t host_esp_stall_at = 0;             // pause the server at this body byte ...
 uint32_t host_esp_stall_ms = 0;             // ... for this long
 size_t   host_stream_ram_size = 128u * 1024u;
+uint32_t host_esp_rtt_ms = 0;               // > 0: TCP window limit (2144 bytes per round trip)
 
 // statistics for the checks
 uint32_t host_esp_opens, host_esp_closes, host_esp_tls_opens, host_esp_requests, host_esp_rcvs;
@@ -174,7 +175,9 @@ static void gen(conn_t *c, uint32_t ms)
     if (c->kind != 1 && c->kind != 2) return;
     if (c->closed) return;
     if (c->stall_until && now_ms < c->stall_until) return;
-    c->credit += (double)host_esp_server_bps * ms / 1000.0;
+    double bps = host_esp_server_bps;
+    if (host_esp_rtt_ms && 2144.0 * 1000.0 / host_esp_rtt_ms < bps) bps = 2144.0 * 1000.0 / host_esp_rtt_ms;
+    c->credit += bps * ms / 1000.0;
     size_t want = (size_t)c->credit;
     if (c->out.len > 16384) want = 0;           // TCP window full: server waits
     c->credit -= (double)want;
@@ -249,6 +252,9 @@ static void request(const uint8_t *p, size_t n)
             int slot = 0;
             for (int i = 1; i <= 4; i++) if (!conns[i].used) { slot = i; break; }
             bool tls = (a[10] & 0x04) != 0;
+            bool tls_busy = false;
+            for (int i = 1; i <= 4; i++) if (conns[i].used && conns[i].tls) tls_busy = true;
+            if (!slot || (tls && tls_busy)) { answer(host_esp_open_ms, fn, 9, NULL, 0); break; }   // ERR_NO_FREE_CONN
             uint16_t port = (uint16_t)(a[4] | (a[5] << 8));
             bool known = (a[0] == 10 && a[3] >= 1 && a[3] <= 3);
             if (!slot || !known || (a[3] == 2 && port != 8000)) { answer(host_esp_open_ms, fn, 3, NULL, 0); break; }
@@ -272,6 +278,7 @@ static void request(const uint8_t *p, size_t n)
             break;
         }
         case 14:
+        case 15:
         {
             uint8_t cn = a[0];
             if (cn >= 1 && cn <= 4 && conns[cn].used)
@@ -358,6 +365,13 @@ void host_esp_reset(void)
     while (answers) { ans_t *a = answers; answers = a->next; free(a->data.b); free(a); }
     uart_rx.len = 0;
     tx.len = 0;
+}
+
+// a connection some earlier program left open in the ESP (survives an MSX reset)
+void host_esp_leftover(bool tls)
+{
+    for (int i = 1; i <= 4; i++)
+        if (!conns[i].used) { memset(&conns[i], 0, sizeof conns[i]); conns[i].used = true; conns[i].tls = tls; conns[i].ip[0] = 192; host_esp_opens++; return; }
 }
 
 int host_esp_open_conns(void)

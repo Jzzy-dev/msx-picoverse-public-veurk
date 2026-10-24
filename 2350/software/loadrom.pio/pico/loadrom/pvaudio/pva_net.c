@@ -51,6 +51,8 @@
 #define FN_NETSTATE     3u
 #define FN_TCPOPEN      13u
 #define FN_TCPCLOSE     14u
+#define FN_TCPABORT     15u
+#define RC_NO_FREE_CONN 9u          // UNAPI ERR_NO_FREE_CONN
 #define FN_TCPSEND      17u
 #define FN_TCPRCV       18u
 #define FN_DNS          206u
@@ -118,7 +120,8 @@ size_t pva_net_capacity(void) { return ring_size; }
 enum
 {
     S_IDLE, S_NETSTATE, S_DNS, S_OPEN, S_SEND, S_HEADERS, S_BODY, S_CLOSE, S_WAIT, S_FAILED,
-    S_ABANDON       // stopped while an answer (DNS, open) was on its way: wait for it
+    S_ABANDON,      // stopped while an answer (DNS, open) was on its way: wait for it
+    S_CLEANUP       // no free ESP connection: abort leftovers, then open again
 };
 enum { AFTER_NONE, AFTER_RETRY, AFTER_REDIRECT, AFTER_FAIL, AFTER_IDLE };
 
@@ -142,6 +145,8 @@ static uint32_t t_start;            // start of the current request phase
 static uint32_t last_data_ms;
 static bool     ever_streamed;
 static bool     abandon_close;      // S_ABANDON: close 'conn' once the answer is in
+static bool     cleaned;            // leftover ESP connections were aborted (once per stream)
+static uint8_t  cleanup_n;
 static bool     restart_pending;    // a new URL waits until the old connection is closed
 
 // HTTP request being sent
@@ -792,7 +797,20 @@ void pva_net_poll(void)
             if (rsp_timeout || rc != 0 || pgot < 1)
             {
                 pva_log("stream: %s open failed (%s %u)", tls ? "TLS" : "TCP", rsp_timeout ? "timeout" : "rc", (unsigned)rc);
+                bool no_free = !rsp_timeout && rc == RC_NO_FREE_CONN;
                 esp_clear();
+                if (no_free && !cleaned)
+                {
+                    // The ESP keeps connections over an MSX reset, and it has only
+                    // four (one with TLS). Whatever is still open now is a leftover:
+                    // nothing else can use the ESP while the engine has it.
+                    cleaned = true;
+                    cleanup_n = 1;
+                    pva_log("stream: ESP full, closing old connections");
+                    esp_request(FN_TCPABORT, &cleanup_n, 1, NULL, 0, T_CLOSE_MS);
+                    s = S_CLEANUP;
+                    return;
+                }
                 fail_or_retry(PVA_NERR_CONNECT);
                 return;
             }
@@ -851,6 +869,17 @@ void pva_net_poll(void)
                     release(S_IDLE);
                     return;
             }
+
+        case S_CLEANUP:
+            if (!esp_finished()) return;
+            esp_clear();                            // the answer does not matter
+            if (++cleanup_n <= 4)
+            {
+                esp_request(FN_TCPABORT, &cleanup_n, 1, NULL, 0, T_CLOSE_MS);
+                return;
+            }
+            start_open();
+            return;
 
         case S_ABANDON:
             if (!esp_finished()) return;
@@ -945,6 +974,7 @@ int pva_net_start(const char *u)
     redirects = 0;
     retry_delay_ms = 1000u;
     ever_streamed = false;
+    cleaned = false;
     memset(rate_slot, 0, sizeof rate_slot);
     rate_t = pva_hal_millis();
     rate_i = 0;
@@ -1015,7 +1045,7 @@ const pva_net_stats_t *pva_net_stats(void)
     {
         case S_IDLE: st.state = PVA_NET_IDLE; break;
         case S_NETSTATE: case S_DNS: st.state = PVA_NET_LOOKUP; break;
-        case S_OPEN: st.state = PVA_NET_CONNECT; break;
+        case S_OPEN: case S_CLEANUP: st.state = PVA_NET_CONNECT; break;
         case S_SEND: case S_HEADERS: st.state = PVA_NET_REQUEST; break;
         case S_BODY: st.state = body_playlist ? PVA_NET_REQUEST : PVA_NET_STREAM; break;
         case S_CLOSE: case S_WAIT: st.state = (after == AFTER_FAIL) ? PVA_NET_FAILED : PVA_NET_RETRY; break;

@@ -32,6 +32,8 @@ extern uint8_t host_esp_wifi_state;
 extern uint32_t host_esp_server_bps, host_esp_drop_after, host_esp_stall_at, host_esp_stall_ms, host_esp_tls_ms;
 extern uint32_t host_esp_opens, host_esp_closes, host_esp_tls_opens, host_esp_requests;
 extern char host_esp_last_sni[64], host_esp_last_get[300];
+void host_esp_leftover(bool tls);
+extern uint32_t host_esp_rtt_ms;
 
 static int failures, checks;
 #define CHECK(cond, ...) do { checks++; if (!(cond)) { failures++; printf("  FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } else if (verbose) { printf("  ok: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -598,6 +600,36 @@ int main(int argc, char **argv)
               "second station plays ('%s')", ststr(PVA_ST_ALBUM));
         cmd(PVA_C_STOP, NULL, 0);
     }
+
+    printf("[leftover ESP connections from before an MSX reset]\n");
+    host_esp_leftover(true);                    // e.g. an HTTPS download of a SymbOS program
+    host_esp_leftover(false);
+    {
+        static const char al[] = "https://secure.test/stream.mp3\0";
+        cmd(PVA_C_PLAY_URL, al, sizeof al);
+    }
+    run_ms(6000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st[PVA_ST_NET_STATE] == PVA_NET_STREAM, "TLS refused (rc 9), leftovers aborted, the stream plays");
+    CHECK(cmd(PVA_C_LOG, NULL, 0) == PVA_OK && strstr((char *)reply, "closing old connections"), "logged");
+    cmd(PVA_C_STOP, NULL, 0);
+    run_ms(100);
+    CHECK(host_esp_open_conns() == 0, "nothing left open in the ESP");
+
+    printf("[far server: the ESP's TCP window limits the rate]\n");
+    host_esp_rtt_ms = 183;                      // 2144 bytes per 183 ms = 11.7 KB/s < 16 KB/s
+    {
+        static const char af[] = "http://radio.test/plain\0";
+        cmd(PVA_C_PLAY_URL, af, sizeof af);
+    }
+    run_ms(30000);
+    read_status();
+    CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st16(PVA_ST_UNDERRUNS) >= 1 && st16(PVA_ST_NET_RATE) < 125,
+          "plays with refills at %u.%u KB/s (%u underruns)", st16(PVA_ST_NET_RATE) / 10, st16(PVA_ST_NET_RATE) % 10, st16(PVA_ST_UNDERRUNS));
+    CHECK(cmd(PVA_C_LOG, NULL, 0) == PVA_OK && strstr((char *)reply, "got 11.7 KB/s, needs 16.0"), "the log says why:\n%s", reply);
+    CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "11.7 KB/s (needs 16.0)"), "DIAG says it too:\n%s", reply);
+    host_esp_rtt_ms = 0;
+    cmd(PVA_C_STOP, NULL, 0);
 
     printf("[stream errors]\n");
     struct { const char *u; uint8_t nerr; uint16_t http; const char *what; } errs[] = {

@@ -427,8 +427,14 @@ static void update_display(void)
             else if (ns == PVA_NET_RETRY)
                 strcat(t, " - reconnecting");
             else if (++shown_rate_ticks >= 2 || !strstr(txt_status, "KB/s")) {
+                unsigned short need = (unsigned short)(ST16(PVA_ST_BITRATE) * 10U / 8U);   /* 0.1 KB/s */
                 shown_rate_ticks = 0;           /* the rate: every 2 s */
-                sprintf(t + strlen(t), " - %u.%u KB/s", ST16(PVA_ST_NET_RATE) / 10, ST16(PVA_ST_NET_RATE) % 10);
+                if (ST16(PVA_ST_UNDERRUNS) && ST16(PVA_ST_NET_RATE) < need - need / 20U)
+                    /* the link is slower than the stream (a far server): say so */
+                    sprintf(t + strlen(t), " - too slow: %u.%u of %u.%u KB/s", ST16(PVA_ST_NET_RATE) / 10,
+                            ST16(PVA_ST_NET_RATE) % 10, need / 10, need % 10);
+                else
+                    sprintf(t + strlen(t), " - %u.%u KB/s", ST16(PVA_ST_NET_RATE) / 10, ST16(PVA_ST_NET_RATE) % 10);
             } else
                 t[0] = 0;                       /* keep the status as it is */
         }
