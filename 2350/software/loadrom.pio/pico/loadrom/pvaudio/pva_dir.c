@@ -37,11 +37,12 @@
 #define T_CLOSE_MS      1000u
 #define T_QUERY_MS      30000u      // a whole list
 #define IDLE_POLL_MS    4u
+#define QUIET_MS        400u        // no data this long: ask the ESP whether the server closed
 #define CACHE_SIZE      6144u       // the engine keeps the country list here
 
 static const char *const mirrors[] = {
-    "all.api.radio-browser.info", "de1.api.radio-browser.info", "nl1.api.radio-browser.info",
-    "at1.api.radio-browser.info", "de2.api.radio-browser.info", "fi1.api.radio-browser.info",
+    "all.api.radio-browser.info", "de1.api.radio-browser.info", "de2.api.radio-browser.info",
+    "fi1.api.radio-browser.info", "nl1.api.radio-browser.info", "at1.api.radio-browser.info",
 };
 #define N_MIRRORS (sizeof mirrors / sizeof mirrors[0])
 
@@ -71,11 +72,13 @@ const char *pva_dir_uuid(uint16_t i) { return i < nents ? at(ents[i].uuid) : "";
 uint16_t    pva_dir_num(uint16_t i)  { return i < nents ? ents[i].num : 0; }
 
 // ---------------------------------------------------------------- JSON
+static bool     discard_body;       // a click: the reply does not matter
 // The replies are a top-level array of flat objects. Only fields of those
 // objects (depth 2) are looked at; anything deeper is skipped.
 static uint8_t  kind;               // PVA_DIRQ_xxx of the query
 static int      depth;
 static bool     in_str, esc, expect_key, is_key, have_val;
+static bool     json_seen, json_done;   // the top-level value began / ended (the reply is complete)
 static uint8_t  uhex;
 static uint32_t ucp;
 static char     key[20];
@@ -109,6 +112,7 @@ static bool eq_ci(const char *a, const char *b)
 
 static void obj_end(void)
 {
+    if (discard_body) return;
     if (nents >= MAX_ENTRIES) { truncated = true; return; }
     if (!f_name[0]) return;
     dent_rb_t e = { 0xFFFF, 0xFFFF, 0xFFFF, 0 };
@@ -140,6 +144,7 @@ static void obj_end(void)
 static void field(bool str)
 {
     val[vlen] = 0;
+    if (discard_body) return;
     if (!strcmp(key, "name")) { size_t n = vlen < sizeof f_name - 1 ? vlen : sizeof f_name - 1; memcpy(f_name, val, n); f_name[n] = 0; }
     else if (!strcmp(key, "url_resolved")) { if (vlen >= URL_KEEP) f_url_long = true; else memcpy(f_url, val, (size_t)vlen + 1); }
     else if (!strcmp(key, "codec")) { size_t n = vlen < sizeof f_codec - 1 ? vlen : sizeof f_codec - 1; memcpy(f_codec, val, n); f_codec[n] = 0; }
@@ -167,7 +172,7 @@ static void put_utf8(uint32_t cp)
 static void json_reset(void)
 {
     depth = 0;
-    in_str = esc = have_val = false;
+    in_str = esc = have_val = json_seen = json_done = false;
     expect_key = true;
     uhex = 0;
 }
@@ -216,6 +221,7 @@ static void json_byte(char c)
             }
             return;
         case '{':
+            json_seen = true;
             depth++;
             if (depth == 2) { obj_start(); expect_key = true; have_val = false; }
             return;
@@ -226,12 +232,15 @@ static void json_byte(char c)
                 obj_end();
             }
             if (depth > 0) depth--;
+            if (!depth && json_seen) json_done = true;
             return;
         case '[':
+            json_seen = true;
             depth++;
             return;
         case ']':
             if (depth > 0) depth--;
+            if (!depth && json_seen) json_done = true;
             return;
         case ':':
             if (depth == 2) { expect_key = false; vlen = 0; }
@@ -280,10 +289,10 @@ static bool     status_seen;
 static uint32_t content_len, body_got;
 static char    *location;           // URL_KEEP + 1
 static uint32_t t_query, wait_until, t_phase;
-static bool     discard_body;       // a click: the reply does not matter
 static bool     cancel_req;
 static char     click_uuid[40];
 static bool     click_pending;
+static uint32_t state_asked;        // last TCP_STATE question
 static bool     q_pending;          // a list waits for the running request to end
 static uint8_t  q_kind;
 static char    *q_path;             // PATH_MAX_D + 1
@@ -362,7 +371,8 @@ static void d_feed(const uint8_t *p, size_t n)
         }
         if (d != D_BODY) return;
         body_got++;
-        if (!discard_body && qhttp == 200) json_byte(c);
+        // a click's reply is only followed to its end
+        if (qhttp == 200 && !json_done) json_byte(c);
     }
 }
 
@@ -387,6 +397,8 @@ static bool parse_target(const char *u)
 static void d_connect(void)
 {
     status_seen = false;
+    state_asked = 0;
+    json_reset();
     line_len = 0;
     location[0] = 0;
     content_len = 0;
@@ -550,7 +562,13 @@ void pva_dir_poll(void)
                 uint32_t got = DS->rcv_data;
                 pva_esp_clear(DS);
                 if (timeout) { d_trouble(PVA_NERR_TIMEOUT); return; }
-                if (r != 0 || (content_len && d == D_BODY && body_got >= content_len))
+                // The reply is complete when the JSON value has ended, when all
+                // the bytes Content-Length announced are in, or when the server
+                // has closed. The ESP does not tell a close in TCP_RCV (it keeps
+                // answering "no data"): TCP_STATE does, after a quiet moment.
+                bool ended = d == D_BODY && (json_done || (content_len && body_got >= content_len) ||
+                                             (qhttp >= 300 && qhttp < 400 && location[0]));
+                if (r != 0 || ended)
                 {
                     // the server closed (or sent all it announced): the reply is complete
                     if (d != D_BODY) { d_trouble(PVA_NERR_CLOSED); return; }
@@ -567,8 +585,34 @@ void pva_dir_poll(void)
                 wait_until = got ? now : now + IDLE_POLL_MS;
                 if (got) t_phase = now;
             }
+            else if (DS->want_fn == PVA_FN_TCPSTATE)
+            {
+                if (!pva_esp_finished(DS)) return;
+                bool timeout = DS->rsp_timeout;
+                uint8_t r = DS->rc, cstate = DS->pfirst[1];
+                uint16_t avail = (uint16_t)(DS->pfirst[2] | (DS->pfirst[3] << 8));
+                bool ok = DS->pgot >= 4;
+                pva_esp_clear(DS);
+                state_asked = now;
+                if (!timeout && (r != 0 || (ok && cstate != 4u && avail == 0)))
+                {
+                    // closed by the server, nothing left to read
+                    if (d != D_BODY) { d_trouble(PVA_NERR_CLOSED); return; }
+                    if (qhttp >= 300 && qhttp < 400 && location[0] && redirects < MAX_REDIRECTS) { redirects++; d_close_then(A_REDIRECT); return; }
+                    if (qhttp != 200) { d_fail(PVA_NERR_HTTP); d_trouble(PVA_NERR_HTTP); return; }
+                    d_close_then(A_DONE);
+                    return;
+                }
+                wait_until = now;
+            }
+            if (!DS->want_fn && now - t_phase >= QUIET_MS && now - state_asked >= QUIET_MS)
+            {
+                uint8_t a = conn;
+                pva_esp_request(DS, PVA_FN_TCPSTATE, &a, 1, NULL, 0, T_RCV_MS);
+                return;
+            }
             if (now - t_phase > 10000u || now - t_query > T_QUERY_MS) { d_trouble(PVA_NERR_TIMEOUT); return; }
-            if ((int32_t)(now - wait_until) >= 0) ask_rcv();
+            if (!DS->want_fn && (int32_t)(now - wait_until) >= 0) ask_rcv();
             return;
         case D_CLOSE:
             pva_esp_clear(DS);

@@ -33,6 +33,8 @@
 #define PVA_ARENA_MIN_SIZE  (96u * 1024u)
 
 // Shared state. 'arena' must stay valid forever and is not touched by core 0.
+extern volatile uint8_t *pva_win;   // the register window (NULL before pva_init)
+
 void pva_init(uint8_t *arena, size_t arena_size);
 
 // Optional: the core 1 stack, pre-filled with 0xA5, so DIAG can report its use.

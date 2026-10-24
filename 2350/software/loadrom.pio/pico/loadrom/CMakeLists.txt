@@ -97,6 +97,7 @@ target_link_libraries(loadrom
     hardware_dma
     hardware_pio
     hardware_uart
+    hardware_exception
     tinyusb_board
     tinyusb_host
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
@@ -108,6 +109,7 @@ set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/lib/picomp3lib/src/buffers
 
 target_compile_definitions(loadrom PRIVATE
     PICO_AUDIO_I2S_PIO=0
+    PICO_PANIC_FUNCTION=pva_panic
 )
 
 # Add the standard include files to the build

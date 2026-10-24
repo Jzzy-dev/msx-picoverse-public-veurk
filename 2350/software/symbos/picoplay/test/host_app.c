@@ -314,7 +314,7 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
             ticks_left = 15;
             return 0;
         case 19:
-            CHECK(engine_ok == 2 && strstr(txt_status, "no heartbeat"), "status '%s'", txt_status);
+            CHECK(engine_ok == 2 && strstr(txt_status, "Engine stuck in"), "status '%s'", txt_status);
             {
                 uint32_t t0 = pva_hal_millis();
                 engine_ok = 1;                          // try a command anyway

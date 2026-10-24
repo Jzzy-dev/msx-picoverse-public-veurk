@@ -2768,6 +2768,7 @@ static void __no_inline_not_in_flash_func(core1_pva_task)(void)
     pva_core1_init();
     while (true)
     {
+        if (pva_win) pva_win[PVA_R_WHERE] = PVA_W_CARD;
         sunrise_sd_poll();
         if (!pva_core1_poll())
             sleep_us(50);

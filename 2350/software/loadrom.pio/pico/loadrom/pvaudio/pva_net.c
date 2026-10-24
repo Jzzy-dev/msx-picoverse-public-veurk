@@ -56,6 +56,7 @@
 #define FN_TCPSEND      PVA_FN_TCPSEND
 #define FN_TCPRCV       PVA_FN_TCPRCV
 #define FN_DNS          PVA_FN_DNS
+#define FN_TCPSTATE     PVA_FN_TCPSTATE
 
 #define T_NETSTATE_MS   2000u
 #define T_DNS_MS        15000u
@@ -594,8 +595,30 @@ static void rate_tick(void)
     }
 }
 
+// The ESP does not report a close in TCP_RCV (it answers "no data"), so
+// after a quiet moment TCP_STATE is asked whether the server has closed.
+#define QUIET_MS        400u
+static uint32_t last_rx_ms, state_ask_ms;
+
+static void server_closed(void)
+{
+    if (s == S_BODY && body_playlist) { finish_playlist(); return; }
+    if (s == S_HEADERS && !ever_streamed) { fail_or_retry(PVA_NERR_CLOSED); return; }
+    lost_connection(PVA_NERR_CLOSED);
+}
+
 static void poll_receive(uint32_t now)
 {
+    if (want_fn == FN_TCPSTATE)
+    {
+        if (!esp_finished()) return;
+        bool closed = !rsp_timeout && (rc != 0 || (pgot >= 4 && pfirst[1] != 4u && !(pfirst[2] | pfirst[3])));
+        esp_clear();
+        state_ask_ms = now;
+        if (decided) { close_then(decided); return; }
+        if (closed) { pva_log("stream: closed by the server"); server_closed(); return; }
+        wait_until = now;
+    }
     if (want_fn == FN_TCPRCV)
     {
         if (!esp_finished()) return;
@@ -616,14 +639,13 @@ static void poll_receive(uint32_t now)
                 wait_until = now + IDLE_POLL_MS;
                 return;
             }
-            if (s == S_BODY && body_playlist) { finish_playlist(); return; }
-            if (s == S_HEADERS && !ever_streamed) { fail_or_retry(PVA_NERR_CLOSED); return; }
-            lost_connection(PVA_NERR_CLOSED);
+            server_closed();
             return;
         }
         if (got == 0) wait_until = now + IDLE_POLL_MS;
         else
         {
+            last_rx_ms = now;
             wait_until = now;
             if (s == S_BODY && !body_playlist)
             {
@@ -644,6 +666,13 @@ static void poll_receive(uint32_t now)
         uint32_t gap = now - last_data_ms;
         if (gap > st.longest_gap_ms) st.longest_gap_ms = gap;
         if (gap > T_NODATA_MS) { lost_connection(PVA_NERR_TIMEOUT); return; }
+    }
+    if (want_fn) return;
+    if ((int32_t)(now - wait_until) >= 0 && now - last_rx_ms >= QUIET_MS && now - state_ask_ms >= 2u * QUIET_MS)
+    {
+        uint8_t a = conn;
+        esp_request(FN_TCPSTATE, &a, 1, NULL, 0, T_RCV_MS);
+        return;
     }
     if ((int32_t)(now - wait_until) >= 0 && !request_rcv())
         last_data_ms = now;         // buffer full (paused): that is not a stall
@@ -737,6 +766,8 @@ void pva_net_poll(void)
             esp_clear();
             if (req_pos < req_len) { send_next_chunk(); return; }
             s = S_HEADERS;
+            last_rx_ms = now;
+            state_ask_ms = now;
             t_start = now;
             wait_until = now;
             request_rcv();
@@ -904,6 +935,8 @@ static void stop_session(void)
     if (!hal_open) { s = S_IDLE; return; }
     switch (s)
     {
+        case S_ABANDON:
+            return;                     // already giving the session up
         case S_CLOSE:
             after = AFTER_IDLE;         // a close is already on its way
             return;
@@ -912,8 +945,8 @@ static void stop_session(void)
         case S_NETSTATE:
             if (want_fn && !esp_finished())
             {
-                // the answer may take a while (TLS): wait at most 2 s for it
-                pva_esp_shorten(NS, 2000u);
+                // the answer may take a while (TLS): wait for it (at most 8 s)
+                pva_esp_shorten(NS, 8000u);
                 s = S_ABANDON;
                 return;
             }

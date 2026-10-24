@@ -21,6 +21,7 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "pico/util/buffer.h"
+#include "hardware/exception.h"
 #include "pva_internal.h"
 
 #define PVA_I2S_DATA_PIN  29
@@ -130,6 +131,57 @@ void pva_hal_audio_commit(uint32_t frames, uint32_t sample_rate)
     current->sample_count = frames;
     give_audio_buffer(pool, current);
     current = NULL;
+}
+
+// ---------------------------------------------------------------- crashes
+// A crash or a panic (pico_malloc out of heap, say) stops the core. Leave a
+// note in the register window, which core 0 keeps serving, so the MSX side can
+// tell what happened instead of only "no heartbeat".
+static void pva_fault_note(uint8_t kind, uint32_t pc, const char *text)
+{
+    if (!pva_win) return;
+    pva_win[PVA_R_FAULT_PC] = (uint8_t)pc;
+    pva_win[PVA_R_FAULT_PC + 1] = (uint8_t)(pc >> 8);
+    pva_win[PVA_R_FAULT_PC + 2] = (uint8_t)(pc >> 16);
+    pva_win[PVA_R_FAULT_PC + 3] = (uint8_t)(pc >> 24);
+    if (text)
+        for (int i = 0; i < 63 && text[i]; i++) pva_win[PVA_R_FAULT_TEXT + i] = (uint8_t)text[i];
+    pva_win[PVA_R_FAULT] = kind;
+}
+
+void __attribute__((used)) pva_fault_record(uint32_t *frame)
+{
+    pva_fault_note(1, frame[6], get_core_num() ? "HardFault on core 1" : "HardFault on core 0");
+    for (;;) __asm volatile("wfe");
+}
+
+void __attribute__((naked)) pva_hardfault_entry(void)
+{
+    __asm volatile(
+        "movs r0, #4\n"
+        "mov r1, lr\n"
+        "tst r0, r1\n"
+        "beq 1f\n"
+        "mrs r0, psp\n"
+        "b pva_fault_record\n"
+        "1:\n"
+        "mrs r0, msp\n"
+        "b pva_fault_record\n");
+}
+
+// The microSD library's crash handler (crash.c) halts in a breakpoint; ours
+// leaves the note first. Installed by core 1 for the shared vector table.
+void pva_hal_install_fault_handler(void)
+{
+    exception_restore_handler(HARDFAULT_EXCEPTION, pva_hardfault_entry);
+}
+
+void __attribute__((used)) pva_panic(const char *fmt)
+{
+    uint32_t lr;
+    __asm volatile("mov %0, lr" : "=r"(lr));
+    pva_fault_note(2, lr, fmt);
+    for (;;) __asm volatile("wfe");
 }
 
 uint32_t pva_hal_millis(void)

@@ -153,3 +153,5 @@ void host_advance_ms(uint32_t ms)
         if (b < queue_buffers) queue_buffers = b;
     }
 }
+
+void pva_hal_install_fault_handler(void) { }

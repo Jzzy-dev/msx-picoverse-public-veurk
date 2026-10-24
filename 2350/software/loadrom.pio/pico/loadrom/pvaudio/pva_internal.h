@@ -42,7 +42,8 @@ uint32_t pva_hal_millis(void);
 // ESP-01 link (UNAPI ESP8266 firmware behind the cartridge UART). The engine
 // owns it between open and close; the MSX side's WiFi registers are quiet then.
 bool     pva_hal_net_open(void);                         // false: no ESP link
-bool     pva_hal_net_present(void);                      // an ESP answered at start-up
+bool     pva_hal_net_present(void);
+void     pva_hal_install_fault_handler(void);           // crash notes in the window (firmware)                      // an ESP answered at start-up
 void     pva_hal_net_close(void);
 size_t   pva_hal_net_write(const uint8_t *p, size_t n);  // non-blocking, bytes taken
 size_t   pva_hal_net_read(uint8_t *p, size_t n);         // non-blocking, bytes given
@@ -82,6 +83,7 @@ uint8_t pva_dec_last_fresult(void);
 #define PVA_FN_TCPOPEN      13u
 #define PVA_FN_TCPCLOSE     14u
 #define PVA_FN_TCPABORT     15u
+#define PVA_FN_TCPSTATE     16u
 #define PVA_FN_TCPSEND      17u
 #define PVA_FN_TCPRCV       18u
 #define PVA_FN_DNS          206u

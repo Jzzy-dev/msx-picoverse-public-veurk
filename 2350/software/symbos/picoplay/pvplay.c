@@ -644,6 +644,47 @@ static void update_display(void)
    drawn the window, is lost; repeat it on the first timer ticks. */
 unsigned char status_redraws = 2;
 
+static void engine_stopped(void);
+/* The heartbeat stopped: say what the engine left in the window */
+static void engine_stopped(void)
+{
+    char t[96], *d;
+    unsigned char f = pv_peek(W(PVA_R_FAULT)), w = pv_peek(W(PVA_R_WHERE)), i;
+    if (f) {
+        strcpy(t, f == 1 ? "Engine crashed, PC " : "Engine stopped: ");
+        d = t + strlen(t);
+        if (f == 1) {
+            for (i = 4; i--; ) {
+                unsigned char b = pv_peek(W(PVA_R_FAULT_PC) + i);
+                *d++ = "0123456789ABCDEF"[b >> 4];
+                *d++ = "0123456789ABCDEF"[b & 15];
+            }
+            *d = 0;
+        } else {
+            for (i = 0; i < 40; ++i) {
+                char c = (char)pv_peek(W(PVA_R_FAULT_TEXT) + i);
+                if (!c || c == 10 || c == 13)
+                    break;
+                *d++ = c;
+            }
+            *d = 0;
+        }
+    } else {
+        strcpy(t, "Engine stuck in ");
+        strcat(t, w == PVA_W_LOOP ? "its loop" : w == PVA_W_COMMAND ? "a command" : w == PVA_W_STREAM ? "the stream" :
+                  w == PVA_W_RADIO ? "the station list" : w == PVA_W_DECODE ? "decoding" : w == PVA_W_STATUS ? "the status" :
+                  w == PVA_W_CARD ? "the microSD card" : "?");
+        strcat(t, ", command ");
+        d = t + strlen(t);
+        i = pv_peek(W(PVA_R_LAST_CMD));
+        d[0] = "0123456789ABCDEF"[i >> 4];
+        d[1] = "0123456789ABCDEF"[i & 15];
+        d[2] = 'h';
+        d[3] = 0;
+    }
+    set_status(t);
+}
+
 static void tick(void)
 {
     unsigned char hb;
@@ -664,7 +705,7 @@ static void tick(void)
         }
     } else if ((unsigned short)(Sys_Counter16() - hb_time) > 200) {
         if (engine_ok == 1)
-            set_status("The engine has stopped running (no heartbeat)");
+            engine_stopped();
         engine_ok = 2;
         return;
     }

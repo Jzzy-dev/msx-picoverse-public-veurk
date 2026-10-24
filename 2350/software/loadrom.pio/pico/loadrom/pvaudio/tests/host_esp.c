@@ -44,6 +44,10 @@ uint32_t host_esp_stall_at = 0;             // pause the server at this body byt
 uint32_t host_esp_stall_ms = 0;             // ... for this long
 size_t   host_stream_ram_size = 128u * 1024u;
 uint32_t host_esp_rtt_ms = 0;               // > 0: TCP window limit (2144 bytes per round trip)
+bool     host_esp_close_silent = true;      // as the real ESP: TCP_RCV of a closed connection
+                                            // answers "no data", only TCP_STATE tells the close
+uint32_t host_esp_state_asks;
+uint32_t host_esp_delay_next_rcv;           // > 0: the next TCP_RCV answer comes this late (once)
 bool     host_esp_api_down = false;         // 10.0.0.4 refuses connections (a mirror must be used)
 bool     host_esp_api_all_down = false;     // all API servers refuse
 uint32_t host_esp_api_bps = 20000;          // API reply speed
@@ -152,6 +156,9 @@ static const st_t stations[] = {
     { "HLS One", "http://radio.test/hls.m3u8", "MP3", "Germany", "pop", 128, 1, 1 },
     { "Broken FM", "http://radio.test/stream.mp3", "MP3", "Germany", "pop,jazz", 128, 0, 0 },
     { "Secure Jazz", "https://secure.test/stream.mp3", "MP3", "C\\u00f4te D'ivoire", "jazz,80s", 192, 0, 1 },
+    { "NC Secure", "https://secure.test/stream.mp3", "MP3", "New Caledonia", "pacific", 128, 0, 1 },
+    { "NC Plain", "http://radio.test/plain", "MP3", "New Caledonia", "pacific", 128, 0, 1 },
+    { "NC Live", "http://radio2.test:8000/live", "MP3", "New Caledonia", "pacific", 128, 0, 1 },
     { "Long URL", "http://radio.test/stream.mp3?xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "MP3", "Germany", "pop", 128, 0, 1 },
 };
 
@@ -173,11 +180,12 @@ static void api(conn_t *c, const char *path)
 {
     bq_t b = { 0 };
     snprintf(host_esp_last_api, sizeof host_esp_last_api, "%s", path);
-    bool clen = c->ip[3] == 5;              // the second server sends Content-Length
+    bool clen = c->ip[3] == 5;              // the second server always sends Content-Length
     if (!strncmp(path, "/json/countries", 15))
     {
         const char *j = "[{\"name\":\"C\\u00f4te D'ivoire\",\"iso_3166_1\":\"CI\",\"stationcount\":12},\n"
                         " {\"name\":\"Germany\",\"iso_3166_1\":\"DE\",\"stationcount\":3210},\n"
+                        " {\"name\":\"New Caledonia\",\"iso_3166_1\":\"NC\",\"stationcount\":3},\n"
                         " {\"name\":\"Nowhere\",\"iso_3166_1\":\"NO\",\"stationcount\":0},\n"
                         " {\"name\":\"The Netherlands\",\"iso_3166_1\":\"NL\",\"stationcount\":987}]";
         bq_put(&b, j, strlen(j));
@@ -241,6 +249,7 @@ static void api(conn_t *c, const char *path)
         free(b.b);
         return;
     }
+    if (b.len < 2048) clen = true;          // nginx: small replies have a length, big ones end with the close
     char hd[200];
     snprintf(hd, sizeof hd, "HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: application/json; charset=utf-8\r\n%s%s\r\n",
              clen ? "Content-Length: " : "", "");
@@ -459,7 +468,7 @@ static void request(const uint8_t *p, size_t n)
             uint16_t want = (uint16_t)(a[1] | (a[2] << 8));
             if (cn < 1 || cn > 4 || !conns[cn].used) { answer(L, fn, 11, NULL, 0); break; }
             conn_t *c = &conns[cn];
-            if (c->out.len == 0 && c->closed) { answer(L, fn, 11, NULL, 0); break; }
+            if (c->out.len == 0 && c->closed && !host_esp_close_silent) { answer(L, fn, 11, NULL, 0); break; }
             size_t k = c->out.len;
             if (k > want) k = want;
             if (k > host_esp_rcv_limit) k = host_esp_rcv_limit;
@@ -467,8 +476,23 @@ static void request(const uint8_t *p, size_t n)
             buf[0] = 0; buf[1] = 0;
             memcpy(buf + 2, c->out.b, k);
             bq_drop(&c->out, k);
-            answer(L, fn, 0, buf, k + 2);
+            answer(L + host_esp_delay_next_rcv, fn, 0, buf, k + 2);
+            host_esp_delay_next_rcv = 0;
             free(buf);
+            break;
+        }
+        case 16:
+        {
+            host_esp_state_asks++;
+            uint8_t cn = a[0];
+            if (cn < 1 || cn > 4 || !conns[cn].used) { answer(L, fn, 11, NULL, 0); break; }
+            conn_t *c = &conns[cn];
+            uint8_t r[16] = { 0 };
+            r[1] = c->closed ? 7 : 4;               // CLOSE-WAIT / ESTABLISHED
+            r[2] = (uint8_t)c->out.len;
+            r[3] = (uint8_t)(c->out.len >> 8);
+            r[6] = 0xFF; r[7] = 0xFF;
+            answer(L, fn, 0, r, 16);
             break;
         }
         default:

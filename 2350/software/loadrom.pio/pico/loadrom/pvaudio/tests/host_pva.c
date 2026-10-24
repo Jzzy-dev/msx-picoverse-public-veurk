@@ -37,6 +37,8 @@ extern uint32_t host_esp_rtt_ms;
 extern bool host_esp_api_down, host_esp_api_all_down;
 extern uint32_t host_esp_clicks, host_esp_api_bps;
 extern char host_esp_last_click[48], host_esp_last_api[300];
+extern uint32_t host_esp_delay_next_rcv, host_esp_state_asks;
+extern bool host_esp_close_silent;
 
 static int failures, checks;
 #define CHECK(cond, ...) do { checks++; if (!(cond)) { failures++; printf("  FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } else if (verbose) { printf("  ok: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -721,9 +723,9 @@ int main(int argc, char **argv)
         CHECK(cmd_str(PVA_C_DIR_OPEN, "") == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/By country"), "reopen: '%s'", reply + 2);
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
         for (int i = 0; i < n; i++) printf("    %d %-30s %u\n", ents[i].type, ents[i].name, (unsigned)ents[i].size);
-        CHECK(n == 4 && !strcmp(ents[1].name, "Cote D'ivoire") && ents[2].size == 3210 && !strcmp(ents[3].name, "The Netherlands"),
+        CHECK(n == 5 && !strcmp(ents[1].name, "Cote D'ivoire") && ents[2].size == 3210 && !strcmp(ents[4].name, "The Netherlands"),
               "countries (UTF-8 escape folded, empty one left out, station counts)");
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 3) == PVA_E_BUSY, "The Netherlands: BUSY");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 4) == PVA_E_BUSY, "The Netherlands: BUSY");
         WAIT_LIST(10000);
         CHECK(strstr(host_esp_last_api, "country=The%20Netherlands&countryExact=true") && strstr(host_esp_last_api, "codec=MP3") &&
               strstr(host_esp_last_api, "hidebroken=true"), "query %s", host_esp_last_api);
@@ -795,7 +797,7 @@ int main(int argc, char **argv)
               strstr(host_esp_last_api, "order=clickcount&reverse=true"), "the list came from a mirror (Content-Length reply)");
         cmd_str(PVA_C_DIR_OPEN, "");
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
-        CHECK(n == 5 && find(n, "Long URL") < 0 && find(n, "HLS One") < 0, "top: %d stations (HLS and over-long address left out)", n - 1);
+        CHECK(n == 8 && find(n, "Long URL") < 0 && find(n, "HLS One") < 0, "top: %d stations (HLS and over-long address left out)", n - 1);
         host_esp_api_down = false;
         host_esp_api_all_down = true;
         cmd_u16(PVA_C_DIR_ENTER, 0);                // home
@@ -823,6 +825,48 @@ int main(int argc, char **argv)
         CHECK(n == 2 && !strcmp(ents[0].name, "MUSIC"), "no ESP: no radio entry in the root");
         host_esp_present = true;
         CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "Radio list:"), "DIAG:\n%s", reply);
+
+        printf("[directory: a big reply that ends with the close, quick station changes]\n");
+        host_esp_close_silent = true;
+        cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
+        uint32_t ta = pva_hal_millis(), sa = host_esp_state_asks;
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 1) == PVA_E_BUSY, "Top stations (no Content-Length, the ESP does not report the close)");
+        WAIT_LIST(15000);
+        CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_DONE && pva_hal_millis() - ta < 3000, "in after %lu ms (the JSON end is seen; TCP_STATE asked %u times)",
+              (unsigned long)(pva_hal_millis() - ta), host_esp_state_asks - sa);
+        cmd_u16(PVA_C_DIR_ENTER, 0);
+        cmd_u16(PVA_C_DIR_ENTER, 4);                // By country (kept)
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        int nc = find(n, "New Caledonia");
+        CHECK(nc > 0 && cmd_u16(PVA_C_DIR_ENTER, (uint16_t)nc) == PVA_E_BUSY, "New Caledonia");
+        WAIT_LIST(15000);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(n == 4 && find(n, "NC Secure") == 1, "3 stations");
+        host_esp_tls_ms = 5000;                     // a slow TLS server
+        uint32_t o0 = host_esp_opens;
+        for (int k = 1; k <= 3; k++)
+        {
+            uint32_t tc = pva_hal_millis();
+            int r = cmd_u16(PVA_C_PLAY_INDEX, (uint16_t)k);
+            CHECK(r == PVA_OK && pva_hal_millis() - tc < 200, "play station %d: answered in %lu ms", k, (unsigned long)(pva_hal_millis() - tc));
+            run_ms(k < 3 ? 1500 : 12000);           // change while the TLS open is still going on
+        }
+        read_status();
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st[PVA_ST_NET_STATE] == PVA_NET_STREAM && !strcmp(ststr(PVA_ST_ALBUM), "NC Live"),
+              "the last one plays ('%s', net %u)", ststr(PVA_ST_ALBUM), st[PVA_ST_NET_STATE]);
+        CHECK(host_esp_open_conns() == 1, "one connection open (%d, %u opened)", host_esp_open_conns(), host_esp_opens - o0);
+        uint16_t u1 = st16(PVA_ST_UNDERRUNS);
+        host_esp_delay_next_rcv = 2600;             // an answer comes after its time-out
+        run_ms(8000);
+        read_status();
+        extern uint32_t pva_esp_timeouts, pva_esp_drained;
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && pva_esp_timeouts >= 1 && host_esp_open_conns() == 1,
+              "a late answer is waited for and dropped (%u time-outs, %u stray bytes), still playing, underruns %u -> %u",
+              pva_esp_timeouts, pva_esp_drained, u1, st16(PVA_ST_UNDERRUNS));
+        host_esp_tls_ms = 1800;
+        cmd(PVA_C_STOP, NULL, 0);
+        run_ms(1000);
     }
     CHECK(cmd(PVA_C_LOG, NULL, 0) == PVA_OK && strstr((char *)reply, "stream:"), "the log tells the story:\n%s", reply);
     run_ms(100);

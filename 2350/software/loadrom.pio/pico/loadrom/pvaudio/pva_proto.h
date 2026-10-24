@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        3
+#define PVA_FW_MINOR        4
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -54,6 +54,13 @@
 #define PVA_R_REPLY_LEN     0x014u
 #define PVA_R_HEARTBEAT     0x016u
 #define PVA_R_BUSY          0x017u
+// for a stuck or crashed engine (written by core 1 as it goes, read them when
+// the heartbeat stops)
+#define PVA_R_WHERE         0x018u  // u8  PVA_W_xxx: what core 1 was doing last
+#define PVA_R_LAST_CMD      0x019u  // u8  code of the last command it started
+#define PVA_R_FAULT         0x01Au  // u8  0, 1 = crash (HardFault), 2 = panic (e.g. out of heap)
+#define PVA_R_FAULT_PC      0x01Cu  // u32 program counter of the crash
+#define PVA_R_FAULT_TEXT    0xF00u  // char[64] panic message
 #define PVA_R_STATUS        0x020u
 #define PVA_STATUS_SIZE     224u
 #define PVA_R_ARGS          0x100u
@@ -158,6 +165,14 @@
 // the internet radio directory (virtual folders under "[Internet radio]")
 #define PVA_ST_DIR_STATE    177     // u8  PVA_DIRS_xxx of the last list fetched
 #define PVA_ST_DIR_ERR      178     // u8  PVA_NERR_xxx when it failed
+
+#define PVA_W_LOOP          1       // main loop
+#define PVA_W_COMMAND       2
+#define PVA_W_STREAM        3       // network stream
+#define PVA_W_RADIO         4       // station directory
+#define PVA_W_DECODE        5
+#define PVA_W_STATUS        6
+#define PVA_W_CARD          7       // microSD for Nextor
 
 #define PVA_STATE_STOPPED   0
 #define PVA_STATE_PLAYING   1

@@ -20,6 +20,14 @@
 
 #include <string.h>
 #include "pva_internal.h"
+#ifdef PVA_HOST
+#include <stdio.h>
+#include <stdlib.h>
+static int esp_trace = -1;
+#define TRACE(...) do { if (esp_trace < 0) esp_trace = getenv("PVA_ESP_TRACE") != NULL; if (esp_trace) { printf("    [esp %u] ", (unsigned)pva_hal_millis()); printf(__VA_ARGS__); printf("\n"); } } while (0)
+#else
+#define TRACE(...) do { } while (0)
+#endif
 
 #define MAX_SLOTS   3
 
@@ -40,6 +48,21 @@ static uint8_t  rc;
 static uint16_t plen, pgot;
 static uint8_t  pfirst[sizeof ((pva_esp_slot_t *)0)->pfirst];
 static uint32_t rcv_data;
+// The ESP does one thing at a time: until it has answered a request it does
+// not even read the next one (a TLS handshake can take seconds). So when a
+// client stops waiting (its time-out, or it gave the request up), the answer
+// is still awaited and dropped, for up to GRACE_MS more. Only then is the wire
+// freed, after the line has been quiet for DRAIN_MS, so that late bytes cannot
+// be taken for the answer to the next request.
+#define GRACE_MS    12000u
+#define DRAIN_MS    60u
+static bool     in_grace;
+// a dropped TCP_OPEN that succeeded leaves a connection nobody knows: close it
+static pva_esp_slot_t closer;
+static uint8_t  orphan;
+static bool     draining;
+static uint32_t drain_until;
+uint32_t pva_esp_timeouts, pva_esp_drained;
 
 void pva_esp_register(pva_esp_slot_t *s)
 {
@@ -53,6 +76,7 @@ bool pva_esp_acquire(void)
         if (!pva_hal_net_open()) return false;
         link_open = true;
         busy = false;
+        draining = false;
         active = NULL;
     }
     holders++;
@@ -64,6 +88,7 @@ void pva_esp_release(void)
     if (holders) holders--;
     if (holders || !link_open) return;
     pva_hal_net_close();
+    TRACE("link closed%s", busy ? " WHILE BUSY" : "");
     link_open = false;
     busy = false;
     active = NULL;
@@ -125,6 +150,9 @@ void pva_esp_shorten(pva_esp_slot_t *s, uint32_t ms)
 
 static void finish_answer(void)
 {
+    if (!active && cur_fn == PVA_FN_TCPOPEN && rc == 0 && pgot >= 1 && pfirst[0])
+        orphan = pfirst[0];
+    TRACE("answer fn %u rc %u len %u%s", cur_fn, rc, plen, active ? "" : " (dropped)");
     busy = false;
     if (!active) return;
     pva_esp_slot_t *s = active;
@@ -165,7 +193,26 @@ void pva_esp_io(void)
     if (!link_open) return;
     uint32_t now = pva_hal_millis();
     // the next request goes out when the wire is free; waiting slots take turns
-    if (!busy)
+    if (draining && (int32_t)(now - drain_until) >= 0) draining = false;
+    if (orphan && !closer.queued && !busy)
+    {
+        TRACE("closing orphan connection %u", orphan);
+        pva_esp_request(&closer, PVA_FN_TCPCLOSE, &orphan, 1, NULL, 0, 1000u);
+        orphan = 0;
+    }
+    if (!busy && !draining && closer.queued)
+    {
+        closer.queued = false;
+        active = NULL;              // nobody waits for this answer
+        busy = true;
+        in_grace = false;
+        cur_fn = closer.want_fn;
+        cur_deadline = now + closer.timeout_ms;
+        tx_p = closer.txq;
+        tx_left = closer.txq_len;
+        ph = 0; rc = 0; plen = pgot = 0; rcv_data = 0;
+    }
+    if (!busy && !draining)
     {
         for (uint8_t k = 0; k < nslots; k++)
         {
@@ -176,7 +223,9 @@ void pva_esp_io(void)
             turn = (uint8_t)((i + 1) % nslots);
             active = s;
             busy = true;
+            in_grace = false;
             cur_fn = s->want_fn;
+            TRACE("send fn %u slot %u timeout %u", cur_fn, i, (unsigned)s->timeout_ms);
             cur_deadline = now + s->timeout_ms;
             tx_p = s->txq;
             tx_left = s->txq_len;
@@ -199,6 +248,7 @@ void pva_esp_io(void)
     {
         size_t n = pva_hal_net_read(buf, sizeof buf);
         if (!n) break;
+        if (draining) { pva_esp_drained += (uint32_t)n; drain_until = pva_hal_millis() + DRAIN_MS; continue; }
         size_t i = 0;
         while (i < n)
         {
@@ -231,7 +281,21 @@ void pva_esp_io(void)
     }
     if (busy && (int32_t)(pva_hal_millis() - cur_deadline) >= 0)
     {
-        busy = false;
+        pva_esp_timeouts++;
+        TRACE("TIMEOUT fn %u%s", cur_fn, active ? "" : in_grace ? " (grace over)" : " (dropped)");
         if (active) { active->rsp_timeout = true; active = NULL; }
+        if (!in_grace)
+        {
+            // the client stops waiting; the wire waits on for the answer
+            in_grace = true;
+            cur_deadline = pva_hal_millis() + GRACE_MS;
+        }
+        else
+        {
+            busy = false;
+            in_grace = false;
+            draining = true;
+            drain_until = pva_hal_millis() + DRAIN_MS;
+        }
     }
 }

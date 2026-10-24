@@ -1165,6 +1165,8 @@ static void handle_command(void)
     uint8_t code = pva_mailbox.code;
     handled_post = post;
     pva_win[PVA_R_BUSY] = 1;
+    pva_win[PVA_R_LAST_CMD] = code;
+    pva_win[PVA_R_WHERE] = PVA_W_COMMAND;
     for (uint32_t i = 0; i < PVA_ARGS_SIZE; i++) args[i] = pva_win[PVA_R_ARGS + i];
     reply_len = 0;
     int r = execute(code);
@@ -1294,6 +1296,7 @@ static void publish_status(void)
 // ---------------------------------------------------------------- core 1
 void pva_core1_init(void)
 {
+    pva_hal_install_fault_handler();
     args = pva_alloc(PVA_ARGS_SIZE);
     st_new = pva_alloc(PVA_STATUS_SIZE);
     st_pub = pva_alloc(PVA_STATUS_SIZE);
@@ -1338,13 +1341,16 @@ bool pva_core1_poll(void)
     if (gap > max_gap_ms) max_gap_ms = gap;
     last_poll_ms = now;
 
+    pva_win[PVA_R_WHERE] = PVA_W_LOOP;
     if (pva_mailbox.post_count != handled_post)
     {
         handle_command();
         work = true;
     }
 
+    pva_win[PVA_R_WHERE] = PVA_W_RADIO;
     radio_poll();
+    pva_win[PVA_R_WHERE] = PVA_W_STREAM;
     if (pva_net_active())
     {
         pva_net_poll();
@@ -1363,6 +1369,7 @@ bool pva_core1_poll(void)
         }
     }
 
+    pva_win[PVA_R_WHERE] = PVA_W_DECODE;
     if (ready && state == PVA_STATE_PLAYING && pva_dec_is_stream() && buffering)
     {
         // wait until the buffer has 'prefill' bytes (or the stream gave up)
@@ -1409,6 +1416,7 @@ bool pva_core1_poll(void)
         last_hb_ms = now;
         pva_win[PVA_R_HEARTBEAT] = ++hb;
     }
+    pva_win[PVA_R_WHERE] = PVA_W_STATUS;
     if (status_dirty || now - last_status_ms >= STATUS_MS)
     {
         last_status_ms = now;
