@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cstdio>
 #include "PicoVerseAudio.hh"
 #include "DeviceConfig.hh"
 #include "MSXException.hh"
@@ -15,6 +17,7 @@ void pva_mem_write(uint16_t addr, uint8_t data);
 void pva_core1_init(void);
 bool pva_core1_poll(void);
 int  host_esp_load_audio(const char *mp3_path);
+extern uint32_t host_audio_frames, host_audio_underruns;
 int  host_disk_open(const char* path, uint32_t create_sectors);
 void host_advance_ms(uint32_t ms);
 void host_wav_open(const char* path);
@@ -65,6 +68,14 @@ void PicoVerseAudio::catchUp(EmuTime::param time)
 		last += EmuDuration::msec(1);
 		pva_core1_poll();
 		host_advance_ms(1);
+		static int tr = getenv("PVA_TRACE") ? 1 : 0;
+		static unsigned n;
+		if (tr && ++n % 1000 == 0) {
+			fprintf(stderr, "PVA t=%us state %u flags %02x el %u buf %u%% net %u rate %u frames %u underruns %u\n", n / 1000,
+				pva_mem_read(0x4021), pva_mem_read(0x4022), pva_mem_read(0x4024) | (pva_mem_read(0x4025) << 8),
+				pva_mem_read(0x4020 + 163), pva_mem_read(0x4020 + 162), pva_mem_read(0x4020 + 164) | (pva_mem_read(0x4020 + 165) << 8),
+				host_audio_frames, host_audio_underruns);
+		}
 	}
 }
 

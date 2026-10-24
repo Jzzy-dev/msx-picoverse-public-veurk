@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build libpva_host.a: the PicoVerse Audio Engine host build for the openMSX test device.
 set -e
-L=/home/claude/jzzy-dev/msx-picoverse-public-veurk/2350/software/loadrom.pio/pico/loadrom
+# run from any folder; the library is written there
+L=$(cd "$(dirname "$0")/../../../loadrom.pio/pico/loadrom" && pwd)
 F=$L/lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src
 M=$L/lib/picomp3lib/src
 T=$L/pvaudio/tests
