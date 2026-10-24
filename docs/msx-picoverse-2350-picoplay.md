@@ -109,12 +109,15 @@ With a `-p1 -w` image the card's root folder starts with **[Internet radio]**. I
 
 | Folder | What it lists |
 | --- | --- |
+| Favourites | your own stations, from `RADIOFAV.M3U` in the root of the card |
 | Top stations, Most voted, Trending now | the 60 most clicked, most voted and fastest rising MP3 stations |
 | By country | every country with stations, with the number of stations; open one for its 60 most clicked MP3 stations |
 | By genre | 50 genres (pop, rock, jazz, classical, house, schlager, news ...), each by Radio Browser tag |
 | By decade | 1950s to 2010s and Oldies, by the tags `50s` ... `10s` and `oldies` |
 
 - **Opening a list** takes a moment (Radio Browser sends about 1 KB per station; a list of 60 is about 60 KB, 4 to 6 s). The status bar says `Loading the station list...`; the list opens by itself when it is in. If you go elsewhere meanwhile, the fetch is dropped.
+- **More stations:** a list shows 60 stations at a time. When there are more, its last row is **[More stations...]**: it fetches the next 60 and adds them to the list (the first new one is marked). Up to about 150 stations fit in one list.
+- **Favourites:** `F` (or *File > Add to favourites*) adds the marked station, or the station that plays when no station is marked. In *Favourites*, `Del` (or *File > Remove from favourites*) removes the marked one. The favourites are an ordinary M3U file, `RADIOFAV.M3U` in the root of the drive PicoPlay was started from (the card), so you can also edit it on a PC or open it from the root folder. PicoPlay writes it through SymbOS; the engine only reads it. It holds up to 4 KB (about 40 stations).
 - **Stations** show their bitrate in the size column. Enter or a double-click plays one; the list's stations become the play list, so `N` and `P` step through them. Shuffle works too.
 - **Only MP3:** the lists ask for MP3 only and leave out HLS streams, stations whose last check failed and addresses longer than 255 characters.
 - **Servers:** `all.api.radio-browser.info` over HTTP, then the mirrors `de1`, `de2`, `fi1`, `nl1` and `at1`. A list is complete when its JSON ends (the servers send big replies without a length and then close; the ESP does not report that close on a read, so the engine also asks the connection state with `TCP_STATE` after 0.4 s without data). A redirect to HTTPS is followed. Countries are fetched once per session and kept.
@@ -139,11 +142,11 @@ The engine is in page 1 of sub-slot 3, `4000h-4FFFh`. The full definition is `23
 | `4100h` | 512 | command arguments |
 | `4400h` | 2048 | command reply |
 
-Commands: `PING`, `MOUNT`, `LOG`, `DIAG`, `DIR_OPEN path`, `DIR_READ first,count`, `DIR_ENTER index`, `PLAY_INDEX index`, `PLAY_PATH path`, `PAUSE`, `STOP`, `NEXT`, `PREV`, `SEEK seconds`, `VOLUME 0-100`, `MODE repeat/shuffle`, `PLAY_URL url,0,station,0` (also `PLAY_PATH` with a URL).
+Commands: `PING`, `MOUNT`, `LOG`, `DIAG`, `DIR_OPEN path`, `DIR_READ first,count`, `DIR_ENTER index`, `ENTRY_INFO index`, `PLAY_INDEX index`, `PLAY_PATH path`, `PAUSE`, `STOP`, `NEXT`, `PREV`, `SEEK seconds`, `VOLUME 0-100`, `MODE repeat/shuffle`, `PLAY_URL url,0,station,0` (also `PLAY_PATH` with a URL).
 
 For streams the status block has the `STREAM` and `BUFFERING` flags, and from byte 162: network state, buffer fill in %, receive rate in 0.1 KB/s, reconnects, the last network error (`PVA_NERR_xxx`), the last HTTP status and the buffer size in KB. Results `9` (network) and `10` (no WiFi link) are new.
 
-The station directory is a set of virtual folders. `DIR_ENTER` on a folder whose list must be fetched answers `11` (`PVA_E_BUSY`) and leaves the open folder as it was. Status byte 177 (`DIR_STATE`) is then `1` (loading), and later `2` (ready: the new list is the open folder, `DIR_GEN` changed, reopen it with `DIR_OPEN ""`) or `3` (failed, byte 178 has the `PVA_NERR_xxx` reason). Stations are entries of type `6` (`URL`) with the bitrate as their size; countries are folders with their station count as size. `PLAY_INDEX` on a station plays it with the list's stations as the play list. `DIR_OPEN "/Internet radio"` opens the directory's home.
+The station directory is a set of virtual folders. `DIR_ENTER` on a folder whose list must be fetched answers `11` (`PVA_E_BUSY`) and leaves the open folder as it was. Status byte 177 (`DIR_STATE`) is then `1` (loading), and later `2` (ready: the new list is the open folder, `DIR_GEN` changed, reopen it with `DIR_OPEN ""`) or `3` (failed, byte 178 has the `PVA_NERR_xxx` reason). `ENTRY_INFO index` (13h) replies with a station's address and name (index FFFFh: the stream that plays), for writing favourites. Stations are entries of type `6` (`URL`) with the bitrate as their size; countries are folders with their station count as size. `PLAY_INDEX` on a station plays it with the list's stations as the play list. `DIR_OPEN "/Internet radio"` opens the directory's home.
 
 If the heartbeat stops, `4018h` says what core 1 was doing (`PVA_W_xxx`) and `4019h` the last command. `401Ah` is `1` after a crash (HardFault, the program counter at `401Ch`) or `2` after a panic (its message at `4F00h`). PicoPlay shows this in the status bar instead of "no heartbeat".
 
@@ -160,5 +163,5 @@ To send a command, write the arguments, then a new token, then the code. On a la
 
 - Internet radio on real hardware: receive rate, gaps and TLS times from Diagnostics.
 - Station directory on real hardware: list times from the log.
-- Favourites saved as M3U, a "more stations" entry (the API's `offset`), and search by name.
+- Search by name, and sorting a list from the File menu.
 - AAC streams, if the RP2350 has the headroom.

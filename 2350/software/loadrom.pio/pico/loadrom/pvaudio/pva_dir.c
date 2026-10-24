@@ -53,6 +53,19 @@ static char     *pool;
 static size_t    pool_size, pool_used;
 static uint16_t  nents;
 static bool      truncated;
+// a list can be continued ("more stations"): a fetch then adds to what is there
+static uint16_t  base_nents;
+static size_t    base_pool;
+static bool      q_append;
+static uint16_t  nraw;              // objects in the reply (before the filters)
+
+static void reset_results(void)
+{
+    nents = base_nents;
+    pool_used = base_pool;
+    truncated = false;
+    nraw = 0;
+}
 
 static uint16_t pool_add(const char *s, size_t n)
 {
@@ -113,6 +126,7 @@ static bool eq_ci(const char *a, const char *b)
 static void obj_end(void)
 {
     if (discard_body) return;
+    nraw++;
     if (nents >= MAX_ENTRIES) { truncated = true; return; }
     if (!f_name[0]) return;
     dent_rb_t e = { 0xFFFF, 0xFFFF, 0xFFFF, 0 };
@@ -475,9 +489,9 @@ void pva_dir_poll(void)
             if (!held && !pva_esp_acquire()) { qerr = PVA_NERR_NOWIFI; qstate = PVA_DIRS_FAILED; return; }
             held = true;
             kind = q_kind;
-            nents = 0;
-            pool_used = 0;
-            truncated = false;
+            if (q_append) { base_nents = nents; base_pool = pool_used; }
+            else { base_nents = 0; base_pool = 0; }
+            reset_results();
             pva_log("radio: %.48s", q_path);
             begin_query(q_path, false);
             return;
@@ -617,23 +631,23 @@ void pva_dir_poll(void)
         case D_CLOSE:
             pva_esp_clear(DS);
             conn = 0;
-            if (cancel_req) { cancel_req = false; discard_body = true; after = A_DONE; }
+            if (cancel_req) { cancel_req = false; discard_body = true; after = A_DONE; reset_results(); }
             switch (after)
             {
                 case A_NEXT_MIRROR:
                     mirror++;
-                    nents = 0; pool_used = 0; truncated = false;
+                    reset_results();
                     d_start_mirror();
                     return;
                 case A_REDIRECT:
                     if (!parse_target(location)) { d_fail(PVA_NERR_URL); d_close_then(A_FAIL); return; }
                     pva_log("radio: redirect to %.36s", location);
-                    nents = 0; pool_used = 0; truncated = false;
+                    reset_results();
                     d_connect();
                     return;
                 case A_FAIL:
                     d = D_IDLE;
-                    if (!discard_body) { qstate = PVA_DIRS_FAILED; pva_log("radio: list failed (%u, HTTP %u)", (unsigned)qerr, (unsigned)qhttp); }
+                    if (!discard_body) { reset_results(); qstate = PVA_DIRS_FAILED; pva_log("radio: list failed (%u, HTTP %u)", (unsigned)qerr, (unsigned)qhttp); }
                     if (!q_pending && !click_pending) d_release();
                     return;
                 default:
@@ -689,11 +703,29 @@ int pva_dir_start(uint8_t k, const char *path)
     q_kind = k;
     snprintf(q_path, PATH_MAX_D + 1, "%s", path);
     q_pending = true;
+    q_append = false;
     nents = 0;
     qerr = 0;
     qstate = PVA_DIRS_LOADING;
     return PVA_OK;
 }
+
+// Fetch the next part of the list: the entries come after the ones there are.
+int pva_dir_more(const char *path)
+{
+    if (!ents) return PVA_E_NOWIFI;
+    if (d != D_IDLE && !discard_body) return PVA_E_BUSY;
+    if (!pva_hal_net_present()) { qerr = PVA_NERR_NOWIFI; qstate = PVA_DIRS_FAILED; return PVA_E_NOWIFI; }
+    q_kind = kind;
+    snprintf(q_path, PATH_MAX_D + 1, "%s", path);
+    q_pending = true;
+    q_append = true;
+    qerr = 0;
+    qstate = PVA_DIRS_LOADING;
+    return PVA_OK;
+}
+
+uint16_t pva_dir_raw(void) { return nraw; }
 
 void pva_dir_cancel(void)
 {

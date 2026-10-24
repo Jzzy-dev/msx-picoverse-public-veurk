@@ -25,7 +25,35 @@ uint32_t pva_hal_millis(void);
 extern bool host_audio_unlimited;
 extern uint32_t host_audio_underruns, host_audio_frames;
 extern bool host_esp_api_all_down;
+static void key_press(unsigned char k);
 extern uint32_t host_esp_clicks;
+
+// SymbOS files: "A:\\X" is "0:/X" on the engine's card image (FatFS)
+#include "ff.h"
+static FIL host_files[8];
+static bool host_file_used[8];
+static unsigned char host_fopen(char *path, BYTE mode)
+{
+    char p[300];
+    if (path[1] != ':') return 255;
+    snprintf(p, sizeof p, "0:%s", path + 2);
+    for (char *q = p; *q; q++) if (*q == '\\') *q = '/';
+    for (int i = 0; i < 8; i++)
+        if (!host_file_used[i])
+        {
+            if (f_open(&host_files[i], p, mode) != FR_OK) return 255;
+            host_file_used[i] = true;
+            return (unsigned char)i;
+        }
+    return 255;
+}
+unsigned char File_Open(unsigned char bank, char *path) { return host_fopen(path, FA_READ | FA_WRITE); }
+unsigned char File_New(unsigned char bank, char *path, unsigned char attrib) { return host_fopen(path, FA_READ | FA_WRITE | FA_CREATE_ALWAYS); }
+unsigned char File_Close(unsigned char id) { if (id < 8 && host_file_used[id]) { f_close(&host_files[id]); host_file_used[id] = false; } return 0; }
+unsigned short File_Read(unsigned char id, unsigned char bank, char *addr, unsigned short len)
+{ UINT br = 0; if (id < 8 && host_file_used[id]) f_read(&host_files[id], addr, len, &br); return (unsigned short)br; }
+unsigned short File_Write(unsigned char id, unsigned char bank, char *addr, unsigned short len)
+{ UINT bw = 0; if (id < 8 && host_file_used[id]) f_write(&host_files[id], addr, len, &bw); return (unsigned short)bw; }
 
 char _symmsg[14];
 unsigned char _sympid = 5, _symbank = 1;
@@ -302,7 +330,56 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
                 CHECK(!dir_loading && !strcmp(txt_status, "Station list: connection refused") && !strcmp(txt_path, "/Internet radio/By genre"),
                       "servers down: '%s', still in '%s'", txt_status, txt_path);
                 host_esp_api_all_down = false;
+                printf("[favourites and more stations]\n");
+                open_folder("/Internet radio");
+                activate_row((unsigned short)find_row("[Favourites]"));
+                CHECK(!strcmp(txt_path, "/Internet radio/Favourites") && cd_list.lines == 1, "Favourites, empty: %u rows", cd_list.lines);
+                activate_row(0);
+                activate_row((unsigned short)find_row("[By genre]"));
+                activate_row((unsigned short)find_row("[Rock]"));
                 stream_phase = 7;
+                ticks_left = 15;
+                step--;
+                return 0;
+            } else if (stream_phase == 7) {
+                dump_rows(3);
+                CHECK(dir_count == 62 && !strcmp(row_name[cd_list.lines - 1], "[More stations...]"), "Rock: 60 stations + '%s'", row_name[cd_list.lines - 1]);
+                select_row(5);
+                key_press('F');
+                CHECK(!strcmp(txt_status, "Added to favourites: Rock Station 004"), "F: '%s'", txt_status);
+                key_press('f');
+                CHECK(!strcmp(txt_status, "Already a favourite"), "F again: '%s'", txt_status);
+                activate_row((unsigned short)(cd_list.lines - 1));
+                CHECK(dir_loading, "More stations: loading");
+                stream_phase = 8;
+                ticks_left = 15;
+                step--;
+                return 0;
+            } else if (stream_phase == 8) {
+                CHECK(dir_count == 122 && !strcmp(row_name[cd_list.clicked], "Rock Station 060"),
+                      "120 stations, the first new one is marked ('%s', row %u)", row_name[cd_list.clicked], cd_list.clicked);
+                key_press('F');
+                CHECK(!strcmp(txt_status, "Added to favourites: Rock Station 060"), "F on a new one: '%s'", txt_status);
+                open_folder("/Internet radio");
+                activate_row((unsigned short)find_row("[Favourites]"));
+                dump_rows(4);
+                CHECK(cd_list.lines == 3 && !strcmp(row_name[1], "Rock Station 004") && !strcmp(row_name[2], "Rock Station 060"), "2 favourites");
+                select_row(1);
+                key_press(KEY_DEL);
+                CHECK(!strcmp(txt_status, "Removed from favourites") && cd_list.lines == 2 && !strcmp(row_name[1], "Rock Station 060"),
+                      "Del: '%s', %u rows", txt_status, cd_list.lines);
+                activate_row(1);
+                stream_phase = 9;
+                ticks_left = 15;
+                step--;
+                return 0;
+            } else if (stream_phase == 9) {
+                CHECK(!strcmp(txt_title, "Rock Station 060") && !strncmp(txt_status, "Playing 1 of 1", 14), "plays the favourite: '%s'", txt_status);
+                select_row(0);
+                key_press('F');                     // no station marked: the one that plays
+                CHECK(!strcmp(txt_status, "Already a favourite"), "F with '..' marked uses the stream that plays: '%s'", txt_status);
+                stream_phase = 10;
+                f_unlink("0:/RADIOFAV.M3U");
             }
             ev_click(C_STOP, 0, 0);
             ticks_left = 2;

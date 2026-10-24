@@ -95,13 +95,18 @@ _transfer Ctrl_Group ctrls = { C_COUNT, 0, &ctl_bg };
 #define M_LOG     4
 #define M_QUIT    9
 #define M_ABOUT   10
-_transfer Menu menu_file = { 6 };
+#define M_FAV_ADD 11
+#define M_FAV_DEL 12
+_transfer Menu menu_file = { 9 };
 _transfer Menu_Entry mf1 = { MENU_ACTIVE, "Refresh folder", M_REFRESH };
 _transfer Menu_Entry mf2 = { MENU_ACTIVE, "Remount microSD", M_REMOUNT };
-_transfer Menu_Entry mf3 = { MENU_ACTIVE, "Diagnostics...", M_DIAG };
-_transfer Menu_Entry mf4 = { MENU_ACTIVE, "Engine log...", M_LOG };
-_transfer Menu_Entry mf5 = { MENU_SEPARATOR, 0, 0 };
-_transfer Menu_Entry mf6 = { MENU_ACTIVE, "Quit", M_QUIT };
+_transfer Menu_Entry mf3 = { MENU_SEPARATOR, 0, 0 };
+_transfer Menu_Entry mf4 = { MENU_ACTIVE, "Add to favourites (F)", M_FAV_ADD };
+_transfer Menu_Entry mf5 = { MENU_ACTIVE, "Remove from favourites (Del)", M_FAV_DEL };
+_transfer Menu_Entry mf6 = { MENU_SEPARATOR, 0, 0 };
+_transfer Menu_Entry mf7 = { MENU_ACTIVE, "Diagnostics...", M_DIAG };
+_transfer Menu_Entry mf8 = { MENU_ACTIVE, "Engine log...", M_LOG };
+_transfer Menu_Entry mf9 = { MENU_ACTIVE, "Quit", M_QUIT };
 _transfer Menu menu_help = { 1 };
 _transfer Menu_Entry mh1 = { MENU_ACTIVE, "About PicoPlay", M_ABOUT };
 _transfer Menu menu_main = { 2 };

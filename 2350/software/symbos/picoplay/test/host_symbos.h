@@ -43,6 +43,11 @@ signed char Timer_Wake(unsigned char pid, unsigned char msgid, unsigned short cy
 void Timer_Delete(unsigned char id);
 void Idle(void);
 unsigned short Sys_Counter16(void);
+unsigned char File_Open(unsigned char bank, char *path);
+unsigned char File_New(unsigned char bank, char *path, unsigned char attrib);
+unsigned char File_Close(unsigned char id);
+unsigned short File_Read(unsigned char id, unsigned char bank, char *addr, unsigned short len);
+unsigned short File_Write(unsigned char id, unsigned char bank, char *addr, unsigned short len);
 #define exit(x) host_exit(x)
 void host_exit(int code);
 #define main app_main
@@ -54,4 +59,5 @@ void host_exit(int code);
 #define KEY_DOWN 137
 #define KEY_LEFT 138
 #define KEY_RIGHT 139
+#define KEY_DEL 127
 #endif

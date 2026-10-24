@@ -20,6 +20,9 @@ int host_disk_open(const char *path, uint32_t create_sectors)
     img = fopen(path, create_sectors ? "w+b" : "r+b");
     if (!img) img = fopen(path, "rb");
     if (!img) return -1;
+    // no stdio buffer: in openMSX the MSX side writes the same image (SymbOS
+    // saving a file), and the engine must read what is on the "card" now
+    setvbuf(img, NULL, _IONBF, 0);
     if (create_sectors)
     {
         img_sectors = create_sectors;

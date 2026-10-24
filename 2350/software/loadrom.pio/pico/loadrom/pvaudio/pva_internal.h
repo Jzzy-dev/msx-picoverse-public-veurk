@@ -124,6 +124,8 @@ bool        pva_dir_init(void);
 bool        pva_dir_available(void);
 int         pva_dir_start(uint8_t kind, const char *path);  // PVA_OK / PVA_E_NOWIFI / PVA_E_BUSY
 void        pva_dir_cancel(void);
+int         pva_dir_more(const char *path);     // continue the list (entries are added)
+uint16_t    pva_dir_raw(void);                  // stations in the last reply, before the filters
 void        pva_dir_poll(void);
 bool        pva_dir_busy(void);
 uint8_t     pva_dir_state(void);    // PVA_DIRS_xxx

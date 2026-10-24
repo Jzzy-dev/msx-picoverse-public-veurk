@@ -210,13 +210,19 @@ static void api(conn_t *c, const char *path)
         }
         bq_put(&b, "[", 1);
         int n = 0;
-        if (!strcmp(tag, "many"))
+        int limit = 100000, offset = 0;
+        if ((p = strstr(q, "limit="))) limit = atoi(p + 6);
+        if ((p = strstr(q, "offset="))) offset = atoi(p + 7);
+        if (!strcmp(tag, "many") || !strcmp(tag, "rock"))
         {
-            for (int i = 0; i < 150; i++)
+            // 150 stations, in pages (limit / offset)
+            for (int i = offset; i < 150 && i < offset + limit; i++)
             {
                 char nm[40];
-                snprintf(nm, sizeof nm, "Many Station %03d", i);
-                st_t t = { nm, "http://radio.test/plain", "MP3", "Germany", "many", 128, 0, 1 };
+                snprintf(nm, sizeof nm, "%s Station %03d", tag[0] == 'r' ? "Rock" : "Many", i);
+                char su[48];
+                snprintf(su, sizeof su, "http://radio.test/plain?n=%03d", i);
+                st_t t = { nm, su, "MP3", "Germany", tag, 128, 0, 1 };
                 if (n++) bq_put(&b, ",", 1);
                 station_json(&b, &t, i);
             }
@@ -266,6 +272,7 @@ static void serve(conn_t *c)
     char *r = (char *)c->reqbuf.b;
     char path[256] = "", hosth[128] = "";
     sscanf(r, "GET %255s", path);
+    if (strncmp(path, "/json/", 6)) { char *qm = strchr(path, '?'); if (qm) *qm = 0; }   // a stream's ?query does not matter
     char *h = strstr(r, "\r\nHost: ");
     if (h) sscanf(h + 8, "%127[^\r]", hosth);
     snprintf(host_esp_last_get, sizeof host_esp_last_get, "%s", r);

@@ -77,7 +77,14 @@ static char     given_station[PVA_ST_ALBUM_LEN];
 // internet radio: virtual folders over the Radio Browser directory
 #define RADIO_ENTRY     "Internet radio"
 #define RADIO_PATH      "/" RADIO_ENTRY
-enum { V_CARD, V_HOME, V_COUNTRIES, V_GENRES, V_DECADES, V_STATIONS };
+enum { V_CARD, V_HOME, V_COUNTRIES, V_GENRES, V_DECADES, V_STATIONS, V_FAVS };
+#define FAV_FILE        "/RADIOFAV.M3U"     // favourites (PicoPlay writes it through SymbOS)
+#define FAV_FOLDER      "Favourites"
+#define PAGE_STATIONS   60u
+#define MORE_ENTRY      "More stations..."
+static char     st_query[200];      // the station list's query, for "more"
+static uint16_t st_offset;
+static bool     st_more;            // the list ends with MORE_ENTRY
 static uint8_t  vlevel;             // V_CARD: cur_dir is a folder on the card
 static uint8_t  vparent;            // where ".." of a station list goes
 static bool     radio_entry;        // the card's root listing starts with RADIO_ENTRY
@@ -235,7 +242,7 @@ static int read_dir(const char *path)
 }
 
 // ---------------------------------------------------------------- internet radio
-static const char *const home_names[] = { "Top stations", "Most voted", "Trending now", "By country", "By genre", "By decade" };
+static const char *const home_names[] = { FAV_FOLDER, "Top stations", "Most voted", "Trending now", "By country", "By genre", "By decade" };
 static const char *const home_order[] = { "clickcount", "votes", "clicktrend" };
 static const char *const genres[] = {
     "pop", "rock", "classic rock", "hard rock", "metal", "punk", "alternative", "indie", "jazz", "smooth jazz",
@@ -280,6 +287,21 @@ static void v_add(const char *name, uint8_t type, uint32_t size)
     memcpy(dir_pool + dir_pool_used, nm, l);
     dir_pool_used += (uint32_t)l;
 }
+
+// a station with its address after the name in the pool (favourites)
+static void v_add_url(const char *name, const char *url)
+{
+    uint16_t before = dir_count;
+    size_t ul = strlen(url) + 1;
+    if (dir_pool_used + PVA_NAME_MAX + 1 + ul > DIR_POOL) return;
+    v_add(name[0] ? name : url, PVA_DE_URL, 0);
+    if (dir_count == before) return;
+    memcpy(dir_pool + dir_pool_used, url, ul);
+    dir_pool_used += (uint32_t)ul;
+}
+
+static void fav_build(void);
+static bool is_url(const char *p);
 
 static void v_end(void)
 {
@@ -335,6 +357,11 @@ static void v_build(uint8_t level)
         case V_STATIONS:
             v_begin(V_STATIONS, want_title);
             for (uint16_t i = 0; i < pva_dir_count(); i++) v_add(pva_dir_name(i), PVA_DE_URL, pva_dir_num(i));
+            if (st_more) v_add(MORE_ENTRY, PVA_DE_DIR, 0);
+            break;
+        case V_FAVS:
+            v_begin(V_FAVS, FAV_FOLDER);
+            fav_build();
             break;
     }
     v_end();
@@ -360,7 +387,12 @@ static void radio_list_ready(void)
             ccache_n++;
         }
     }
-    else vparent = want_parent;
+    else
+    {
+        vparent = want_parent;
+        // a full page (before the filters) may have more after it
+        st_more = pva_dir_raw() >= PAGE_STATIONS && !pva_dir_truncated();
+    }
     v_build(want_level);
     pva_log("radio: %u in %.40s", (unsigned)(dir_count - 1u), want_level == V_COUNTRIES ? "By country" : want_title);
 }
@@ -372,10 +404,30 @@ static int radio_fetch(uint8_t level, uint8_t parent, const char *title, const c
     if (k == PVA_DIRQ_COUNTRIES) snprintf(path, sizeof path, "/json/countries?hidebroken=true&order=name");
     else snprintf(path, sizeof path, "/json/stations/search?%s&codec=MP3&hidebroken=true&limit=60", query);
     int r = pva_dir_start(k, path);
+    if (k == PVA_DIRQ_STATIONS) { snprintf(st_query, sizeof st_query, "%s", query); st_offset = 0; }
     if (r != PVA_OK) { dstate = PVA_DIRS_FAILED; derr = PVA_NERR_NOWIFI; status_dirty = true; return r; }
     want_level = level;
     want_parent = parent;
     snprintf(want_title, sizeof want_title, "%s", title);
+    dir_wait = true;
+    dstate = PVA_DIRS_LOADING;
+    derr = 0;
+    status_dirty = true;
+    return PVA_E_BUSY;
+}
+
+// "More stations...": the next page, added to the list
+static int radio_more(void)
+{
+    char path[300];
+    uint16_t off = (uint16_t)(st_offset + PAGE_STATIONS);
+    snprintf(path, sizeof path, "/json/stations/search?%s&codec=MP3&hidebroken=true&limit=%u&offset=%u",
+             st_query, (unsigned)PAGE_STATIONS, (unsigned)off);
+    int r = pva_dir_more(path);
+    if (r != PVA_OK) return r;
+    st_offset = off;
+    want_level = V_STATIONS;
+    want_parent = vparent;
     dir_wait = true;
     dstate = PVA_DIRS_LOADING;
     derr = 0;
@@ -432,20 +484,24 @@ static int radio_enter(uint16_t idx)
         case V_HOME:
         {
             unsigned i = idx - 1u;
-            if (i < 3)
+            if (i == 0) { radio_stop_wait(); v_build(V_FAVS); return PVA_OK; }
+            if (i <= 3)
             {
-                snprintf(q, sizeof q, "order=%s&reverse=true", home_order[i]);
+                snprintf(q, sizeof q, "order=%s&reverse=true", home_order[i - 1u]);
                 return radio_fetch(V_STATIONS, V_HOME, home_names[i], q);
             }
             radio_stop_wait();
-            if (i == 3)
+            if (i == 4)
             {
                 if (ccache_n) { v_build(V_COUNTRIES); return PVA_OK; }
                 return radio_fetch(V_COUNTRIES, V_HOME, "By country", "");
             }
-            v_build(i == 4 ? V_GENRES : V_DECADES);
+            v_build(i == 5 ? V_GENRES : V_DECADES);
             return PVA_OK;
         }
+        case V_STATIONS:
+            if (st_more && idx + 1u == dir_count) return radio_more();
+            return PVA_E_ARGS;
         case V_COUNTRIES:
         {
             const uint8_t *c = ccache_entry((uint16_t)(idx - 1u));
@@ -524,6 +580,7 @@ static int cmd_dir_open(void)
     if (!mounted && !do_mount()) return PVA_E_NOCARD;
     if (args[0] == 0 && vlevel != V_CARD)
     {
+        if (vlevel == V_FAVS) v_build(V_FAVS);     // PicoPlay may have changed the file
         reply_dir_header();             // the radio list on show
         return PVA_OK;
     }
@@ -744,6 +801,70 @@ static int load_m3u(const char *m3u_path)
     return pl_count ? PVA_OK : PVA_E_FORMAT;
 }
 
+// The favourites file: an M3U (#EXTINF names, http(s) lines) in the root.
+static void fav_build(void)
+{
+    char fp[PATH_MAX_LEN + 8];
+    if (!mounted && !do_mount()) return;
+    fatfs_path(fp, sizeof fp, FAV_FILE);
+    fs_refresh();
+    if (f_open(m3u_file, fp, FA_READ) != FR_OK) return;
+    memset(m3u_lr, 0, sizeof *m3u_lr);
+    m3u_lr->f = m3u_file;
+    char line[URL_MAX_LEN + 8], name[PVA_NAME_MAX + 1] = "";
+    while (read_line(m3u_lr, line, sizeof line))
+    {
+        char *p = line;
+        if ((uint8_t)p[0] == 0xEF && (uint8_t)p[1] == 0xBB && (uint8_t)p[2] == 0xBF) p += 3;
+        while (*p == ' ' || *p == '\t') p++;
+        size_t l = strlen(p);
+        while (l && (p[l - 1] == ' ' || p[l - 1] == '\t')) p[--l] = 0;
+        if (!strncmp(p, "#EXTINF:", 8))
+        {
+            const char *c = strchr(p, ',');
+            if (c) pva_copy_ascii(name, sizeof name, c + 1, strlen(c + 1));
+            continue;
+        }
+        if (!*p || *p == '#') continue;
+        if (is_url(p) && strlen(p) <= URL_MAX_LEN) v_add_url(name, p);
+        name[0] = 0;
+    }
+    f_close(m3u_file);
+}
+
+// ENTRY_INFO: address and name of a station in the open list (0xFFFF = the
+// stream that plays), for PicoPlay's favourites
+static int cmd_entry_info(void)
+{
+    uint16_t idx = (uint16_t)(args[0] | (args[1] << 8));
+    char u[URL_MAX_LEN + 1];
+    char nm[PVA_NAME_MAX + 1];
+    if (idx == 0xFFFF)
+    {
+        if (!pl_count || !pva_dec_is_stream()) return PVA_E_STATE;
+        const char *e = pl_pool + pl_off[pl_order[pl_pos]];
+        const char *sep = strchr(e, STATION_SEP);
+        size_t n = sep ? (size_t)(sep - e) : strlen(e);
+        if (n > URL_MAX_LEN) return PVA_E_ARGS;
+        memcpy(u, e, n);
+        u[n] = 0;
+        snprintf(nm, sizeof nm, "%s", given_station[0] ? given_station : info.album);
+    }
+    else
+    {
+        if (!dir_open || idx >= dir_count || dir_ent[idx].type != PVA_DE_URL) return PVA_E_ARGS;
+        const char *n0 = dir_pool + dir_ent[idx].name;
+        snprintf(nm, sizeof nm, "%s", n0);
+        if (vlevel == V_STATIONS) snprintf(u, sizeof u, "%s", pva_dir_url((uint16_t)(idx - 1u)));
+        else if (vlevel == V_FAVS) snprintf(u, sizeof u, "%s", n0 + strlen(n0) + 1);
+        else return PVA_E_ARGS;
+    }
+    if (!u[0]) return PVA_E_ARGS;
+    set_reply_str(u);
+    set_reply_str(nm);
+    return PVA_OK;
+}
+
 // ---------------------------------------------------------------- playback
 static void set_title_from_path(const char *path)
 {
@@ -914,7 +1035,7 @@ static int cmd_play_index(void)
     if (sel->type == PVA_DE_URL && vlevel == V_STATIONS)
     {
         // the list's stations make the play list
-        if (pva_dir_kind() != PVA_DIRQ_STATIONS || pva_dir_count() + 1u != dir_count) return PVA_E_STATE;
+        if (pva_dir_kind() != PVA_DIRQ_STATIONS || pva_dir_count() + 1u + (st_more ? 1u : 0u) != dir_count) return PVA_E_STATE;
         stop_playback();
         pl_clear();
         pl_kind = 2;
@@ -928,6 +1049,27 @@ static int cmd_play_index(void)
             if (strlen(u) > URL_MAX_LEN) continue;
             snprintf(e, sizeof e, "%s%c%s%c%s", u, STATION_SEP, nm, STATION_SEP, pva_dir_uuid(i));
             if (i + 1u == idx) start = pl_count;
+            if (!pl_add(e)) break;
+        }
+        if (!pl_count) return PVA_E_STATE;
+        if (mode & PVA_MODE_SHUFFLE) { pl_shuffle(start); start = 0; }
+        return play_pos(start);
+    }
+    if (sel->type == PVA_DE_URL && vlevel == V_FAVS)
+    {
+        stop_playback();
+        pl_clear();
+        pl_kind = 2;
+        uint16_t start = 0;
+        for (uint16_t i = 1; i < dir_count; i++)
+        {
+            const char *nm = dir_pool + dir_ent[i].name, *u = nm + strlen(nm) + 1;
+            char e[URL_MAX_LEN + PVA_ST_ALBUM_LEN + 2];
+            char n2[PVA_ST_ALBUM_LEN];
+            snprintf(n2, sizeof n2, "%s", nm);
+            if (strlen(u) > URL_MAX_LEN) continue;
+            snprintf(e, sizeof e, "%s%c%s", u, STATION_SEP, n2);
+            if (i == idx) start = pl_count;
             if (!pl_add(e)) break;
         }
         if (!pl_count) return PVA_E_STATE;
@@ -1116,6 +1258,7 @@ static int execute(uint8_t code)
         case PVA_C_DIR_OPEN:  return cmd_dir_open();
         case PVA_C_DIR_READ:  return cmd_dir_read();
         case PVA_C_DIR_ENTER: return cmd_dir_enter();
+        case PVA_C_ENTRY_INFO: return cmd_entry_info();
         case PVA_C_PLAY_INDEX: return cmd_play_index();
         case PVA_C_PLAY_PATH: return cmd_play_path();
         case PVA_C_PLAY_URL:  return cmd_play_url();

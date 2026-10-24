@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include "pva_proto.h"
 
-#define APP_VERSION "0.1"
+#define APP_VERSION "0.2"
 
 /* ------------------------------------------------------------ engine access */
 extern void pv_setslot(unsigned char prim, unsigned char sub);
@@ -393,6 +393,7 @@ static void open_folder(char *path)
 
 /* a radio list being fetched (DIR_ENTER answered BUSY) */
 static unsigned char dir_loading;
+static short more_from = -1;        /* the "More stations..." entry that was opened */
 static char *net_reason(unsigned char e);
 
 static void check_dir_loading(void)
@@ -404,6 +405,13 @@ static void check_dir_loading(void)
     dir_loading = 0;
     if (ds == PVA_DIRS_DONE) {
         open_folder("");
+        if (more_from >= 0 && more_from < (short)dir_count) {
+            /* the first new station, where "More stations..." was */
+            page_first = (unsigned short)more_from / LIST_PAGE * LIST_PAGE;
+            fill_page();
+            select_row((short)(more_from - page_first + (page_first ? 1 : 0)));
+        }
+        more_from = -1;
         strcpy(put_u(t, dir_count ? dir_count - 1 : 0), dir_count == 2 ? " entry" : " entries");
         set_status(t);
     } else if (ds == PVA_DIRS_FAILED) {
@@ -435,6 +443,9 @@ static void activate_row(unsigned short row)
         if (r == PVA_E_BUSY) {
             /* a radio list is fetched: the tick opens it when it is there */
             dir_loading = 1;
+            /* "More stations..." (the last row of a station list): show the new ones */
+            more_from = (e + 1 == (short)dir_count && row_type[0] == PVA_DE_PARENT &&
+                         !strncmp(txt_path, "/Internet radio/", 16)) ? e : -1;
             set_status("Loading the station list...");
         } else if (r != PVA_OK)
             error_status("Folder", r);
@@ -753,6 +764,163 @@ static void show_text(char *title, char *text)
         text_id = Win_Open(_symbank, &win_text);
 }
 
+/* ------------------------------------------------------------ favourites */
+/* RADIOFAV.M3U in the root of the card. PicoPlay writes it through SymbOS (so
+   the file system stays SymbOS's alone); the engine only reads it for the
+   Favourites folder. */
+#define FAV_SIZE 4096
+char favbuf[FAV_SIZE + 1];
+char fav_path[20];
+char fav_url[256];
+char fav_name[64];
+
+static unsigned short fav_load(void)
+{
+    unsigned char id = File_Open(_symbank, fav_path);
+    unsigned short n;
+    if (id > 7)
+        return 0;
+    n = File_Read(id, _symbank, favbuf, FAV_SIZE);
+    File_Close(id);
+    favbuf[n] = 0;
+    return n;
+}
+
+static unsigned char fav_save(unsigned short n)
+{
+    unsigned char id = File_New(_symbank, fav_path, 0);
+    unsigned short w;
+    if (id > 7)
+        return 0;
+    w = n ? File_Write(id, _symbank, favbuf, n) : 0;
+    File_Close(id);
+    return w == n;
+}
+
+/* the line in favbuf equal to fav_url: its start, or 0 */
+static char *fav_find(void)
+{
+    char *p = favbuf, *e;
+    unsigned short l = strlen(fav_url);
+    while (*p) {
+        e = p;
+        while (*e && *e != 13 && *e != 10)
+            ++e;
+        if ((unsigned short)(e - p) == l && !strncmp(p, fav_url, l))
+            return p;
+        while (*e == 13 || *e == 10)
+            ++e;
+        p = e;
+    }
+    return 0;
+}
+
+/* the station of the marked row (or the stream that plays) into fav_url/fav_name */
+static unsigned char fav_info(void)
+{
+    unsigned short row = cd_list.clicked, idx = 0xFFFF;
+    char *n;
+    if (row < cd_list.lines && row_type[row] == PVA_DE_URL)
+        idx = (unsigned short)row_entry[row];
+    if (pv_cmd_u16(PVA_C_ENTRY_INFO, idx) != PVA_OK)
+        return 0;
+    strncpy(fav_url, xbuf, 255);
+    fav_url[255] = 0;
+    n = xbuf + strlen(xbuf) + 1;
+    strncpy(fav_name, n, 63);
+    fav_name[63] = 0;
+    return 1;
+}
+
+static unsigned char in_favourites(void)
+{
+    return !strcmp(txt_path, "/Internet radio/Favourites");
+}
+
+static void fav_add(void)
+{
+    unsigned short n;
+    char t[80];
+    if (!fav_info()) {
+        set_status("Favourites: select a station (or play one) first");
+        return;
+    }
+    n = fav_load();
+    if (fav_find()) {
+        set_status("Already a favourite");
+        return;
+    }
+    if (!n) {
+        strcpy(favbuf, "#EXTM3U\r\n");
+        n = strlen(favbuf);
+    } else if (favbuf[n - 1] != 10 && favbuf[n - 1] != 13) {
+        strcpy(favbuf + n, "\r\n");
+        n += 2;
+    }
+    if (n + strlen(fav_name) + strlen(fav_url) + 16 > FAV_SIZE) {
+        set_status("Favourites: the file is full (4 KB)");
+        return;
+    }
+    strcpy(favbuf + n, "#EXTINF:-1,");
+    strcat(favbuf + n, fav_name);
+    strcat(favbuf + n, "\r\n");
+    strcat(favbuf + n, fav_url);
+    strcat(favbuf + n, "\r\n");
+    n += strlen(favbuf + n);
+    if (!fav_save(n)) {
+        set_status("Favourites: cannot write RADIOFAV.M3U");
+        return;
+    }
+    strcpy(t, "Added to favourites: ");
+    strncat(t, fav_name[0] ? fav_name : fav_url, 50);
+    set_status(t);
+    if (in_favourites())
+        open_folder("");
+}
+
+static void fav_del(void)
+{
+    unsigned short n, row = cd_list.clicked;
+    char *p, *e, *s;
+    if (!in_favourites() || row >= cd_list.lines || row_type[row] != PVA_DE_URL || !fav_info()) {
+        set_status("Favourites: select a station in Internet radio/Favourites");
+        return;
+    }
+    n = fav_load();
+    p = fav_find();
+    if (!p) {
+        set_status("Not in RADIOFAV.M3U");
+        return;
+    }
+    /* the address line, and the #EXTINF line just before it */
+    e = p;
+    while (*e && *e != 13 && *e != 10)
+        ++e;
+    while (*e == 13 || *e == 10)
+        ++e;
+    s = p;
+    if (s > favbuf) {
+        char *q = s - 1;
+        while (q > favbuf && (*q == 13 || *q == 10))
+            --q;
+        while (q > favbuf && q[-1] != 13 && q[-1] != 10)
+            --q;
+        if (!strncmp(q, "#EXTINF", 7))
+            s = q;
+    }
+    memmove(s, e, n - (unsigned short)(e - favbuf) + 1);
+    n -= (unsigned short)(e - s);
+    if (!fav_save(n)) {
+        set_status("Favourites: cannot write RADIOFAV.M3U");
+        return;
+    }
+    open_folder("");
+    if (row >= cd_list.lines && cd_list.lines)
+        row = cd_list.lines - 1;
+    select_row((short)row);
+    set_status("Removed from favourites");
+}
+
 static void menu_action(unsigned short v)
 {
     int r;
@@ -794,7 +962,14 @@ static void menu_action(unsigned short v)
                   "Up/Down select, Left/Right page, Enter open/play\n"
                   "Backspace parent folder\n"
                   "Space play/pause, N next, P previous, S stop\n"
-                  "+/- volume, D diagnostics, L engine log");
+                  "+/- volume, D diagnostics, L engine log\n"
+                  "F add to favourites, Del remove (Internet radio)");
+        break;
+    case M_FAV_ADD:
+        fav_add();
+        break;
+    case M_FAV_DEL:
+        fav_del();
         break;
     case M_QUIT:
         app_quit();
@@ -859,6 +1034,8 @@ static void key_press(unsigned char k)
     case 'd': case 'D': menu_action(M_DIAG); break;
     case 'a': case 'A': menu_action(M_ABOUT); break;
     case 'l': case 'L': menu_action(M_LOG); break;
+    case 'f': case 'F': fav_add(); break;
+    case 127: fav_del(); break;                 /* Del */
     case 8:                                     /* backspace: parent folder */
         if (cd_list.lines && row_type[0] == PVA_DE_PARENT)
             activate_row(0);
@@ -882,6 +1059,9 @@ int main(int argc, char *argv[])
     int r;
 
     gui_texts_init();
+    /* the favourites live on the drive PicoPlay was started from (the card) */
+    fav_path[0] = (argc > 0 && argv[0][0] && argv[0][1] == ':') ? argv[0][0] : 'A';
+    strcpy(fav_path + 1, ":\\RADIOFAV.M3U");
     win_id = Win_Open(_symbank, &win_main);
     if (win_id < 0)
         return 1;

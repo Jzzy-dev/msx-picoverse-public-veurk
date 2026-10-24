@@ -705,13 +705,13 @@ int main(int argc, char **argv)
         CHECK(cmd_u16(PVA_C_DIR_ENTER, 0) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio"), "enter it: '%s'", reply + 2);
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
         for (int i = 0; i < n; i++) printf("    %d %s\n", ents[i].type, ents[i].name);
-        CHECK(n == 7 && ents[0].type == PVA_DE_PARENT && find(n, "By country") == 4 && find(n, "By genre") == 5 && find(n, "By decade") == 6,
+        CHECK(n == 8 && ents[0].type == PVA_DE_PARENT && find(n, "Favourites") == 1 && find(n, "By country") == 5 && find(n, "By genre") == 6 && find(n, "By decade") == 7,
               "home: '..', 3 rankings, country, genre, decade");
         uint32_t req0 = host_esp_requests;
         read_status();
         uint8_t g0 = st[PVA_ST_DIR_GEN];
         uint32_t t0 = pva_hal_millis();
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 4) == PVA_E_BUSY, "By country: BUSY (fetching)");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 5) == PVA_E_BUSY, "By country: BUSY (fetching)");
         read_status();
         CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_LOADING && st[PVA_ST_DIR_GEN] == g0, "DIR_STATE loading, the listing stays");
         WAIT_LIST(10000);
@@ -738,7 +738,7 @@ int main(int argc, char **argv)
         CHECK(cmd_u16(PVA_C_DIR_ENTER, 0) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/By country") && host_esp_requests == req1,
               "'..': the countries again, without fetching");
         CHECK(cmd_u16(PVA_C_DIR_ENTER, 0) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio"), "'..': home");
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 5) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/By genre"), "By genre (no fetch)");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 6) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/By genre"), "By genre (no fetch)");
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
         int jazz = find(n, "Jazz");
         CHECK(n > 40 && jazz > 0 && find(n, "Hip hop") > 0, "%d genres", n - 1);
@@ -772,7 +772,7 @@ int main(int argc, char **argv)
         // browse while the stream plays
         cmd_u16(PVA_C_DIR_ENTER, 0);                // genres
         cmd_u16(PVA_C_DIR_ENTER, 0);                // home
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 6) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/By decade"), "By decade");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 7) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/By decade"), "By decade");
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
         int e80 = find(n, "1980s");
         CHECK(e80 > 0 && cmd_u16(PVA_C_DIR_ENTER, (uint16_t)e80) == PVA_E_BUSY, "1980s while a stream plays: BUSY");
@@ -791,7 +791,7 @@ int main(int argc, char **argv)
         host_esp_api_down = true;
         cmd_u16(PVA_C_DIR_ENTER, 0);                // decades
         cmd_u16(PVA_C_DIR_ENTER, 0);                // home
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 1) == PVA_E_BUSY, "Top stations with the first server down");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 2) == PVA_E_BUSY, "Top stations with the first server down");
         WAIT_LIST(20000);
         CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_DONE && strstr(host_esp_last_get, "Host: nl1.api.radio-browser.info") &&
               strstr(host_esp_last_api, "order=clickcount&reverse=true"), "the list came from a mirror (Content-Length reply)");
@@ -801,13 +801,13 @@ int main(int argc, char **argv)
         host_esp_api_down = false;
         host_esp_api_all_down = true;
         cmd_u16(PVA_C_DIR_ENTER, 0);                // home
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 2) == PVA_E_BUSY, "Most voted with all servers down");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 3) == PVA_E_BUSY, "Most voted with all servers down");
         WAIT_LIST(40000);
         CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_FAILED && st[PVA_ST_DIR_ERR] == PVA_NERR_CONNECT, "FAILED, error %u", st[PVA_ST_DIR_ERR]);
         CHECK(cmd_str(PVA_C_DIR_OPEN, "") == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio"), "still at home");
         host_esp_api_all_down = false;
         host_esp_api_bps = 500;                     // slow server: go back while it loads
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 1) == PVA_E_BUSY, "Top stations from a slow server");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 2) == PVA_E_BUSY, "Top stations from a slow server");
         run_ms(1500);
         CHECK(cmd_u16(PVA_C_DIR_ENTER, 0) == PVA_OK && !strcmp((char *)reply + 2, "/"), "'..' while loading: back on the card");
         run_ms(2000);
@@ -826,16 +826,83 @@ int main(int argc, char **argv)
         host_esp_present = true;
         CHECK(cmd(PVA_C_DIAG, NULL, 0) == PVA_OK && strstr((char *)reply, "Radio list:"), "DIAG:\n%s", reply);
 
+        printf("[more stations]\n");
+        cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
+        cmd_u16(PVA_C_DIR_ENTER, 6);                // By genre
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        int rock = find(n, "Rock");
+        CHECK(rock > 0 && cmd_u16(PVA_C_DIR_ENTER, (uint16_t)rock) == PVA_E_BUSY, "Rock");
+        WAIT_LIST(15000);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(n == 62 && !strcmp(ents[60].name, "Rock Station 059") && !strcmp(ents[61].name, "More stations...") && ents[61].type == PVA_DE_DIR,
+              "60 stations and 'More stations...' (%d entries)", n);
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 61) == PVA_E_BUSY, "more: BUSY");
+        WAIT_LIST(15000);
+        CHECK(strstr(host_esp_last_api, "limit=60&offset=60"), "query %s", host_esp_last_api);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(n == 122 && !strcmp(ents[61].name, "Rock Station 060") && !strcmp(ents[121].name, "More stations..."), "120 stations (%d entries)", n);
+        cmd_u16(PVA_C_DIR_ENTER, 121);
+        WAIT_LIST(15000);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(n == 151 && !strcmp(ents[150].name, "Rock Station 149"), "all 150, no 'more' after the last page (%d entries)", n);
+        CHECK(cmd_u16(PVA_C_ENTRY_INFO, 150) == PVA_OK && !strcmp((char *)reply, "http://radio.test/plain?n=149") &&
+              !strcmp((char *)reply + strlen((char *)reply) + 1, "Rock Station 149"), "ENTRY_INFO: '%s'", reply);
+        CHECK(cmd_u16(PVA_C_PLAY_INDEX, 150) == PVA_OK, "play the last one");
+        run_ms(3000);
+        read_status();
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st16(PVA_ST_PL_COUNT) == 150 && st16(PVA_ST_PL_POS) == 149,
+              "plays %u of %u", st16(PVA_ST_PL_POS) + 1, st16(PVA_ST_PL_COUNT));
+        CHECK(cmd_u16(PVA_C_ENTRY_INFO, 0xFFFF) == PVA_OK && !strcmp((char *)reply, "http://radio.test/plain?n=149") &&
+              !strcmp((char *)reply + strlen((char *)reply) + 1, "Rock Station 149"), "ENTRY_INFO of the playing stream");
+        cmd(PVA_C_STOP, NULL, 0);
+
+        printf("[favourites]\n");
+        cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 1) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/Favourites") &&
+              reply[0] == 1, "no favourites file: only '..'");
+        {
+            FIL f;
+            UINT bw;
+            const char *t = "#EXTM3U\r\n#EXTINF:-1,My Fav\r\nhttp://radio.test/plain\r\nhttp://radio2.test:8000/live\r\n# a note\r\n";
+            CHECK(f_open(&f, "0:/RADIOFAV.M3U", FA_WRITE | FA_CREATE_ALWAYS) == FR_OK && f_write(&f, t, strlen(t), &bw) == FR_OK && f_close(&f) == FR_OK,
+                  "(write RADIOFAV.M3U as PicoPlay would)");
+        }
+        CHECK(cmd_str(PVA_C_DIR_OPEN, "") == PVA_OK, "reopen reads the file again");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        for (int i = 0; i < n; i++) printf("    %d %s\n", ents[i].type, ents[i].name);
+        CHECK(n == 3 && !strcmp(ents[1].name, "My Fav") && ents[1].type == PVA_DE_URL && !strcmp(ents[2].name, "http://radio2.test:8000/live"),
+              "2 favourites (a nameless one shows its address)");
+        CHECK(cmd_u16(PVA_C_ENTRY_INFO, 2) == PVA_OK && !strcmp((char *)reply, "http://radio2.test:8000/live"), "ENTRY_INFO of a favourite");
+        CHECK(cmd_u16(PVA_C_PLAY_INDEX, 1) == PVA_OK, "play 'My Fav'");
+        run_ms(3000);
+        read_status();
+        CHECK(st[PVA_ST_STATE] == PVA_STATE_PLAYING && st16(PVA_ST_PL_COUNT) == 2 && !strcmp(ststr(PVA_ST_ALBUM), "My Fav"),
+              "plays '%s', play list of 2", ststr(PVA_ST_ALBUM));
+        CHECK(cmd(PVA_C_NEXT, NULL, 0) == PVA_OK, "next favourite");
+        run_ms(3000);
+        read_status();
+        CHECK(st16(PVA_ST_PL_POS) == 1 && st[PVA_ST_STATE] == PVA_STATE_PLAYING, "plays the second");
+        cmd(PVA_C_STOP, NULL, 0);
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 0) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio"), "'..' from favourites: home");
+        cmd_str(PVA_C_DIR_OPEN, "/");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(find(n, "RADIOFAV.M3U") > 0, "the file is in the root too (an M3U)");
+        f_unlink("0:/RADIOFAV.M3U");
+        run_ms(500);
+
         printf("[directory: a big reply that ends with the close, quick station changes]\n");
         host_esp_close_silent = true;
         cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
         uint32_t ta = pva_hal_millis(), sa = host_esp_state_asks;
-        CHECK(cmd_u16(PVA_C_DIR_ENTER, 1) == PVA_E_BUSY, "Top stations (no Content-Length, the ESP does not report the close)");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 2) == PVA_E_BUSY, "Top stations (no Content-Length, the ESP does not report the close)");
         WAIT_LIST(15000);
         CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_DONE && pva_hal_millis() - ta < 3000, "in after %lu ms (the JSON end is seen; TCP_STATE asked %u times)",
               (unsigned long)(pva_hal_millis() - ta), host_esp_state_asks - sa);
         cmd_u16(PVA_C_DIR_ENTER, 0);
-        cmd_u16(PVA_C_DIR_ENTER, 4);                // By country (kept)
+        cmd_u16(PVA_C_DIR_ENTER, 5);                // By country (kept)
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
         int nc = find(n, "New Caledonia");
         CHECK(nc > 0 && cmd_u16(PVA_C_DIR_ENTER, (uint16_t)nc) == PVA_E_BUSY, "New Caledonia");
