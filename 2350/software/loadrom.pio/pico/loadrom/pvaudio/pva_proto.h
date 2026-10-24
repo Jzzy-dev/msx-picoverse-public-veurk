@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        2
+#define PVA_FW_MINOR        3
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -94,6 +94,8 @@
 #define PVA_E_STATE         0x08    // not possible in this state
 #define PVA_E_NET           0x09    // network failure (see PVA_ST_NET_ERR)
 #define PVA_E_NOWIFI        0x0A    // no ESP WiFi link in this firmware (-w), or no memory for streams
+#define PVA_E_BUSY          0x0B    // DIR_ENTER: the list is being fetched; it opens by itself when
+                                    // PVA_ST_DIR_STATE turns READY (then DIR_GEN changes)
 
 // directory entry in a DIR_READ reply: u8 type, u32 size, u8 len, name[len]
 #define PVA_DE_DIR          1
@@ -153,6 +155,9 @@
                                     //     uptime or log count; the buffer and rate below are coarse)
 #define PVA_ST_DISP_BUF     174     // u8  buffer fill in steps of 10 %, with a dead band
 #define PVA_ST_DISP_RATE    175     // u16 receive rate (0.1 KB/s), sampled every 5 s
+// the internet radio directory (virtual folders under "[Internet radio]")
+#define PVA_ST_DIR_STATE    177     // u8  PVA_DIRS_xxx of the last list fetched
+#define PVA_ST_DIR_ERR      178     // u8  PVA_NERR_xxx when it failed
 
 #define PVA_STATE_STOPPED   0
 #define PVA_STATE_PLAYING   1
@@ -183,5 +188,10 @@
 #define PVA_NERR_TIMEOUT    6       // the ESP or the server stopped answering
 #define PVA_NERR_CLOSED     7       // the server closed the stream
 #define PVA_NERR_URL        8       // bad URL, too many redirects
+
+#define PVA_DIRS_IDLE       0
+#define PVA_DIRS_LOADING    1
+#define PVA_DIRS_DONE       2
+#define PVA_DIRS_FAILED     3
 
 #endif

@@ -103,6 +103,24 @@ With a `-p1 -w` image the engine plays MP3 internet radio streams itself. The ES
 - **HTTPS:** the ESP does TLS 1.2 with SNI, one TLS connection at a time. The certificate is not checked. The handshake takes one or two seconds.
 - **Diagnostics:** *File > Diagnostics* shows the host, TLS, HTTP status, receive rate, buffer, reconnects, longest receive gap, underruns, DNS and open times, and ESP errors. These numbers are what to send back when a station does not play well.
 
+### The station directory
+
+With a `-p1 -w` image the card's root folder starts with **[Internet radio]**. It browses [Radio Browser](https://www.radio-browser.info), a free, community-run directory of tens of thousands of stations. The engine fetches each list over the ESP-01 itself, so PicoPlay stays responsive and a playing stream keeps playing.
+
+| Folder | What it lists |
+| --- | --- |
+| Top stations, Most voted, Trending now | the 60 most clicked, most voted and fastest rising MP3 stations |
+| By country | every country with stations, with the number of stations; open one for its 60 most clicked MP3 stations |
+| By genre | 50 genres (pop, rock, jazz, classical, house, schlager, news ...), each by Radio Browser tag |
+| By decade | 1950s to 2010s and Oldies, by the tags `50s` ... `10s` and `oldies` |
+
+- **Opening a list** takes a moment (Radio Browser sends about 1 KB per station; a list of 60 is about 60 KB, 4 to 6 s). The status bar says `Loading the station list...`; the list opens by itself when it is in. If you go elsewhere meanwhile, the fetch is dropped.
+- **Stations** show their bitrate in the size column. Enter or a double-click plays one; the list's stations become the play list, so `N` and `P` step through them. Shuffle works too.
+- **Only MP3:** the lists ask for MP3 only and leave out HLS streams, stations whose last check failed and addresses longer than 255 characters.
+- **Servers:** `all.api.radio-browser.info` over HTTP, then the mirrors `de1`, `nl1`, `at1`, `de2` and `fi1`. A redirect to HTTPS is followed. Countries are fetched once per session and kept.
+- **Listener counts:** when a station from the directory starts, the engine tells Radio Browser (`/json/url/<station>`), as its API asks. The requests say `User-Agent: PicoPlay/0.3 (MSX PicoVerse 2350)`.
+- **When it fails** the listing stays where it was and the status bar says why, for example `Station list: host not found` (no WiFi or DNS) or `Station list: connection refused`. Diagnostics has a `Radio list:` line, and the engine log shows each server tried.
+
 ## 7. Register window (for developers)
 
 The engine is in page 1 of sub-slot 3, `4000h-4FFFh`. The full definition is `2350/software/loadrom.pio/pico/loadrom/pvaudio/pva_proto.h`.
@@ -124,17 +142,20 @@ Commands: `PING`, `MOUNT`, `LOG`, `DIAG`, `DIR_OPEN path`, `DIR_READ first,count
 
 For streams the status block has the `STREAM` and `BUFFERING` flags, and from byte 162: network state, buffer fill in %, receive rate in 0.1 KB/s, reconnects, the last network error (`PVA_NERR_xxx`), the last HTTP status and the buffer size in KB. Results `9` (network) and `10` (no WiFi link) are new.
 
+The station directory is a set of virtual folders. `DIR_ENTER` on a folder whose list must be fetched answers `11` (`PVA_E_BUSY`) and leaves the open folder as it was. Status byte 177 (`DIR_STATE`) is then `1` (loading), and later `2` (ready: the new list is the open folder, `DIR_GEN` changed, reopen it with `DIR_OPEN ""`) or `3` (failed, byte 178 has the `PVA_NERR_xxx` reason). Stations are entries of type `6` (`URL`) with the bitrate as their size; countries are folders with their station count as size. `PLAY_INDEX` on a station plays it with the list's stations as the play list. `DIR_OPEN "/Internet radio"` opens the directory's home.
+
 To send a command, write the arguments, then a new token, then the code. On a later check, compare the done token with your token, then read the result and the reply. To read the status block, read byte 0, copy the block, and read byte 0 again; if it changed or is odd, copy again.
 
 ## 8. Sources and tests
 
-- Engine: `2350/software/loadrom.pio/pico/loadrom/pvaudio/` (`pva_window.c` runs on core 0; `pva_engine.c`, `pva_decode.c`, `pva_net.c` and `pva_hal_pico.c` run on core 1; the ESP link functions are in `loadrom.c`). LoadROM mode: `loadrom_sunrise_mapper_pva_sd()`, ROM type 22.
-- Host test: `pvaudio/tests`, `make run`. It builds a FAT16 image and drives the window as PicoPlay does. It covers folders, real-time playback with no underruns while browsing, tags, VBR, mono, WAV, seek, volume, shuffle, repeat, M3U and a removed card. `tests/host_esp.c` simulates the ESP-01 (its UNAPI protocol, UART speed, DNS and TLS delays) with test radio servers, for streams: ICY titles, pause, dropped connections, a stalled and a slow server, redirects, `.pls`, HTTPS, AAC, 404, unknown hosts, no WiFi, and switching stations.
-- PicoPlay and PVTEST: `2350/software/symbos/picoplay/` (SymbOS C Compiler and sjasmplus). `test/host_app.c` runs PicoPlay's logic against the engine. It covers browsing, paging, playing, seeking, the controls, diagnostics, a stuck engine and a missing engine. `test/z80_pvtest.c` runs PVTEST.COM in a Z80 emulator.
+- Engine: `2350/software/loadrom.pio/pico/loadrom/pvaudio/` (`pva_window.c` runs on core 0; `pva_engine.c`, `pva_decode.c`, `pva_net.c` (streams), `pva_dir.c` (Radio Browser), `pva_esp.c` (the ESP link, shared by the two) and `pva_hal_pico.c` run on core 1; the UART functions are in `loadrom.c`). LoadROM mode: `loadrom_sunrise_mapper_pva_sd()`, ROM type 22.
+- Host test: `pvaudio/tests`, `make run`. It builds a FAT16 image and drives the window as PicoPlay does. It covers folders, real-time playback with no underruns while browsing, tags, VBR, mono, WAV, seek, volume, shuffle, repeat, M3U and a removed card. `tests/host_esp.c` simulates the ESP-01 (its UNAPI protocol, UART speed, DNS and TLS delays) with test radio servers, for streams: ICY titles, pause, dropped connections, a stalled and a slow server, redirects, `.pls`, HTTPS, AAC, 404, unknown hosts, no WiFi, and switching stations. It also serves a small Radio Browser API (countries with UTF-8 names, stations with AAC, HLS, broken and over-long entries mixed in, a 150-station list, a mirror that sends `Content-Length`, servers that are down or slow), for the directory: lists, the filters, mirrors, failures, dropping a fetch, click counting, and fetching while a stream plays without underruns.
+- PicoPlay and PVTEST: `2350/software/symbos/picoplay/` (SymbOS C Compiler and sjasmplus). `test/host_app.c` runs PicoPlay's logic against the engine. It covers browsing, paging, playing, seeking, the controls, diagnostics, the station directory (loading, opening by itself, bitrates, playing, failures), a stuck engine and a missing engine. `test/z80_pvtest.c` runs PVTEST.COM in a Z80 emulator.
 - openMSX: `picoplay/emu/` has an openMSX device that runs the engine behind the window, plus an extension with the cartridge's slot layout, for testing PicoPlay under real SymbOS.
 
 ## 9. Next steps
 
 - Internet radio on real hardware: receive rate, gaps and TLS times from Diagnostics.
-- Browsing Radio Browser (by country, genre and decade) from PicoPlay, with favourites saved as M3U.
+- Station directory on real hardware: list times from the log.
+- Favourites saved as M3U, a "more stations" entry (the API's `offset`), and search by name.
 - AAC streams, if the RP2350 has the headroom.

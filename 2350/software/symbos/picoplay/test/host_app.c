@@ -24,6 +24,8 @@ void host_advance_ms(uint32_t ms);
 uint32_t pva_hal_millis(void);
 extern bool host_audio_unlimited;
 extern uint32_t host_audio_underruns, host_audio_frames;
+extern bool host_esp_api_all_down;
+extern uint32_t host_esp_clicks;
 
 char _symmsg[14];
 unsigned char _sympid = 5, _symbank = 1;
@@ -138,7 +140,8 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
         case 0:
             printf("[start-up]\n");
             CHECK(engine_ok == 1 && pv_prim == 1 && pv_sub == 3, "engine found in slot %u-%u, status '%s'", pv_prim, pv_sub, txt_status);
-            CHECK(!strcmp(txt_path, "/") && cd_list.lines == 1 && !strcmp(row_name[0], "[MUSIC]"), "root listed: %s", row_name[0]);
+            CHECK(!strcmp(txt_path, "/") && cd_list.lines == 2 && !strcmp(row_name[0], "[Internet radio]") && !strcmp(row_name[1], "[MUSIC]"),
+                  "root listed: %s, %s", row_name[0], row_name[1]);
             ev_dclick_row("[MUSIC]");
             return 1;
         case 1:
@@ -260,7 +263,46 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
                 return 0;
             } else if (stream_phase == 3) {
                 CHECK(!strcmp(txt_status, "Stream stopped: not MP3 (AAC/Ogg/HLS)"), "failed stream: '%s'", txt_status);
+                printf("[internet radio directory]\n");
+                open_folder("/");
+                activate_row((unsigned short)find_row("[Internet radio]"));
+                dump_rows(8);
+                CHECK(!strcmp(txt_path, "/Internet radio") && find_row("[By genre]") > 0 && find_row("[By country]") > 0, "home '%s'", txt_path);
+                activate_row((unsigned short)find_row("[By genre]"));
+                CHECK(!strcmp(txt_path, "/Internet radio/By genre") && find_row("[Jazz]") > 0, "genres '%s'", txt_path);
+                activate_row((unsigned short)find_row("[Jazz]"));
+                CHECK(dir_loading && !strcmp(txt_status, "Loading the station list...") && !strcmp(txt_path, "/Internet radio/By genre"),
+                      "Jazz: '%s', the genres stay on show", txt_status);
                 stream_phase = 4;
+                ticks_left = 10;
+                step--;
+                return 0;
+            } else if (stream_phase == 4) {
+                dump_rows(8);
+                CHECK(!dir_loading && !strcmp(txt_path, "/Internet radio/By genre/Jazz") && !strcmp(txt_status, "3 entries"),
+                      "list opened by itself: '%s', '%s'", txt_path, txt_status);
+                int r2 = find_row("Radio Two Live"), r3 = find_row("Secure Jazz");
+                CHECK(r2 == 1 && !strcmp(row_info[r2], "128k") && r3 > 0 && !strcmp(row_info[r3], "192k"), "stations with bitrates");
+                activate_row((unsigned short)r2);
+                stream_phase = 5;
+                ticks_left = 25;
+                step--;
+                return 0;
+            } else if (stream_phase == 5) {
+                CHECK(!strncmp(txt_status, "Playing 1 of 3", 14) && !strcmp(txt_title, "Radio Two Live") && host_esp_clicks == 1,
+                      "plays: '%s' / '%s', click counted", txt_status, txt_title);
+                activate_row(0);                    // '..': genres
+                host_esp_api_all_down = true;
+                activate_row((unsigned short)find_row("[Rock]"));
+                stream_phase = 6;
+                ticks_left = 25;
+                step--;
+                return 0;
+            } else if (stream_phase == 6) {
+                CHECK(!dir_loading && !strcmp(txt_status, "Station list: connection refused") && !strcmp(txt_path, "/Internet radio/By genre"),
+                      "servers down: '%s', still in '%s'", txt_status, txt_path);
+                host_esp_api_all_down = false;
+                stream_phase = 7;
             }
             ev_click(C_STOP, 0, 0);
             ticks_left = 2;

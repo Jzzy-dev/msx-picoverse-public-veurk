@@ -194,6 +194,8 @@ static void error_status(char *what, int r)
         sprintf(t, "%s: not a playable file", what);
     else if (r == PVA_E_IO)
         sprintf(t, "%s: read error (FRESULT %u)", what, (unsigned char)st[PVA_ST_FRESULT]);
+    else if (r == PVA_E_NOWIFI)
+        sprintf(t, "%s: no WiFi (ESP) in this firmware", what);
     else
         sprintf(t, "%s: error %d", what, r);
     set_status(t);
@@ -293,13 +295,25 @@ static void fill_page(void)
                     row_name[r][i + 1] = xbuf[p + 6 + i];
                 row_name[r][i + 1] = ']';
                 row_name[r][i + 2] = 0;
-                strcpy(row_info[r], type == PVA_DE_PARENT ? "up" : "dir");
+                if (type == PVA_DE_PARENT)
+                    strcpy(row_info[r], "up");
+                else if (size && size < 65536UL)
+                    put_u(row_info[r], (unsigned short)size);      /* a country: its stations */
+                else
+                    strcpy(row_info[r], "dir");
             } else {
                 for (i = 0; i < l && i < NAME_LEN; ++i)
                     row_name[r][i] = xbuf[p + 6 + i];
                 row_name[r][i] = 0;
                 if (type == PVA_DE_M3U)
                     strcpy(row_info[r], "list");
+                else if (type == PVA_DE_URL) {
+                    /* a station: its bitrate */
+                    if (size && size < 1000)
+                        strcpy(put_u(row_info[r], (unsigned short)size), "k");
+                    else
+                        strcpy(row_info[r], "radio");
+                }
                 else if (size >= 10240000UL)
                     sprintf(row_info[r], "%luM", size >> 20);
                 else
@@ -377,6 +391,28 @@ static void open_folder(char *path)
     show_folder_reply();
 }
 
+/* a radio list being fetched (DIR_ENTER answered BUSY) */
+static unsigned char dir_loading;
+static char *net_reason(unsigned char e);
+
+static void check_dir_loading(void)
+{
+    unsigned char ds = pv_peek(W(PVA_R_STATUS + PVA_ST_DIR_STATE));
+    char t[60];
+    if (ds == PVA_DIRS_LOADING)
+        return;
+    dir_loading = 0;
+    if (ds == PVA_DIRS_DONE) {
+        open_folder("");
+        strcpy(put_u(t, dir_count ? dir_count - 1 : 0), dir_count == 2 ? " entry" : " entries");
+        set_status(t);
+    } else if (ds == PVA_DIRS_FAILED) {
+        strcpy(t, "Station list: ");
+        strcat(t, net_reason(pv_peek(W(PVA_R_STATUS + PVA_ST_DIR_ERR))));
+        set_status(t);
+    }
+}
+
 static void activate_row(unsigned short row)
 {
     short e;
@@ -396,7 +432,11 @@ static void activate_row(unsigned short row)
     }
     if (row_type[row] == PVA_DE_DIR || row_type[row] == PVA_DE_PARENT) {
         r = pv_cmd_u16(PVA_C_DIR_ENTER, (unsigned short)e);
-        if (r != PVA_OK)
+        if (r == PVA_E_BUSY) {
+            /* a radio list is fetched: the tick opens it when it is there */
+            dir_loading = 1;
+            set_status("Loading the station list...");
+        } else if (r != PVA_OK)
             error_status("Folder", r);
         else
             show_folder_reply();
@@ -628,6 +668,8 @@ static void tick(void)
         engine_ok = 2;
         return;
     }
+    if (dir_loading)
+        check_dir_loading();
     update_display();
 }
 

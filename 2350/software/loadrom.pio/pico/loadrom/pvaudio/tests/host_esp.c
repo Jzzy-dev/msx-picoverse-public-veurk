@@ -15,6 +15,13 @@
 //     /missing        404
 //   radio2.test (10.0.0.2) port 8000  /live  plain stream
 //   secure.test (10.0.0.3)            TLS only, /stream.mp3
+//   all.api.radio-browser.info, de1.api.radio-browser.info (10.0.0.4) and
+//   nl1.api.radio-browser.info (10.0.0.5): a small Radio Browser API
+//     /json/countries           a few countries (UTF-8 escapes, one empty)
+//     /json/stations/search     stations by country / tag / order, with AAC,
+//                               HLS, broken and over-long ones mixed in;
+//                               tag=many gives 150 stations
+//     /json/url/<uuid>          counts a click
 //   anything else: DNS error
 
 #include <stdio.h>
@@ -37,6 +44,12 @@ uint32_t host_esp_stall_at = 0;             // pause the server at this body byt
 uint32_t host_esp_stall_ms = 0;             // ... for this long
 size_t   host_stream_ram_size = 128u * 1024u;
 uint32_t host_esp_rtt_ms = 0;               // > 0: TCP window limit (2144 bytes per round trip)
+bool     host_esp_api_down = false;         // 10.0.0.4 refuses connections (a mirror must be used)
+bool     host_esp_api_all_down = false;     // all API servers refuse
+uint32_t host_esp_api_bps = 20000;          // API reply speed
+uint32_t host_esp_clicks;
+char     host_esp_last_click[48];
+char     host_esp_last_api[300];
 
 // statistics for the checks
 uint32_t host_esp_opens, host_esp_closes, host_esp_tls_opens, host_esp_requests, host_esp_rcvs;
@@ -115,6 +128,7 @@ typedef struct
     double   credit;
     bool     closed;            // server closed (after the data in 'out')
     uint32_t stall_until;
+    bq_t     pend;              // kind 4: reply that trickles out at host_esp_api_bps
 } conn_t;
 static conn_t conns[5];         // 1..4
 
@@ -128,6 +142,116 @@ static void http_reply(conn_t *c, const char *head, const char *body)
     c->closed = true;
 }
 
+// ---------------- the Radio Browser API ----------------
+typedef struct { const char *name, *url, *codec, *country, *tags; int bitrate, hls, ok; } st_t;
+static const st_t stations[] = {
+    { "Test FM", "http://radio.test/stream.mp3", "MP3", "The Netherlands", "pop,80s,rock", 128, 0, 1 },
+    { "Radio Two Live", "http://radio2.test:8000/live", "MP3", "Germany", "jazz,smooth jazz", 128, 0, 1 },
+    { "  Plain \\\"Quoted\\\" Radio", "http://radio.test/plain", "mp3", "The Netherlands", "jazz,90s", 128, 0, 1 },
+    { "Caf\\u00e9 AAC", "http://radio.test/aac", "AAC+", "Germany", "jazz", 64, 0, 1 },
+    { "HLS One", "http://radio.test/hls.m3u8", "MP3", "Germany", "pop", 128, 1, 1 },
+    { "Broken FM", "http://radio.test/stream.mp3", "MP3", "Germany", "pop,jazz", 128, 0, 0 },
+    { "Secure Jazz", "https://secure.test/stream.mp3", "MP3", "C\\u00f4te D'ivoire", "jazz,80s", 192, 0, 1 },
+    { "Long URL", "http://radio.test/stream.mp3?xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "MP3", "Germany", "pop", 128, 0, 1 },
+};
+
+static void station_json(bq_t *b, const st_t *t, int i)
+{
+    char j[1200];
+    int n = snprintf(j, sizeof j,
+        "{\"changeuuid\":\"c-%d\",\"stationuuid\":\"9617a958-0601-11e8-ae97-52543be04c%02d\",\"serveruuid\":null,"
+        "\"name\":\"%s\",\"url\":\"%s\",\"url_resolved\":\"%s\",\"homepage\":\"http://x.test/\",\"favicon\":\"\","
+        "\"tags\":\"%s\",\"country\":\"%s\",\"countrycode\":\"XX\",\"iso_3166_2\":null,\"state\":\"\","
+        "\"language\":\"dutch,english\",\"languagecodes\":\"nl\",\"votes\":%d,\"lastchangetime\":\"2024-01-01 10:00:00\","
+        "\"codec\":\"%s\",\"bitrate\":%d,\"hls\":%d,\"lastcheckok\":%d,\"clickcount\":%d,\"clicktrend\":-1,"
+        "\"ssl_error\":0,\"geo_lat\":52.1,\"geo_long\":-4.5e0,\"has_extended_info\":false}",
+        i, i % 100, t->name, t->url, t->url, t->tags, t->country, 100 - i, t->codec, t->bitrate, t->hls, t->ok, 1000 - i);
+    bq_put(b, j, (size_t)n);
+}
+
+static void api(conn_t *c, const char *path)
+{
+    bq_t b = { 0 };
+    snprintf(host_esp_last_api, sizeof host_esp_last_api, "%s", path);
+    bool clen = c->ip[3] == 5;              // the second server sends Content-Length
+    if (!strncmp(path, "/json/countries", 15))
+    {
+        const char *j = "[{\"name\":\"C\\u00f4te D'ivoire\",\"iso_3166_1\":\"CI\",\"stationcount\":12},\n"
+                        " {\"name\":\"Germany\",\"iso_3166_1\":\"DE\",\"stationcount\":3210},\n"
+                        " {\"name\":\"Nowhere\",\"iso_3166_1\":\"NO\",\"stationcount\":0},\n"
+                        " {\"name\":\"The Netherlands\",\"iso_3166_1\":\"NL\",\"stationcount\":987}]";
+        bq_put(&b, j, strlen(j));
+    }
+    else if (!strncmp(path, "/json/stations/search?", 22))
+    {
+        const char *q = path + 22;
+        char country[64] = "", tag[64] = "";
+        const char *p;
+        if ((p = strstr(q, "country=")) && (p == q || p[-1] == '&')) sscanf(p + 8, "%63[^&]", country);
+        if ((p = strstr(q, "tag="))) sscanf(p + 4, "%63[^&]", tag);
+        // undo the URL encoding
+        for (char *s2 = country, *d = country; ; )
+        {
+            if (*s2 == '%' && s2[1] && s2[2]) { char h[3] = { s2[1], s2[2], 0 }; *d++ = (char)strtol(h, NULL, 16); s2 += 3; }
+            else if (!(*d++ = *s2++)) break;
+        }
+        for (char *s2 = tag, *d = tag; ; )
+        {
+            if (*s2 == '%' && s2[1] && s2[2]) { char h[3] = { s2[1], s2[2], 0 }; *d++ = (char)strtol(h, NULL, 16); s2 += 3; }
+            else if (!(*d++ = *s2++)) break;
+        }
+        bq_put(&b, "[", 1);
+        int n = 0;
+        if (!strcmp(tag, "many"))
+        {
+            for (int i = 0; i < 150; i++)
+            {
+                char nm[40];
+                snprintf(nm, sizeof nm, "Many Station %03d", i);
+                st_t t = { nm, "http://radio.test/plain", "MP3", "Germany", "many", 128, 0, 1 };
+                if (n++) bq_put(&b, ",", 1);
+                station_json(&b, &t, i);
+            }
+        }
+        else
+            for (int i = 0; i < (int)(sizeof stations / sizeof stations[0]); i++)
+            {
+                const st_t *t = &stations[i];
+                char cj[64];
+                // the country in the table is JSON-escaped: compare the escape of 'country'
+                snprintf(cj, sizeof cj, "%s", t->country);
+                if (!strcmp(cj, "C\\u00f4te D'ivoire")) snprintf(cj, sizeof cj, "C\xc3\xb4te D'ivoire");
+                if (country[0] && strcmp(country, cj)) continue;
+                if (tag[0] && !strstr(t->tags, tag)) continue;
+                if (n++) bq_put(&b, ",", 1);
+                station_json(&b, t, i);
+            }
+        bq_put(&b, "]", 1);
+    }
+    else if (!strncmp(path, "/json/url/", 10))
+    {
+        host_esp_clicks++;
+        snprintf(host_esp_last_click, sizeof host_esp_last_click, "%s", path + 10);
+        const char *j = "{\"ok\":true,\"message\":\"retrieved station url\",\"stationuuid\":\"x\",\"name\":\"x\",\"url\":\"http://radio.test/stream.mp3\"}";
+        bq_put(&b, j, strlen(j));
+    }
+    else
+    {
+        http_reply(c, "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n", "<html>no</html>");
+        free(b.b);
+        return;
+    }
+    char hd[200];
+    snprintf(hd, sizeof hd, "HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: application/json; charset=utf-8\r\n%s%s\r\n",
+             clen ? "Content-Length: " : "", "");
+    if (clen) { char l[40]; snprintf(l, sizeof l, "Content-Length: %u\r\n", (unsigned)b.len); snprintf(hd, sizeof hd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n%s\r\n", l); }
+    bq_put(&c->out, hd, strlen(hd));
+    bq_put(&c->pend, b.b, b.len);
+    free(b.b);
+    c->kind = 4;
+    c->credit = 0;
+}
+
 static void serve(conn_t *c)
 {
     char *r = (char *)c->reqbuf.b;
@@ -139,6 +263,12 @@ static void serve(conn_t *c)
     host_esp_requests++;
     bool icy_meta = strstr(r, "Icy-MetaData: 1") != NULL;
     bool r1 = c->ip[3] == 1, r2 = c->ip[3] == 2, sec = c->ip[3] == 3;
+    if (c->ip[3] == 4 || c->ip[3] == 5)
+    {
+        if (!strstr(r, "User-Agent: ")) { http_reply(c, "HTTP/1.1 403 Forbidden\r\n\r\n", NULL); return; }
+        api(c, path);
+        return;
+    }
     if (sec && !c->tls) { http_reply(c, "HTTP/1.1 400 Bad Request\r\n\r\n", NULL); return; }
     if ((r1 && !strcmp(path, "/stream.mp3")) || (sec && !strcmp(path, "/stream.mp3")))
     {
@@ -172,6 +302,19 @@ static void serve(conn_t *c)
 
 static void gen(conn_t *c, uint32_t ms)
 {
+    if (c->kind == 4)
+    {
+        // an API reply: at host_esp_api_bps, then the server closes
+        c->credit += (double)host_esp_api_bps * ms / 1000.0;
+        size_t k = (size_t)c->credit;
+        if (k > c->pend.len) k = c->pend.len;
+        if (c->out.len > 16384) k = 0;
+        c->credit -= (double)k;
+        bq_put(&c->out, c->pend.b, k);
+        bq_drop(&c->pend, k);
+        if (!c->pend.len) c->closed = true;
+        return;
+    }
     if (c->kind != 1 && c->kind != 2) return;
     if (c->closed) return;
     if (c->stall_until && now_ms < c->stall_until) return;
@@ -222,8 +365,10 @@ static void gen(conn_t *c, uint32_t ms)
 static int dns(const char *name, uint8_t *ip)
 {
     static const struct { const char *n; uint8_t ip[4]; } t[] = {
-        { "radio.test", { 10, 0, 0, 1 } }, { "radio2.test", { 10, 0, 0, 2 } }, { "secure.test", { 10, 0, 0, 3 } } };
-    for (unsigned i = 0; i < 3; i++) if (!strcmp(name, t[i].n)) { memcpy(ip, t[i].ip, 4); return 0; }
+        { "radio.test", { 10, 0, 0, 1 } }, { "radio2.test", { 10, 0, 0, 2 } }, { "secure.test", { 10, 0, 0, 3 } },
+        { "all.api.radio-browser.info", { 10, 0, 0, 4 } }, { "de1.api.radio-browser.info", { 10, 0, 0, 4 } },
+        { "nl1.api.radio-browser.info", { 10, 0, 0, 5 } } };
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) if (!strcmp(name, t[i].n)) { memcpy(ip, t[i].ip, 4); return 0; }
     return -1;
 }
 
@@ -256,7 +401,8 @@ static void request(const uint8_t *p, size_t n)
             for (int i = 1; i <= 4; i++) if (conns[i].used && conns[i].tls) tls_busy = true;
             if (!slot || (tls && tls_busy)) { answer(host_esp_open_ms, fn, 9, NULL, 0); break; }   // ERR_NO_FREE_CONN
             uint16_t port = (uint16_t)(a[4] | (a[5] << 8));
-            bool known = (a[0] == 10 && a[3] >= 1 && a[3] <= 3);
+            bool known = (a[0] == 10 && a[3] >= 1 && a[3] <= 5);
+            if ((a[3] == 4 && host_esp_api_down) || (a[3] >= 4 && host_esp_api_all_down)) known = false;
             if (!slot || !known || (a[3] == 2 && port != 8000)) { answer(host_esp_open_ms, fn, 3, NULL, 0); break; }
             conn_t *c = &conns[slot];
             memset(c, 0, sizeof *c);
@@ -285,6 +431,7 @@ static void request(const uint8_t *p, size_t n)
             {
                 free(conns[cn].reqbuf.b);
                 free(conns[cn].out.b);
+                free(conns[cn].pend.b);
                 memset(&conns[cn], 0, sizeof conns[cn]);
                 host_esp_closes++;
                 answer(L, fn, 0, NULL, 0);
@@ -361,7 +508,7 @@ void host_esp_tick(uint32_t now)
 
 void host_esp_reset(void)
 {
-    for (int i = 1; i <= 4; i++) { free(conns[i].reqbuf.b); free(conns[i].out.b); memset(&conns[i], 0, sizeof conns[i]); }
+    for (int i = 1; i <= 4; i++) { free(conns[i].reqbuf.b); free(conns[i].out.b); free(conns[i].pend.b); memset(&conns[i], 0, sizeof conns[i]); }
     while (answers) { ans_t *a = answers; answers = a->next; free(a->data.b); free(a); }
     uart_rx.len = 0;
     tx.len = 0;
@@ -384,6 +531,8 @@ int host_esp_open_conns(void)
 bool host_esp_owned(void) { return owned; }
 
 // ---------------- HAL ----------------
+bool pva_hal_net_present(void) { return host_esp_present; }
+
 bool pva_hal_net_open(void)
 {
     if (!host_esp_present) return false;

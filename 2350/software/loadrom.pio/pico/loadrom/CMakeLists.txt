@@ -73,6 +73,8 @@ add_executable(loadrom
     pvaudio/pva_engine.c
     pvaudio/pva_decode.c
     pvaudio/pva_net.c
+    pvaudio/pva_esp.c
+    pvaudio/pva_dir.c
     pvaudio/pva_hal_pico.c
     )
 

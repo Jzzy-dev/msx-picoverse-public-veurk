@@ -48,14 +48,14 @@
 #define RING_MIN        (8u * 1024u)
 #define RING_MAX        (96u * 1024u)
 
-#define FN_NETSTATE     3u
-#define FN_TCPOPEN      13u
-#define FN_TCPCLOSE     14u
-#define FN_TCPABORT     15u
-#define RC_NO_FREE_CONN 9u          // UNAPI ERR_NO_FREE_CONN
-#define FN_TCPSEND      17u
-#define FN_TCPRCV       18u
-#define FN_DNS          206u
+#define FN_NETSTATE     PVA_FN_NETSTATE
+#define FN_TCPOPEN      PVA_FN_TCPOPEN
+#define FN_TCPCLOSE     PVA_FN_TCPCLOSE
+#define FN_TCPABORT     PVA_FN_TCPABORT
+#define RC_NO_FREE_CONN PVA_RC_NO_FREE_CONN
+#define FN_TCPSEND      PVA_FN_TCPSEND
+#define FN_TCPRCV       PVA_FN_TCPRCV
+#define FN_DNS          PVA_FN_DNS
 
 #define T_NETSTATE_MS   2000u
 #define T_DNS_MS        15000u
@@ -69,6 +69,8 @@
 
 // ---------------------------------------------------------------- ring
 static uint8_t *ring;
+static uint8_t *spare;              // stream RAM after the ring (for the station directory)
+static size_t   spare_size;
 static size_t   ring_size, ring_head, ring_tail, ring_count;
 
 static size_t ring_free(void) { return ring_size - ring_count; }
@@ -168,18 +170,21 @@ static char    *pls;                // PLS_MAX + 1
 static size_t   pls_len;
 static bool     bad_format;
 
-// ESP request / response
-static uint8_t *txq;                // TXQ_MAX
-static size_t   txq_len, txq_pos;
-static uint8_t  want_fn;            // 0 = no request outstanding
-static uint32_t want_deadline;
-static uint8_t  ph;                 // 0 hunting, 1 rc, 2 len hi, 3 len lo, 4 payload
-static uint8_t  rc;
-static uint16_t plen, pgot;
-static uint8_t  pfirst[8];          // first payload bytes (ip, conn, state, urgent)
-static bool     rsp_done, rsp_timeout;
+// ESP request / response: the stream's slot of the shared link (pva_esp.c)
+static pva_esp_slot_t *NS;
+#define want_fn     (NS->want_fn)
+#define rsp_done    (NS->rsp_done)
+#define rsp_timeout (NS->rsp_timeout)
+#define rc          (NS->rc)
+#define pgot        (NS->pgot)
+#define pfirst      (NS->pfirst)
+#define rcv_data    (NS->rcv_data)
+#define esp_request(...)  pva_esp_request(NS, __VA_ARGS__)
+#define esp_finished()    pva_esp_finished(NS)
+#define esp_clear()       pva_esp_clear(NS)
+#define esp_clear_all()   pva_esp_clear(NS)
+#define esp_io()          pva_esp_io()
 static uint16_t rcv_size;           // size asked in the current TCP_RCV
-static uint32_t rcv_data;           // data bytes in the current TCP_RCV answer
 
 // rate: bytes per 250 ms slot, 8 slots
 static uint32_t rate_slot[8];
@@ -187,7 +192,6 @@ static uint32_t rate_t;
 static uint8_t  rate_i;
 
 static void http_feed(const uint8_t *p, size_t n);
-static void esp_clear_all(void);
 static void begin_session(void);
 static void stop_session(void);
 
@@ -246,7 +250,7 @@ static void release(uint8_t next_state)
         begin_session();            // keep the link: the next stream starts now
         return;
     }
-    if (hal_open) pva_hal_net_close();
+    if (hal_open) pva_esp_release();
     hal_open = false;
     conn = 0;
     s = next_state;
@@ -257,108 +261,6 @@ static void set_failed(uint8_t err)
     st.err = err;
     pva_log("stream: failed, error %u (http %u)", (unsigned)err, (unsigned)st.http);
 }
-
-// ---------------------------------------------------------------- ESP I/O
-static void esp_request(uint8_t fn, const uint8_t *a, size_t n, const uint8_t *b, size_t m, uint32_t timeout)
-{
-    size_t len = n + m;
-    txq[0] = fn;
-    txq[1] = (uint8_t)(len >> 8);
-    txq[2] = (uint8_t)len;
-    if (n) memcpy(txq + 3, a, n);
-    if (m) memcpy(txq + 3 + n, b, m);
-    txq_len = 3 + len;
-    txq_pos = 0;
-    want_fn = fn;
-    want_deadline = pva_hal_millis() + timeout;
-    ph = 0;
-    rsp_done = rsp_timeout = false;
-    rcv_data = 0;
-}
-
-static void payload_bytes(const uint8_t *p, size_t n)
-{
-    // keep the first bytes; TCP_RCV data (after the 2 urgent bytes) goes to HTTP
-    while (n)
-    {
-        if (pgot < sizeof pfirst && !(want_fn == FN_TCPRCV && pgot >= 2))
-        {
-            pfirst[pgot++] = *p++;
-            n--;
-            continue;
-        }
-        if (want_fn == FN_TCPRCV)
-        {
-            size_t k = n;
-            if (k > (size_t)(plen - pgot)) k = (size_t)(plen - pgot);
-            http_feed(p, k);
-            rcv_data += (uint32_t)k;
-            pgot = (uint16_t)(pgot + k);
-            p += k;
-            n -= k;
-        }
-        else
-        {
-            size_t k = n;
-            if (k > (size_t)(plen - pgot)) k = (size_t)(plen - pgot);
-            pgot = (uint16_t)(pgot + k);
-            p += k;
-            n -= k;
-        }
-    }
-}
-
-// Move bytes between the UART and the request/response state.
-static void esp_io(void)
-{
-    if (!hal_open) return;
-    if (txq_pos < txq_len)
-        txq_pos += pva_hal_net_write(txq + txq_pos, txq_len - txq_pos);
-
-    uint8_t buf[256];
-    for (int rounds = 0; rounds < 8; rounds++)
-    {
-        size_t n = pva_hal_net_read(buf, sizeof buf);
-        if (!n) break;
-        size_t i = 0;
-        while (i < n)
-        {
-            if (!want_fn || rsp_done) { i = n; break; }   // nothing asked: stray bytes
-            uint8_t b = buf[i];
-            switch (ph)
-            {
-                case 0: if (b == want_fn) ph = 1; i++; break;
-                case 1: rc = b; ph = 2; i++; break;
-                case 2: plen = (uint16_t)(b << 8); ph = 3; i++; break;
-                case 3:
-                    plen = (uint16_t)(plen | b);
-                    pgot = 0;
-                    i++;
-                    if (plen > 4096u) { ph = 0; break; }    // implausible: keep hunting
-                    if (rc != 0 || plen == 0) { rsp_done = true; break; }
-                    ph = 4;
-                    break;
-                default:
-                {
-                    size_t k = n - i;
-                    if (k > (size_t)(plen - pgot)) k = (size_t)(plen - pgot);
-                    payload_bytes(buf + i, k);
-                    i += k;
-                    if (pgot >= plen) rsp_done = true;
-                    break;
-                }
-            }
-        }
-        if (rsp_done) break;
-    }
-    if (want_fn && !rsp_done && (int32_t)(pva_hal_millis() - want_deadline) >= 0)
-        rsp_timeout = true;
-}
-
-// A request is finished (answer or timeout): the caller looks at rc / rsp_timeout.
-static bool esp_finished(void) { return rsp_done || rsp_timeout; }
-static void esp_clear(void) { want_fn = 0; rsp_done = rsp_timeout = false; }
-static void esp_clear_all(void) { esp_clear(); txq_len = txq_pos = 0; }
 
 // ---------------------------------------------------------------- HTTP parsing
 static void ring_audio(const uint8_t *p, size_t n)
@@ -523,9 +425,7 @@ static void close_then(uint8_t what)
     else
     {
         // nothing to close: continue on the next poll
-        esp_clear();
-        want_fn = FN_TCPCLOSE;
-        rsp_done = true;
+        pva_esp_finish_now(NS, FN_TCPCLOSE);
     }
     s = S_CLOSE;
 }
@@ -802,10 +702,12 @@ void pva_net_poll(void)
                 if (no_free && !cleaned)
                 {
                     // The ESP keeps connections over an MSX reset, and it has only
-                    // four (one with TLS). Whatever is still open now is a leftover:
-                    // nothing else can use the ESP while the engine has it.
+                    // four (one with TLS). Whatever is still open now, apart from the
+                    // directory's own, is a leftover: nothing else can use the ESP
+                    // while the engine has it.
                     cleaned = true;
                     cleanup_n = 1;
+                    if (cleanup_n == pva_dir_conn()) cleanup_n++;
                     pva_log("stream: ESP full, closing old connections");
                     esp_request(FN_TCPABORT, &cleanup_n, 1, NULL, 0, T_CLOSE_MS);
                     s = S_CLEANUP;
@@ -873,7 +775,8 @@ void pva_net_poll(void)
         case S_CLEANUP:
             if (!esp_finished()) return;
             esp_clear();                            // the answer does not matter
-            if (++cleanup_n <= 4)
+            if (++cleanup_n == pva_dir_conn()) cleanup_n++;
+            if (cleanup_n <= 4)
             {
                 esp_request(FN_TCPABORT, &cleanup_n, 1, NULL, 0, T_CLOSE_MS);
                 return;
@@ -919,16 +822,18 @@ bool pva_net_init(void)
     path = pva_alloc(URL_MAX + 1);
     location = pva_alloc(URL_MAX + 1);
     req = pva_alloc(TXQ_MAX);
-    txq = pva_alloc(TXQ_MAX);
+    NS = pva_alloc(sizeof *NS);
+    if (NS) { NS->data = http_feed; pva_esp_register(NS); }
     line = pva_alloc(LINE_MAX + 1);
     meta = pva_alloc(META_KEEP + 1);
     title = pva_alloc(PVA_ST_TITLE_LEN + PVA_ST_ARTIST_LEN);
     pending = pva_alloc(PVA_ST_TITLE_LEN + PVA_ST_ARTIST_LEN);
     pls = pva_alloc(PLS_MAX + 1);
-    if (!(url && cur && path && location && req && txq && line && meta && title && pending && pls)) return false;
+    if (!(url && cur && path && location && req && NS && line && meta && title && pending && pls)) return false;
     size_t big = 0;
     ring = pva_hal_stream_ram(&big);
     if (ring && big >= RING_MIN) ring_size = big > RING_MAX ? RING_MAX : big;
+    if (ring && big > ring_size) { spare = ring + ring_size; spare_size = big - ring_size; }
     else
     {
         ring = NULL;
@@ -960,7 +865,7 @@ int pva_net_start(const char *u)
     bool busy = hal_open && s != S_IDLE && s != S_FAILED;
     if (!busy)
     {
-        if (!pva_hal_net_open()) { st.err = PVA_NERR_NOWIFI; pva_log("stream: no ESP link (needs a -w image)"); return PVA_E_NOWIFI; }
+        if (!pva_esp_acquire()) { st.err = PVA_NERR_NOWIFI; pva_log("stream: no ESP link (needs a -w image)"); return PVA_E_NOWIFI; }
         hal_open = true;
     }
     snprintf(url, URL_MAX + 1, "%s", u);
@@ -1008,7 +913,7 @@ static void stop_session(void)
             if (want_fn && !esp_finished())
             {
                 // the answer may take a while (TLS): wait at most 2 s for it
-                if (want_deadline - pva_hal_millis() > 2000u) want_deadline = pva_hal_millis() + 2000u;
+                pva_esp_shorten(NS, 2000u);
                 s = S_ABANDON;
                 return;
             }
@@ -1021,7 +926,7 @@ static void stop_session(void)
         // a TCP_SEND / TCP_RCV answer is on its way: it is short, take it first
         uint8_t keep = conn;
         s = S_ABANDON;
-        want_deadline = pva_hal_millis() + 500u;
+        pva_esp_shorten(NS, 500u);
         conn = keep;
         abandon_close = true;
         return;
@@ -1057,3 +962,6 @@ const pva_net_stats_t *pva_net_stats(void)
 const char *pva_net_station(void) { return station; }
 const char *pva_net_stream_title(void) { return title ? title : ""; }
 const char *pva_net_host(void) { return host; }
+
+uint8_t pva_net_conn(void) { return conn; }
+uint8_t *pva_net_spare(size_t *size) { *size = spare_size; return spare; }

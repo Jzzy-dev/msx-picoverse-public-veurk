@@ -453,6 +453,11 @@ static inline bool __not_in_flash_func(wifi_handle_mem_write)(uint16_t addr, uin
 }
 
 // ---- PicoVerse Audio Engine: ESP link and stream RAM (core 1) ----
+bool pva_hal_net_present(void)
+{
+    return wifi_link_present && wifi_uart_ready;
+}
+
 bool pva_hal_net_open(void)
 {
     if (!wifi_link_present || !wifi_uart_ready)

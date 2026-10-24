@@ -13,7 +13,9 @@ What the emulated cartridge does:
   writes the audio to `out.wav`.
 - **ESP-01:** a simulated ESP (`pvaudio/tests/host_esp.c`) that speaks the UNAPI ESP8266
   protocol with the UART speed and DNS/TLS delays of the real one. It serves test radio stations
-  (`radio.test`, `radio2.test:8000`, `https://secure.test`) made from `assets/cbr128_v23.mp3`.
+  (`radio.test`, `radio2.test:8000`, `https://secure.test`) made from `assets/cbr128_v23.mp3`. It also answers
+  as a small Radio Browser API (`all.api`, `de1.api`, `nl1.api.radio-browser.info`) for the
+  station directory; its stations point at the test radio stations.
 
 ## Layout
 

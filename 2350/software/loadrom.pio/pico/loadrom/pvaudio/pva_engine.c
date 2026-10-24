@@ -74,6 +74,19 @@ static uint16_t stream_underruns;
 static uint8_t  shown_title_gen;
 static char     given_station[PVA_ST_ALBUM_LEN];
 
+// internet radio: virtual folders over the Radio Browser directory
+#define RADIO_ENTRY     "Internet radio"
+#define RADIO_PATH      "/" RADIO_ENTRY
+enum { V_CARD, V_HOME, V_COUNTRIES, V_GENRES, V_DECADES, V_STATIONS };
+static uint8_t  vlevel;             // V_CARD: cur_dir is a folder on the card
+static uint8_t  vparent;            // where ".." of a station list goes
+static bool     radio_entry;        // the card's root listing starts with RADIO_ENTRY
+static bool     dir_wait;           // a list is being fetched
+static uint8_t  want_level, want_parent;
+static char     want_title[48];
+static uint8_t  dstate, derr;       // PVA_ST_DIR_STATE / DIR_ERR
+static uint16_t ccache_n;           // countries kept in pva_dir_cache()
+
 // ---------------------------------------------------------------- helpers
 static void fs_refresh(void)
 {
@@ -199,11 +212,265 @@ static int read_dir(const char *path)
     f_closedir(&d);
     if (full) pva_log("folder cut at %u entries", (unsigned)dir_count);
     qsort(dir_ent, dir_count, sizeof(dent_t), dent_cmp);
+    radio_entry = false;
+    if (!path[0] && pva_dir_available() && pva_hal_net_present() && dir_pool_used + sizeof RADIO_ENTRY <= DIR_POOL)
+    {
+        // the internet radio directory comes first in the root
+        if (dir_count >= DIR_MAX) dir_count--;
+        memmove(dir_ent + 1, dir_ent, dir_count * sizeof(dent_t));
+        dir_ent[0].type = PVA_DE_DIR;
+        dir_ent[0].size = 0;
+        dir_ent[0].name = (uint16_t)dir_pool_used;
+        memcpy(dir_pool + dir_pool_used, RADIO_ENTRY, sizeof RADIO_ENTRY);
+        dir_pool_used += sizeof RADIO_ENTRY;
+        dir_count++;
+        radio_entry = true;
+    }
     if (path != cur_dir)
         snprintf(cur_dir, sizeof cur_dir, "%s", path);
+    vlevel = V_CARD;
     dir_open = true;
     dir_gen++;
     return PVA_OK;
+}
+
+// ---------------------------------------------------------------- internet radio
+static const char *const home_names[] = { "Top stations", "Most voted", "Trending now", "By country", "By genre", "By decade" };
+static const char *const home_order[] = { "clickcount", "votes", "clicktrend" };
+static const char *const genres[] = {
+    "pop", "rock", "classic rock", "hard rock", "metal", "punk", "alternative", "indie", "jazz", "smooth jazz",
+    "blues", "soul", "funk", "disco", "rnb", "hip hop", "rap", "reggae", "latin", "salsa", "country", "folk",
+    "classical", "opera", "ambient", "chillout", "lounge", "dance", "electronic", "house", "techno", "trance",
+    "drum and bass", "dubstep", "eurodance", "schlager", "chanson", "world", "christmas", "kids", "news", "talk",
+    "sports", "comedy", "soundtrack", "instrumental", "piano", "new age", "gospel", "christian",
+};
+static const char *const decades[][2] = {
+    { "1950s", "50s" }, { "1960s", "60s" }, { "1970s", "70s" }, { "1980s", "80s" }, { "1990s", "90s" },
+    { "2000s", "00s" }, { "2010s", "10s" }, { "Oldies", "oldies" },
+};
+#define N_HOME      (sizeof home_names / sizeof home_names[0])
+#define N_GENRES    (sizeof genres / sizeof genres[0])
+#define N_DECADES   (sizeof decades / sizeof decades[0])
+
+static void v_begin(uint8_t level, const char *title)
+{
+    vlevel = level;
+    dir_count = 1;
+    dir_ent[0].type = PVA_DE_PARENT;
+    dir_ent[0].size = 0;
+    dir_ent[0].name = 0;
+    memcpy(dir_pool, "..", 3);
+    dir_pool_used = 3;
+    if (level == V_HOME) snprintf(cur_dir, sizeof cur_dir, "%s", RADIO_PATH);
+    else snprintf(cur_dir, sizeof cur_dir, "%s/%s", RADIO_PATH, title);
+    radio_entry = false;
+    dir_open = true;
+}
+
+static void v_add(const char *name, uint8_t type, uint32_t size)
+{
+    char nm[PVA_NAME_MAX + 1];
+    pva_copy_ascii(nm, sizeof nm, name, strlen(name));
+    size_t l = strlen(nm) + 1;
+    if (l < 2 || dir_count >= DIR_MAX || dir_pool_used + l > DIR_POOL) return;
+    dent_t *e = &dir_ent[dir_count++];
+    e->type = type;
+    e->size = size;
+    e->name = (uint16_t)dir_pool_used;
+    memcpy(dir_pool + dir_pool_used, nm, l);
+    dir_pool_used += (uint32_t)l;
+}
+
+static void v_end(void)
+{
+    dir_gen++;
+    status_dirty = true;
+}
+
+// countries in the cache: [u16 stations][UTF-8 name][0] ...
+static const uint8_t *ccache_entry(uint16_t i)
+{
+    size_t sz;
+    const uint8_t *c = pva_dir_cache(&sz);
+    if (!c || i >= ccache_n) return NULL;
+    for (uint16_t k = 0; k < i; k++) c += 2 + strlen((const char *)c + 2) + 1;
+    return c;
+}
+
+static void v_build(uint8_t level)
+{
+    switch (level)
+    {
+        case V_HOME:
+            v_begin(V_HOME, "");
+            for (unsigned i = 0; i < N_HOME; i++) v_add(home_names[i], PVA_DE_DIR, 0);
+            break;
+        case V_GENRES:
+            v_begin(V_GENRES, "By genre");
+            for (unsigned i = 0; i < N_GENRES; i++)
+            {
+                char t[24];
+                snprintf(t, sizeof t, "%s", genres[i]);
+                t[0] = upc(t[0]);
+                v_add(t, PVA_DE_DIR, 0);
+            }
+            break;
+        case V_DECADES:
+            v_begin(V_DECADES, "By decade");
+            for (unsigned i = 0; i < N_DECADES; i++) v_add(decades[i][0], PVA_DE_DIR, 0);
+            break;
+        case V_COUNTRIES:
+        {
+            v_begin(V_COUNTRIES, "By country");
+            size_t sz;
+            const uint8_t *c = pva_dir_cache(&sz);
+            for (uint16_t i = 0; c && i < ccache_n; i++)
+            {
+                uint16_t n = (uint16_t)(c[0] | (c[1] << 8));
+                v_add((const char *)c + 2, PVA_DE_DIR, n);
+                c += 2 + strlen((const char *)c + 2) + 1;
+            }
+            break;
+        }
+        case V_STATIONS:
+            v_begin(V_STATIONS, want_title);
+            for (uint16_t i = 0; i < pva_dir_count(); i++) v_add(pva_dir_name(i), PVA_DE_URL, pva_dir_num(i));
+            break;
+    }
+    v_end();
+}
+
+// a list has come in
+static void radio_list_ready(void)
+{
+    if (want_level == V_COUNTRIES)
+    {
+        size_t sz, o = 0;
+        uint8_t *c = pva_dir_cache(&sz);
+        ccache_n = 0;
+        for (uint16_t i = 0; c && i < pva_dir_count(); i++)
+        {
+            const char *nm = pva_dir_name(i);
+            size_t l = strlen(nm) + 1;
+            if (o + 2 + l > sz) break;
+            uint16_t n = pva_dir_num(i);
+            c[o] = (uint8_t)n; c[o + 1] = (uint8_t)(n >> 8);
+            memcpy(c + o + 2, nm, l);
+            o += 2 + l;
+            ccache_n++;
+        }
+    }
+    else vparent = want_parent;
+    v_build(want_level);
+    pva_log("radio: %u in %.40s", (unsigned)(dir_count - 1u), want_level == V_COUNTRIES ? "By country" : want_title);
+}
+
+static int radio_fetch(uint8_t level, uint8_t parent, const char *title, const char *query)
+{
+    char path[300];
+    uint8_t k = level == V_COUNTRIES ? PVA_DIRQ_COUNTRIES : PVA_DIRQ_STATIONS;
+    if (k == PVA_DIRQ_COUNTRIES) snprintf(path, sizeof path, "/json/countries?hidebroken=true&order=name");
+    else snprintf(path, sizeof path, "/json/stations/search?%s&codec=MP3&hidebroken=true&limit=60", query);
+    int r = pva_dir_start(k, path);
+    if (r != PVA_OK) { dstate = PVA_DIRS_FAILED; derr = PVA_NERR_NOWIFI; status_dirty = true; return r; }
+    want_level = level;
+    want_parent = parent;
+    snprintf(want_title, sizeof want_title, "%s", title);
+    dir_wait = true;
+    dstate = PVA_DIRS_LOADING;
+    derr = 0;
+    status_dirty = true;
+    return PVA_E_BUSY;
+}
+
+static void radio_poll(void)
+{
+    pva_dir_poll();
+    if (!dir_wait) return;
+    uint8_t st = pva_dir_state();
+    if (st == PVA_DIRS_DONE)
+    {
+        dir_wait = false;
+        dstate = PVA_DIRS_DONE;
+        radio_list_ready();
+    }
+    else if (st == PVA_DIRS_FAILED || st == PVA_DIRS_IDLE)
+    {
+        dir_wait = false;
+        dstate = PVA_DIRS_FAILED;
+        derr = pva_dir_error() ? pva_dir_error() : PVA_NERR_TIMEOUT;
+        status_dirty = true;
+    }
+}
+
+static void radio_stop_wait(void)
+{
+    if (!dir_wait) return;
+    pva_dir_cancel();
+    dir_wait = false;
+    dstate = PVA_DIRS_IDLE;
+    status_dirty = true;
+}
+
+static int radio_parent(void)
+{
+    radio_stop_wait();
+    switch (vlevel)
+    {
+        case V_HOME:      return read_dir("");
+        case V_STATIONS:  v_build(vparent == V_COUNTRIES && !ccache_n ? V_HOME : vparent); return PVA_OK;
+        default:          v_build(V_HOME); return PVA_OK;
+    }
+}
+
+static int radio_enter(uint16_t idx)
+{
+    char q[200], enc[160];
+    const char *nm = dir_pool + dir_ent[idx].name;
+    switch (vlevel)
+    {
+        case V_HOME:
+        {
+            unsigned i = idx - 1u;
+            if (i < 3)
+            {
+                snprintf(q, sizeof q, "order=%s&reverse=true", home_order[i]);
+                return radio_fetch(V_STATIONS, V_HOME, home_names[i], q);
+            }
+            radio_stop_wait();
+            if (i == 3)
+            {
+                if (ccache_n) { v_build(V_COUNTRIES); return PVA_OK; }
+                return radio_fetch(V_COUNTRIES, V_HOME, "By country", "");
+            }
+            v_build(i == 4 ? V_GENRES : V_DECADES);
+            return PVA_OK;
+        }
+        case V_COUNTRIES:
+        {
+            const uint8_t *c = ccache_entry((uint16_t)(idx - 1u));
+            if (!c) return PVA_E_RANGE;
+            pva_dir_urlenc(enc, sizeof enc, (const char *)c + 2);
+            snprintf(q, sizeof q, "country=%s&countryExact=true&order=clickcount&reverse=true", enc);
+            char t[48];
+            snprintf(t, sizeof t, "By country/%s", nm);
+            return radio_fetch(V_STATIONS, V_COUNTRIES, t, q);
+        }
+        case V_GENRES:
+        case V_DECADES:
+        {
+            unsigned i = idx - 1u;
+            const char *tag = vlevel == V_GENRES ? (i < N_GENRES ? genres[i] : NULL) : (i < N_DECADES ? decades[i][1] : NULL);
+            if (!tag) return PVA_E_RANGE;
+            pva_dir_urlenc(enc, sizeof enc, tag);
+            snprintf(q, sizeof q, "tag=%s&order=clickcount&reverse=true", enc);
+            char t[48];
+            snprintf(t, sizeof t, "%s/%s", vlevel == V_GENRES ? "By genre" : "By decade", nm);
+            return radio_fetch(V_STATIONS, vlevel, t, q);
+        }
+        default:
+            return PVA_E_ARGS;
+    }
 }
 
 static void reply_dir_header(void)
@@ -255,6 +522,11 @@ static int cmd_dir_open(void)
     char path[PATH_MAX_LEN + 1];
     args[PVA_ARGS_SIZE - 1] = 0;
     if (!mounted && !do_mount()) return PVA_E_NOCARD;
+    if (args[0] == 0 && vlevel != V_CARD)
+    {
+        reply_dir_header();             // the radio list on show
+        return PVA_OK;
+    }
     if (args[0] == 0)
     {
         int r = read_dir(cur_dir);
@@ -264,6 +536,13 @@ static int cmd_dir_open(void)
     else
     {
         if (!normalise_path(path, sizeof path, (const char *)args)) return PVA_E_ARGS;
+        radio_stop_wait();
+        if (!strcmp(path, RADIO_PATH) && pva_dir_available())
+        {
+            v_build(V_HOME);
+            reply_dir_header();
+            return PVA_OK;
+        }
         int r = read_dir(path);
         if (r != PVA_OK) return r;
     }
@@ -277,6 +556,19 @@ static int cmd_dir_enter(void)
     uint16_t idx = (uint16_t)(args[0] | (args[1] << 8));
     if (idx >= dir_count) return PVA_E_RANGE;
     char path[PATH_MAX_LEN + 1];
+    if (vlevel != V_CARD)
+    {
+        int r = dir_ent[idx].type == PVA_DE_PARENT ? radio_parent() : dir_ent[idx].type == PVA_DE_DIR ? radio_enter(idx) : PVA_E_ARGS;
+        if (r != PVA_OK) return r;
+        reply_dir_header();
+        return PVA_OK;
+    }
+    if (radio_entry && idx == 0)
+    {
+        v_build(V_HOME);
+        reply_dir_header();
+        return PVA_OK;
+    }
     if (dir_ent[idx].type == PVA_DE_PARENT)
     {
         snprintf(path, sizeof path, "%s", cur_dir);
@@ -494,9 +786,19 @@ static int open_stream(const char *entry)
     memcpy(u, entry, n);
     u[n] = 0;
     given_station[0] = 0;
-    if (sep) snprintf(given_station, sizeof given_station, "%s", sep + 1);
+    const char *uuid = NULL;
+    if (sep)
+    {
+        const char *sep2 = strchr(sep + 1, STATION_SEP);
+        size_t k = sep2 ? (size_t)(sep2 - sep - 1) : strlen(sep + 1);
+        if (k >= sizeof given_station) k = sizeof given_station - 1;
+        memcpy(given_station, sep + 1, k);
+        given_station[k] = 0;
+        if (sep2) uuid = sep2 + 1;
+    }
     int r = pva_net_start(u);
     if (r != PVA_OK) return r;
+    if (uuid) pva_dir_click(uuid);          // Radio Browser counts the station's listeners
     r = pva_dec_open_stream(&info);
     if (r != PVA_OK) { pva_net_stop(); return r; }
     snprintf(info.album, sizeof info.album, "%s", given_station);
@@ -609,6 +911,29 @@ static int cmd_play_index(void)
     if (idx >= dir_count) return PVA_E_RANGE;
     const dent_t *sel = &dir_ent[idx];
     char path[PATH_MAX_LEN + 1];
+    if (sel->type == PVA_DE_URL && vlevel == V_STATIONS)
+    {
+        // the list's stations make the play list
+        if (pva_dir_kind() != PVA_DIRQ_STATIONS || pva_dir_count() + 1u != dir_count) return PVA_E_STATE;
+        stop_playback();
+        pl_clear();
+        pl_kind = 2;
+        uint16_t start = 0;
+        for (uint16_t i = 0; i < pva_dir_count(); i++)
+        {
+            char e[URL_MAX_LEN + PVA_ST_ALBUM_LEN + 44];
+            char nm[PVA_ST_ALBUM_LEN];
+            pva_copy_ascii(nm, sizeof nm, dir_pool + dir_ent[i + 1u].name, 255);
+            const char *u = pva_dir_url(i);
+            if (strlen(u) > URL_MAX_LEN) continue;
+            snprintf(e, sizeof e, "%s%c%s%c%s", u, STATION_SEP, nm, STATION_SEP, pva_dir_uuid(i));
+            if (i + 1u == idx) start = pl_count;
+            if (!pl_add(e)) break;
+        }
+        if (!pl_count) return PVA_E_STATE;
+        if (mode & PVA_MODE_SHUFFLE) { pl_shuffle(start); start = 0; }
+        return play_pos(start);
+    }
     if (sel->type == PVA_DE_M3U)
     {
         snprintf(path, sizeof path, "%s/%s", cur_dir, dir_pool + sel->name);
@@ -757,6 +1082,10 @@ static int cmd_diag(void)
     }
     else if (!pva_net_capacity())
         n += snprintf(t + n, sizeof t - (size_t)n, "Streams: no buffer memory\r\n");
+    if (pva_dir_available())
+        n += snprintf(t + n, sizeof t - (size_t)n, "Radio list: state %u, %u entries%s, error %u, HTTP %u\r\n",
+                      (unsigned)pva_dir_state(), (unsigned)pva_dir_count(), pva_dir_truncated() ? " (cut)" : "",
+                      (unsigned)pva_dir_error(), (unsigned)pva_dir_http());
     set_reply_text(t, (size_t)n);
     return PVA_OK;
 }
@@ -776,6 +1105,8 @@ static int execute(uint8_t code)
         }
         case PVA_C_MOUNT:
             stop_playback();
+            radio_stop_wait();
+            vlevel = V_CARD;
             dir_open = false;
             return do_mount() ? PVA_OK : PVA_E_NOCARD;
         case PVA_C_LOG:
@@ -912,6 +1243,8 @@ static void publish_status(void)
         st16(PVA_ST_HTTP, ns->http);
         st16(PVA_ST_BUF_KB, (uint16_t)(cap / 1024u));
     }
+    st8(PVA_ST_DIR_STATE, dstate);
+    st8(PVA_ST_DIR_ERR, derr);
     // display fields: coarse buffer level and rate, then the generation
     {
         uint8_t pct = st_new[PVA_ST_BUF_PCT];
@@ -974,6 +1307,7 @@ void pva_core1_init(void)
     reply = pva_alloc(PVA_REPLY_SIZE);
     bool dec_ok = pva_dec_init();
     bool net_ok = pva_net_init();
+    if (net_ok && !pva_dir_init()) pva_log("radio directory: no memory");
     bool hal_ok = pva_hal_audio_init();
     pva_hal_audio_mute(true);
     pva_log("engine %d.%d start, arena free %lu", PVA_FW_MAJOR, PVA_FW_MINOR, (unsigned long)pva_arena_free());
@@ -993,7 +1327,7 @@ void pva_core1_init(void)
     pva_win[PVA_R_BUSY] = 0;
 }
 
-bool pva_core1_busy(void) { return state == PVA_STATE_PLAYING || pva_net_active(); }
+bool pva_core1_busy(void) { return state == PVA_STATE_PLAYING || pva_net_active() || pva_dir_busy(); }
 bool pva_command_pending(void) { return pva_mailbox.post_count != 0; }
 
 bool pva_core1_poll(void)
@@ -1010,6 +1344,7 @@ bool pva_core1_poll(void)
         work = true;
     }
 
+    radio_poll();
     if (pva_net_active())
     {
         pva_net_poll();
