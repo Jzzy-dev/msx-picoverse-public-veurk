@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        5
+#define PVA_FW_MINOR        6
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -88,6 +88,8 @@
 #define PVA_C_SEEK          0x26    // args: u16 seconds
 #define PVA_C_VOLUME        0x27    // args: u8 0..100
 #define PVA_C_MODE          0x28    // args: u8 PVA_MODE_xxx bits
+#define PVA_C_EQ            0x2A    // args: 5 x s8 band gains in dB (-12..+12): 60 Hz, 250 Hz,
+                                    // 1 kHz, 4 kHz, 12 kHz
 #define PVA_C_PLAY_URL      0x29    // args: URL (http:// or https://, 0-terminated), then an
                                     // optional station name (0-terminated); MP3 streams
 
@@ -167,6 +169,9 @@
 // the internet radio directory (virtual folders under "[Internet radio]")
 #define PVA_ST_DIR_STATE    177     // u8  PVA_DIRS_xxx of the last list fetched
 #define PVA_ST_DIR_ERR      178     // u8  PVA_NERR_xxx when it failed
+#define PVA_ST_EQ           179     // s8[5] equalizer band gains in dB
+#define PVA_EQ_BANDS        5
+#define PVA_EQ_MAX_DB       12
 
 #define PVA_W_LOOP          1       // main loop
 #define PVA_W_COMMAND       2

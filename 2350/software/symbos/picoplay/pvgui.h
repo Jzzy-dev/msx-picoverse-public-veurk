@@ -97,16 +97,18 @@ _transfer Ctrl_Group ctrls = { C_COUNT, 0, &ctl_bg };
 #define M_ABOUT   10
 #define M_FAV_ADD 11
 #define M_FAV_DEL 12
-_transfer Menu menu_file = { 9 };
+#define M_EQ      13
+_transfer Menu menu_file = { 10 };
 _transfer Menu_Entry mf1 = { MENU_ACTIVE, "Refresh folder", M_REFRESH };
 _transfer Menu_Entry mf2 = { MENU_ACTIVE, "Remount microSD", M_REMOUNT };
 _transfer Menu_Entry mf3 = { MENU_SEPARATOR, 0, 0 };
 _transfer Menu_Entry mf4 = { MENU_ACTIVE, "Add to favourites (F)", M_FAV_ADD };
 _transfer Menu_Entry mf5 = { MENU_ACTIVE, "Remove from favourites (Del)", M_FAV_DEL };
-_transfer Menu_Entry mf6 = { MENU_SEPARATOR, 0, 0 };
+_transfer Menu_Entry mf6 = { MENU_ACTIVE, "Equalizer... (E)", M_EQ };
 _transfer Menu_Entry mf7 = { MENU_ACTIVE, "Diagnostics...", M_DIAG };
 _transfer Menu_Entry mf8 = { MENU_ACTIVE, "Engine log...", M_LOG };
-_transfer Menu_Entry mf9 = { MENU_ACTIVE, "Quit", M_QUIT };
+_transfer Menu_Entry mf9 = { MENU_SEPARATOR, 0, 0 };
+_transfer Menu_Entry mf10 = { MENU_ACTIVE, "Quit", M_QUIT };
 _transfer Menu menu_help = { 1 };
 _transfer Menu_Entry mh1 = { MENU_ACTIVE, "About PicoPlay", M_ABOUT };
 _transfer Menu menu_main = { 2 };
@@ -156,6 +158,77 @@ _transfer Window win_text = {
     0,
     0,
     &tctrls };
+
+
+/* equalizer window: five vertical sliders (top = +12 dB), presets */
+#define EQ_BANDS   5
+#define EQ_RANGE   24                       /* slider 0..24 = +12..-12 dB */
+_transfer Ctrl_Slider cd_eq0 = { SLIDER_V | SLIDER_VALUE, 0, 12, EQ_RANGE, 1, -1 };
+_transfer Ctrl_Slider cd_eq1 = { SLIDER_V | SLIDER_VALUE, 0, 12, EQ_RANGE, 1, -1 };
+_transfer Ctrl_Slider cd_eq2 = { SLIDER_V | SLIDER_VALUE, 0, 12, EQ_RANGE, 1, -1 };
+_transfer Ctrl_Slider cd_eq3 = { SLIDER_V | SLIDER_VALUE, 0, 12, EQ_RANGE, 1, -1 };
+_transfer Ctrl_Slider cd_eq4 = { SLIDER_V | SLIDER_VALUE, 0, 12, EQ_RANGE, 1, -1 };
+_data char eq_val[EQ_BANDS][4];
+_transfer Ctrl_Text cd_eqv0 = { eq_val[0], (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqv1 = { eq_val[1], (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqv2 = { eq_val[2], (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqv3 = { eq_val[3], (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqv4 = { eq_val[4], (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqf0 = { "60",  (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqf1 = { "250", (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqf2 = { "1k",  (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqf3 = { "4k",  (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_eqf4 = { "12k", (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_data char txt_preset[24];
+_transfer Ctrl_Text cd_preset = { txt_preset, (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
+enum {
+    E_BG, E_S0, E_S1, E_S2, E_S3, E_S4, E_V0, E_V1, E_V2, E_V3, E_V4, E_F0, E_F1, E_F2, E_F3, E_F4,
+    E_P0, E_P1, E_P2, E_P3, E_P4, E_P5, E_P6, E_P7, E_NAME, E_COUNT
+};
+#define EQ_X(i) (14 + (i) * 34)
+_transfer Ctrl ectl_bg = { E_BG, C_AREA,   -1, COLOR_ORANGE, 0, 0, 10000, 10000 };
+_transfer Ctrl ectl_s0 = { E_S0, C_SLIDER, -1, (unsigned short)&cd_eq0, EQ_X(0), 14, 8, 56 };
+_transfer Ctrl ectl_s1 = { E_S1, C_SLIDER, -1, (unsigned short)&cd_eq1, EQ_X(1), 14, 8, 56 };
+_transfer Ctrl ectl_s2 = { E_S2, C_SLIDER, -1, (unsigned short)&cd_eq2, EQ_X(2), 14, 8, 56 };
+_transfer Ctrl ectl_s3 = { E_S3, C_SLIDER, -1, (unsigned short)&cd_eq3, EQ_X(3), 14, 8, 56 };
+_transfer Ctrl ectl_s4 = { E_S4, C_SLIDER, -1, (unsigned short)&cd_eq4, EQ_X(4), 14, 8, 56 };
+_transfer Ctrl ectl_v0 = { E_V0, C_TEXT, -1, (unsigned short)&cd_eqv0, EQ_X(0) - 6, 4, 22, 8 };
+_transfer Ctrl ectl_v1 = { E_V1, C_TEXT, -1, (unsigned short)&cd_eqv1, EQ_X(1) - 6, 4, 22, 8 };
+_transfer Ctrl ectl_v2 = { E_V2, C_TEXT, -1, (unsigned short)&cd_eqv2, EQ_X(2) - 6, 4, 22, 8 };
+_transfer Ctrl ectl_v3 = { E_V3, C_TEXT, -1, (unsigned short)&cd_eqv3, EQ_X(3) - 6, 4, 22, 8 };
+_transfer Ctrl ectl_v4 = { E_V4, C_TEXT, -1, (unsigned short)&cd_eqv4, EQ_X(4) - 6, 4, 22, 8 };
+_transfer Ctrl ectl_f0 = { E_F0, C_TEXT, -1, (unsigned short)&cd_eqf0, EQ_X(0) - 2, 72, 22, 8 };
+_transfer Ctrl ectl_f1 = { E_F1, C_TEXT, -1, (unsigned short)&cd_eqf1, EQ_X(1) - 4, 72, 22, 8 };
+_transfer Ctrl ectl_f2 = { E_F2, C_TEXT, -1, (unsigned short)&cd_eqf2, EQ_X(2) - 2, 72, 22, 8 };
+_transfer Ctrl ectl_f3 = { E_F3, C_TEXT, -1, (unsigned short)&cd_eqf3, EQ_X(3) - 2, 72, 22, 8 };
+_transfer Ctrl ectl_f4 = { E_F4, C_TEXT, -1, (unsigned short)&cd_eqf4, EQ_X(4) - 4, 72, 22, 8 };
+_transfer Ctrl ectl_p0 = { E_P0, C_BUTTON, -1, (unsigned short)"Flat",     4, 84, 44, 12 };
+_transfer Ctrl ectl_p1 = { E_P1, C_BUTTON, -1, (unsigned short)"Rock",    50, 84, 44, 12 };
+_transfer Ctrl ectl_p2 = { E_P2, C_BUTTON, -1, (unsigned short)"Pop",     96, 84, 44, 12 };
+_transfer Ctrl ectl_p3 = { E_P3, C_BUTTON, -1, (unsigned short)"Jazz",   142, 84, 44, 12 };
+_transfer Ctrl ectl_p4 = { E_P4, C_BUTTON, -1, (unsigned short)"Classic",  4, 98, 44, 12 };
+_transfer Ctrl ectl_p5 = { E_P5, C_BUTTON, -1, (unsigned short)"Voice",   50, 98, 44, 12 };
+_transfer Ctrl ectl_p6 = { E_P6, C_BUTTON, -1, (unsigned short)"Bass",    96, 98, 44, 12 };
+_transfer Ctrl ectl_p7 = { E_P7, C_BUTTON, -1, (unsigned short)"Loud",   142, 98, 44, 12 };
+_transfer Ctrl ectl_nm = { E_NAME, C_TEXT, -1, (unsigned short)&cd_preset, 4, 113, 182, 8 };
+_transfer Ctrl_Group ectrls = { E_COUNT, 0, &ectl_bg };
+#define EQ_W 190
+#define EQ_H 123
+_transfer Window win_eq = {
+    WIN_NORMAL,
+    WIN_CLOSE | WIN_TITLE | WIN_ICON,
+    0,
+    60, 30,
+    EQ_W, EQ_H,
+    0, 0,
+    EQ_W, EQ_H,
+    EQ_W, EQ_H,
+    EQ_W, EQ_H,
+    icon,
+    "Equalizer",
+    0,
+    0,
+    &ectrls };
 
 /* SCC gives initialized _data char arrays no storage of their own (they all
    land on one address, on top of the next buffer), so the texts are declared

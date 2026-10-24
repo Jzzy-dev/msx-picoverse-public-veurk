@@ -12,7 +12,7 @@
 #include <setjmp.h>
 #include <stdbool.h>
 #include "host_symbos.h"
-extern Window win_text;
+extern Window win_text, win_eq;
 
 void pva_init(uint8_t *arena, size_t arena_size);
 uint8_t pva_mem_read(uint16_t addr);
@@ -78,7 +78,7 @@ void pv_read(unsigned short a, char *d, unsigned short n) { for (unsigned i = 0;
 void pv_write(unsigned short a, char *s, unsigned short n) { for (unsigned i = 0; i < n; i++) pv_poke((unsigned short)(a + i), (unsigned char)s[i]); }
 void pv_post(unsigned char t, unsigned char c) { pv_poke(0x4010, t); pv_poke(0x4011, c); }
 
-signed char Win_Open(unsigned char b, void *a) { (void)b; return a == &win_text ? 2 : 1; }
+signed char Win_Open(unsigned char b, void *a) { (void)b; return a == &win_text ? 2 : a == &win_eq ? 3 : 1; }
 void Win_Redraw(unsigned char w, signed char what, unsigned char f) { (void)f; if (w == 1 && what >= 0 && what < 32) redraws[what]++; }
 void Win_Redraw_Status(unsigned char w) { (void)w; }
 void Win_Redraw_Title(unsigned char w) { (void)w; }
@@ -380,6 +380,30 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
                 CHECK(!strcmp(txt_status, "Already a favourite"), "F with '..' marked uses the stream that plays: '%s'", txt_status);
                 stream_phase = 10;
                 f_unlink("0:/RADIOFAV.M3U");
+                printf("[equalizer]\n");
+                key_press('E');
+                CHECK(eq_id == 3 && !strcmp(eq_val[0], "0") && !strcmp(txt_preset, "Preset: Flat") && cd_eq0.value == 12,
+                      "E opens it: '%s', 60 Hz '%s'", txt_preset, eq_val[0]);
+                eq_click(E_P1);                     // Rock
+                read_status();
+                CHECK((signed char)st[PVA_ST_EQ] == 5 && (signed char)st[PVA_ST_EQ + 2] == -2 && !strcmp(eq_val[2], "-2") &&
+                      !strcmp(txt_preset, "Preset: Rock") && cd_eq0.value == 7, "Rock: engine %d %d %d %d %d",
+                      (signed char)st[PVA_ST_EQ], (signed char)st[PVA_ST_EQ + 1], (signed char)st[PVA_ST_EQ + 2],
+                      (signed char)st[PVA_ST_EQ + 3], (signed char)st[PVA_ST_EQ + 4]);
+                cd_eq2.value = 0;                   // 1 kHz slider to the top
+                eq_click(E_S2);
+                read_status();
+                CHECK((signed char)st[PVA_ST_EQ + 2] == 12 && !strcmp(eq_val[2], "+12") && !strcmp(txt_preset, "Preset: Custom"),
+                      "slider: 1 kHz %+d, '%s'", (signed char)st[PVA_ST_EQ + 2], txt_preset);
+                key_press('E');
+                eq_close();
+                memset(eq_gain, 0, sizeof eq_gain);
+                eq_preset = 0;
+                eq_load();
+                CHECK(eq_gain[0] == 5 && eq_gain[2] == 12 && eq_gain[4] == 5 && eq_preset == 8, "PICOPLAY.CFG keeps it (%d %d %d, preset %u)",
+                      eq_gain[0], eq_gain[2], eq_gain[4], eq_preset);
+                eq_set_preset(0);
+                f_unlink("0:/PICOPLAY.CFG");
             }
             ev_click(C_STOP, 0, 0);
             ticks_left = 2;

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>
 #include "ff.h"
 #include "../pva.h"
 #include "../pva_internal.h"
@@ -694,6 +695,79 @@ int main(int argc, char **argv)
     }
     host_esp_present = true;
     CHECK(cmd_str(PVA_C_PLAY_URL, "ftp://radio.test/x") == PVA_E_ARGS, "only http and https");
+
+    printf("[equalizer]\n");
+    {
+        // response at a few frequencies, straight through pva_eq_process
+        #define EQ_N 8192
+        static int16_t buf[EQ_N * 2];
+        double resp[5];
+        const double fq[5] = { 60, 250, 1000, 4000, 12000 };
+        struct { int8_t g[5]; double want[5]; const char *what; } cases[] = {
+            { { 12, 0, 0, 0, 0 }, { 0, -10.5, -12, -12, -12 }, "+12 dB at 60 Hz (the preamp takes 12 dB off)" },
+            { { 0, 0, -12, 0, 0 }, { 0, -0.6, -12, -0.6, 0 }, "-12 dB at 1 kHz" },
+            { { 0, 0, 0, 0, 6 }, { -6, -6, -6, -5.5, 0 }, "+6 dB at 12 kHz" },
+            { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, "flat" },
+        };
+        for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++)
+        {
+            pva_eq_set(cases[c].g);
+            bool ok = true;
+            for (int k = 0; k < 5; k++)
+            {
+                pva_eq_reset();
+                double in2 = 0, out2 = 0;
+                for (int n = 0; n < EQ_N; n++)
+                    buf[2 * n] = buf[2 * n + 1] = (int16_t)(8000.0 * sin(2 * M_PI * fq[k] * n / 44100.0));
+                for (int n = 0; n < EQ_N; n++) in2 += (double)buf[2 * n] * buf[2 * n];
+                pva_eq_process(buf, EQ_N, 44100);
+                for (int n = EQ_N / 2; n < EQ_N; n++) out2 += (double)buf[2 * n] * buf[2 * n];
+                resp[k] = 10 * log10((out2 * 2) / in2);
+                if (fabs(resp[k] - cases[c].want[k]) > 1.5) ok = false;
+            }
+            CHECK(ok, "%s: %.1f %.1f %.1f %.1f %.1f dB at 60/250/1k/4k/12k", cases[c].what, resp[0], resp[1], resp[2], resp[3], resp[4]);
+        }
+        {
+            // flat is bit-exact; a 22.05 kHz stream with the 12 kHz band set stays sane
+            int8_t z[5] = { 0 }, hi[5] = { 0, 0, 0, 0, 12 };
+            pva_eq_set(z);
+            for (int n = 0; n < 256; n++) buf[n] = (int16_t)(n * 97);
+            pva_eq_process(buf, 128, 44100);
+            bool same = true;
+            for (int n = 0; n < 256; n++) if (buf[n] != (int16_t)(n * 97)) same = false;
+            CHECK(same, "flat: the samples are untouched");
+            pva_eq_set(hi);
+            bool sane = true;
+            for (int n = 0; n < EQ_N; n++) buf[2 * n] = buf[2 * n + 1] = (int16_t)(20000.0 * sin(2 * M_PI * 9000.0 * n / 22050.0));
+            pva_eq_process(buf, EQ_N, 22050);
+            for (int n = 0; n < EQ_N * 2; n++) if (buf[n] == 32767 || buf[n] == -32768) sane = false;
+            CHECK(sane, "22.05 kHz with +12 dB at the top: no clipping, no blow-up");
+            pva_eq_set(z);
+        }
+        // through the engine: the command, the status, and the level of a playing file
+        cmd_str(PVA_C_DIR_OPEN, "/MUSIC/Caf\xC3\xA9 del Mar");
+        cmd_u16(PVA_C_PLAY_INDEX, 1);
+        run_ms(1500);
+        sink_level();
+        run_ms(2000);
+        double flat = sink_level();
+        int8_t cut[5] = { -12, -12, -12, -12, -12 };
+        CHECK(cmd(PVA_C_EQ, cut, 5) == PVA_OK, "EQ command");
+        read_status();
+        CHECK((int8_t)st[PVA_ST_EQ] == -12 && (int8_t)st[PVA_ST_EQ + 4] == -12, "status shows the gains");
+        run_ms(500);
+        sink_level();
+        run_ms(2000);
+        double low = sink_level();
+        int8_t big[5] = { 40, -40, 0, 0, 0 };
+        cmd(PVA_C_EQ, big, 5);
+        read_status();
+        CHECK(low < flat * 0.5 && low > 0, "all bands -12 dB: level %.0f -> %.0f", flat, low);
+        CHECK((int8_t)st[PVA_ST_EQ] == 12 && (int8_t)st[PVA_ST_EQ + 1] == -12, "gains are kept within +-12 dB");
+        int8_t z[5] = { 0 };
+        cmd(PVA_C_EQ, z, 5);
+        cmd(PVA_C_STOP, NULL, 0);
+    }
 
     printf("[internet radio directory]\n");
     {

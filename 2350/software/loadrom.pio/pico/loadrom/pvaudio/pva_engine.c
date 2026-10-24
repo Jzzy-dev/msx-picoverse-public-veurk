@@ -1292,6 +1292,10 @@ static int execute(uint8_t code)
             return PVA_OK;
         case PVA_C_MODE:
             return cmd_mode();
+        case PVA_C_EQ:
+            pva_eq_set((const int8_t *)args);
+            status_dirty = true;
+            return PVA_OK;
         default:
             return PVA_E_UNKNOWN;
     }
@@ -1387,6 +1391,11 @@ static void publish_status(void)
         st8(PVA_ST_NET_ERR, ns->err);
         st16(PVA_ST_HTTP, ns->http);
         st16(PVA_ST_BUF_KB, (uint16_t)(cap / 1024u));
+    }
+    {
+        int8_t g[PVA_EQ_BANDS];
+        pva_eq_get(g);
+        for (int i = 0; i < PVA_EQ_BANDS; i++) st8(PVA_ST_EQ + (uint32_t)i, (uint8_t)g[i]);
     }
     st8(PVA_ST_DIR_STATE, dstate);
     st8(PVA_ST_DIR_ERR, derr);

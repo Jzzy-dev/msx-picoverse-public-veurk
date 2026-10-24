@@ -180,6 +180,12 @@ const char *pva_net_station(void);              // icy-name (or "")
 const char *pva_net_stream_title(void);         // StreamTitle (or "")
 const char *pva_net_host(void);
 
+// equalizer (pva_eq.c)
+void pva_eq_set(const int8_t *gains);           // PVA_EQ_BANDS gains in dB
+void pva_eq_get(int8_t *gains);
+void pva_eq_reset(void);                        // a new track: clear the filter state
+void pva_eq_process(int16_t *stereo, uint32_t frames, uint32_t rate);
+
 // helpers
 int  pva_kind_from_name(const char *name);   // PVA_DE_xxx or 0
 void pva_copy_ascii(char *dst, size_t size, const char *src, size_t src_len);

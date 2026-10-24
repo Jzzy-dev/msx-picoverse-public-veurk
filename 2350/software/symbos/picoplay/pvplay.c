@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include "pva_proto.h"
 
-#define APP_VERSION "0.2"
+#define APP_VERSION "0.3"
 
 /* ------------------------------------------------------------ engine access */
 extern void pv_setslot(unsigned char prim, unsigned char sub);
@@ -127,11 +127,18 @@ static unsigned char read_status(void)
 
 signed char win_id = -1;
 signed char text_id = -1;
+signed char eq_id = -1;
+/* Saving right after a redraw of the equalizer window made SymbOS 4.0 drop
+   the window (seen in openMSX): the settings are written a few ticks later. */
+unsigned char eq_dirty;
+static void eq_save(void);
 signed char timer_id = -1;
 
 /* Every way out must stop the wake timer first: it runs in our memory. */
+static void eq_close(void);
 static void app_quit(void)
 {
+    eq_close();                             /* saves the equalizer */
     if (timer_id >= 0)
         Timer_Delete(timer_id);
     timer_id = -1;
@@ -722,6 +729,8 @@ static void tick(void)
     }
     if (dir_loading)
         check_dir_loading();
+    if (eq_dirty && !--eq_dirty)
+        eq_save();
     update_display();
 }
 
@@ -921,6 +930,188 @@ static void fav_del(void)
     set_status("Removed from favourites");
 }
 
+/* ------------------------------------------------------------ equalizer */
+/* The engine filters the sound (the DAC has no controls); PicoPlay keeps the
+   settings in PICOPLAY.CFG next to RADIOFAV.M3U and sends them at start-up. */
+signed char eq_gain[EQ_BANDS];
+
+unsigned char eq_preset;                /* 0..7, 8 = custom */
+char cfg_path[20];
+/* presets: gain + 'M' per band, 5 bands each (string data: SCC handles that safely) */
+#define EQ_PRESETS 8
+static char *eq_tab = "MMMMMROKPRLPQOLPNLOQPMLNPILQPKUQMMMSOMNR";
+static char *eq_preset_name(unsigned char p)
+{
+    switch (p) {
+    case 0: return "Flat";
+    case 1: return "Rock";
+    case 2: return "Pop";
+    case 3: return "Jazz";
+    case 4: return "Classic";
+    case 5: return "Voice";
+    case 6: return "Bass";
+    case 7: return "Loudness";
+    }
+    return "Custom";
+}
+
+static Ctrl_Slider *eq_slider(unsigned char i)
+{
+    switch (i) {
+    case 0: return &cd_eq0;
+    case 1: return &cd_eq1;
+    case 2: return &cd_eq2;
+    case 3: return &cd_eq3;
+    }
+    return &cd_eq4;
+}
+
+static void eq_texts(void)
+{
+    unsigned char i;
+    signed char g;
+    char *d;
+    for (i = 0; i < EQ_BANDS; ++i) {
+        g = eq_gain[i];
+        eq_slider(i)->value = (unsigned short)(12 - g);
+        d = eq_val[i];
+        if (g > 0)
+            *d++ = '+';
+        else if (g < 0) {
+            *d++ = '-';
+            g = (signed char)-g;
+        }
+        put_u(d, (unsigned short)g);
+    }
+    strcpy(txt_preset, "Preset: ");
+    strcat(txt_preset, eq_preset_name(eq_preset));
+}
+
+static void eq_send(void)
+{
+    pv_cmd(PVA_C_EQ, (char *)eq_gain, EQ_BANDS);
+}
+
+static void eq_save(void)
+{
+    char t[48], *d;
+    unsigned char i, id;
+    signed char g;
+    strcpy(t, "EQ=");
+    strcat(t, eq_preset_name(eq_preset));
+    d = t + strlen(t);
+    for (i = 0; i < EQ_BANDS; ++i) {
+        *d++ = ',';
+        g = eq_gain[i];
+        if (g < 0) {
+            *d++ = '-';
+            g = (signed char)-g;
+        }
+        d = put_u(d, (unsigned short)g);
+    }
+    strcpy(d, "\r\n");
+    id = File_New(_symbank, cfg_path, 0);
+    if (id > 7)
+        return;
+    File_Write(id, _symbank, t, strlen(t));
+    File_Close(id);
+}
+
+/* "EQ=<preset>,g,g,g,g,g" from PICOPLAY.CFG */
+static void eq_load(void)
+{
+    char t[64], *p;
+    unsigned char id = File_Open(_symbank, cfg_path), i;
+    unsigned short n;
+    signed char neg, v;
+    if (id > 7)
+        return;
+    n = File_Read(id, _symbank, t, 63);
+    File_Close(id);
+    t[n] = 0;
+    if (strncmp(t, "EQ=", 3))
+        return;
+    p = t + 3;
+    eq_preset = EQ_PRESETS;
+    for (i = 0; i < EQ_PRESETS; ++i)
+        if (!strncmp(p, eq_preset_name(i), strlen(eq_preset_name(i))) && p[strlen(eq_preset_name(i))] == ',')
+            eq_preset = i;
+    for (i = 0; i < EQ_BANDS; ++i) {
+        while (*p && *p != ',')
+            ++p;
+        if (!*p)
+            return;
+        ++p;
+        neg = 0;
+        if (*p == '-') {
+            neg = 1;
+            ++p;
+        }
+        v = 0;
+        while (*p >= '0' && *p <= '9')
+            v = (signed char)(v * 10 + (*p++ - '0'));
+        if (v > 12)
+            v = 12;
+        eq_gain[i] = neg ? (signed char)-v : v;
+    }
+}
+
+static void eq_open(void)
+{
+    eq_texts();
+    if (eq_id >= 0) {
+        Win_Focus(eq_id);
+        return;
+    }
+    eq_id = Win_Open(_symbank, &win_eq);
+}
+
+static void eq_close(void)
+{
+    if (eq_id < 0)
+        return;
+    Win_Close(eq_id);
+    eq_id = -1;
+    if (eq_dirty) {
+        eq_dirty = 0;
+        eq_save();
+    }
+}
+
+static void eq_set_preset(unsigned char p)
+{
+    unsigned char i;
+    eq_preset = p;
+    for (i = 0; i < EQ_BANDS; ++i)
+        eq_gain[i] = (signed char)(eq_tab[p * EQ_BANDS + i] - 'M');
+    eq_send();
+    eq_texts();
+    if (eq_id >= 0)
+        Win_Redraw(eq_id, -1, 0);
+    eq_dirty = 15;                          /* saved 3 s later (see tick) */
+}
+
+static void eq_click(unsigned char ctrl)
+{
+    unsigned char i;
+    if (ctrl >= E_P0 && ctrl <= E_P7) {
+        eq_set_preset((unsigned char)(ctrl - E_P0));
+        return;
+    }
+    if (ctrl < E_S0 || ctrl > E_S4)
+        return;
+    i = (unsigned char)(ctrl - E_S0);
+    if (eq_slider(i)->value > EQ_RANGE)
+        eq_slider(i)->value = EQ_RANGE;
+    eq_gain[i] = (signed char)(12 - (signed char)eq_slider(i)->value);
+    eq_preset = EQ_PRESETS;
+    eq_send();
+    eq_texts();
+    eq_dirty = 15;
+    Win_Redraw(eq_id, (signed char)(E_V0 + i), 0);
+    Win_Redraw(eq_id, E_NAME, 0);
+}
+
 static void menu_action(unsigned short v)
 {
     int r;
@@ -963,10 +1154,14 @@ static void menu_action(unsigned short v)
                   "Backspace parent folder\n"
                   "Space play/pause, N next, P previous, S stop\n"
                   "+/- volume, D diagnostics, L engine log\n"
-                  "F add to favourites, Del remove (Internet radio)");
+                  "F add to favourites, Del remove (Internet radio)\n"
+                  "E equalizer (5 bands; keys 1-8 pick a preset)");
         break;
     case M_FAV_ADD:
         fav_add();
+        break;
+    case M_EQ:
+        eq_open();
         break;
     case M_FAV_DEL:
         fav_del();
@@ -1035,6 +1230,7 @@ static void key_press(unsigned char k)
     case 'a': case 'A': menu_action(M_ABOUT); break;
     case 'l': case 'L': menu_action(M_LOG); break;
     case 'f': case 'F': fav_add(); break;
+    case 'e': case 'E': eq_open(); break;
     case 127: fav_del(); break;                 /* Del */
     case 8:                                     /* backspace: parent folder */
         if (cd_list.lines && row_type[0] == PVA_DE_PARENT)
@@ -1062,6 +1258,9 @@ int main(int argc, char *argv[])
     /* the favourites live on the drive PicoPlay was started from (the card) */
     fav_path[0] = (argc > 0 && argv[0][0] && argv[0][1] == ':') ? argv[0][0] : 'A';
     strcpy(fav_path + 1, ":\\RADIOFAV.M3U");
+    cfg_path[0] = fav_path[0];
+    strcpy(cfg_path + 1, ":\\PICOPLAY.CFG");
+    eq_load();
     win_id = Win_Open(_symbank, &win_main);
     if (win_id < 0)
         return 1;
@@ -1081,6 +1280,7 @@ int main(int argc, char *argv[])
             sprintf(t, "%s in slot %u-%u", xbuf, pv_prim, pv_sub);
             set_status(t);
             read_status();
+            eq_send();                          /* the saved equalizer */
             open_folder("");
         } else
             if (r < 0) engine_stopped(); else error_status("Engine", r);
@@ -1098,6 +1298,17 @@ int main(int argc, char *argv[])
         if ((unsigned char)_symmsg[0] != MSR_DSK_WCLICK)
             continue;
         wid = (unsigned char)_symmsg[1];
+        if (eq_id >= 0 && wid == (unsigned char)eq_id) {
+            if (_symmsg[2] == DSK_ACT_CLOSE || (_symmsg[2] == DSK_ACT_KEY && (unsigned char)_symmsg[4] == KEY_ESC))
+                eq_close();
+            else if (_symmsg[2] == DSK_ACT_CONTENT)
+                eq_click((unsigned char)_symmsg[8]);
+            else if (_symmsg[2] == DSK_ACT_KEY && _symmsg[4] >= '1' && _symmsg[4] <= '8')
+                eq_set_preset((unsigned char)(_symmsg[4] - '1'));   /* 1..8: the presets */
+            else if (_symmsg[2] == DSK_ACT_KEY)
+                key_press((unsigned char)_symmsg[4]);
+            continue;
+        }
         if (text_id >= 0 && wid == (unsigned char)text_id) {
             if (_symmsg[2] == DSK_ACT_CLOSE || (_symmsg[2] == DSK_ACT_CONTENT && _symmsg[8] == 2) ||
                 (_symmsg[2] == DSK_ACT_KEY && (unsigned char)_symmsg[4] == KEY_ESC)) {

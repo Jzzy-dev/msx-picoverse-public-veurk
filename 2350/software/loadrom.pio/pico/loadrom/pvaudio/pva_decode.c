@@ -560,6 +560,7 @@ uint8_t pva_dec_last_fresult(void) { return last_fr; }
 int pva_dec_open(const char *path, pva_track_info_t *info)
 {
     pva_dec_close();
+    pva_eq_reset();
     memset(info, 0, sizeof *info);
     int kind = pva_kind_from_name(path);
     if (kind != PVA_DE_MP3 && kind != PVA_DE_WAV)
@@ -613,6 +614,7 @@ int pva_dec_open(const char *path, pva_track_info_t *info)
 int pva_dec_open_stream(pva_track_info_t *info)
 {
     pva_dec_close();
+    pva_eq_reset();
     memset(info, 0, sizeof *info);
     in_len = in_pos = 0;
     samples_out = 0;
@@ -647,6 +649,7 @@ int pva_dec_step(void)
     int n = (format == PVA_DE_MP3) ? produce_mp3() : produce_wav(max_frames);
     if (n <= 0) return n;
     if ((uint32_t)n > max_frames) n = (int)max_frames;
+    pva_eq_process(pcm, (uint32_t)n, rate);
     apply_gain_and_vu(pcm, (uint32_t)n);
     memcpy(out, pcm, (size_t)n * 4u);
     pva_hal_audio_commit((uint32_t)n, rate);

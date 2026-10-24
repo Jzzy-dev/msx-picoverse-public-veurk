@@ -20,6 +20,16 @@ enum { C_BG, C_TITLE, C_ARTIST, C_TIME, C_FMT, C_PROG, C_PREV, C_PLAY, C_STOP, C
 #define M_ABOUT   10
 #define M_FAV_ADD 11
 #define M_FAV_DEL 12
+#define M_EQ      13
+#define EQ_BANDS  5
+#define EQ_RANGE  24
+enum { E_BG, E_S0, E_S1, E_S2, E_S3, E_S4, E_V0, E_V1, E_V2, E_V3, E_V4, E_F0, E_F1, E_F2, E_F3, E_F4,
+       E_P0, E_P1, E_P2, E_P3, E_P4, E_P5, E_P6, E_P7, E_NAME, E_COUNT };
+Ctrl_Slider cd_eq0 = { 0, 0, 12, 24, 1, -1 }, cd_eq1 = { 0, 0, 12, 24, 1, -1 }, cd_eq2 = { 0, 0, 12, 24, 1, -1 },
+            cd_eq3 = { 0, 0, 12, 24, 1, -1 }, cd_eq4 = { 0, 0, 12, 24, 1, -1 };
+char eq_val[EQ_BANDS][4];
+char txt_preset[24];
+Window win_eq;
 #define TEXT_LINES 40
 #define TEXT_LEN   60
 char txt_title[50] = "No track";
