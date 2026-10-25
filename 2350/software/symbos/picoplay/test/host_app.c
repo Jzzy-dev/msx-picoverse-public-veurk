@@ -395,13 +395,25 @@ unsigned short Msg_Sleep(char rec, char send, char *msg)
                 read_status();
                 CHECK((signed char)st[PVA_ST_EQ + 2] == 12 && !strcmp(eq_val[2], "+12") && !strcmp(txt_preset, "Preset: Custom"),
                       "slider: 1 kHz %+d, '%s'", (signed char)st[PVA_ST_EQ + 2], txt_preset);
+                cd_bal.value = 80;
+                eq_click(E_BAL);
+                read_status();
+                CHECK(st[PVA_ST_BALANCE] == 80 && !strcmp(txt_bal, "R 30"), "balance slider: engine %u, '%s'", st[PVA_ST_BALANCE], txt_bal);
+                cd_bal.value = 52;
+                eq_click(E_BAL);
+                CHECK(balance == 50 && !strcmp(txt_bal, "Centre"), "near the middle snaps to '%s'", txt_bal);
+                cd_bal.value = 20;
+                eq_click(E_BAL);
                 key_press('E');
                 eq_close();
+                balance = 50;
                 memset(eq_gain, 0, sizeof eq_gain);
                 eq_preset = 0;
                 eq_load();
                 CHECK(eq_gain[0] == 5 && eq_gain[2] == 12 && eq_gain[4] == 5 && eq_preset == 8, "PICOPLAY.CFG keeps it (%d %d %d, preset %u)",
                       eq_gain[0], eq_gain[2], eq_gain[4], eq_preset);
+                CHECK(balance == 20, "and the balance (%u)", balance);
+                balance = 50;
                 eq_set_preset(0);
                 f_unlink("0:/PICOPLAY.CFG");
             }

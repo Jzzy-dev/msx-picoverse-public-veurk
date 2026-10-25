@@ -73,6 +73,7 @@ static uint32_t  cbr_kbps;
 
 static int16_t  *pcm;                 // MAX_FRAME_SAMPLES * 2, in the arena
 static int32_t   gain_q15 = 32768;
+static int32_t   bal_l_q15 = 32768, bal_r_q15 = 32768;   // balance: the far side is turned down
 static uint8_t   vu_l, vu_r;
 static uint32_t  vu_ms;
 
@@ -483,6 +484,15 @@ static int produce_wav(uint32_t max_frames)
 
 // ---------------- volume / VU ----------------
 // 0..100 -> Q15 gain, about 0.5 dB per step from -50 dB to 0 dB, 0 = mute.
+// 0 = left only, 50 = centre, 100 = right only (the other side goes down
+// linearly; the near side stays at full level)
+void pva_dec_set_balance(uint8_t bal)
+{
+    if (bal > 100) bal = 100;
+    bal_l_q15 = bal <= 50 ? 32768 : (int32_t)(32768 * (100 - bal) / 50);
+    bal_r_q15 = bal >= 50 ? 32768 : (int32_t)(32768 * bal / 50);
+}
+
 void pva_dec_set_volume(uint8_t vol)
 {
     if (vol > 100) vol = 100;
@@ -506,10 +516,11 @@ static uint8_t vu_level(int32_t peak)
 static void apply_gain_and_vu(int16_t *buf, uint32_t frames)
 {
     int32_t pk_l = 0, pk_r = 0;
+    int32_t gl = (gain_q15 * bal_l_q15) >> 15, gr = (gain_q15 * bal_r_q15) >> 15;
     for (uint32_t i = 0; i < frames; i++)
     {
-        int32_t l = ((int32_t)buf[2 * i] * gain_q15) >> 15;
-        int32_t r = ((int32_t)buf[2 * i + 1] * gain_q15) >> 15;
+        int32_t l = ((int32_t)buf[2 * i] * gl) >> 15;
+        int32_t r = ((int32_t)buf[2 * i + 1] * gr) >> 15;
         buf[2 * i] = (int16_t)l;
         buf[2 * i + 1] = (int16_t)r;
         if (l < 0) l = -l;

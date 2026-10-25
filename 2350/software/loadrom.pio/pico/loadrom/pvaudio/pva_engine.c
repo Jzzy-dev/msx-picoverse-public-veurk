@@ -47,6 +47,7 @@ static char      pl_m3u_dir[PATH_MAX_LEN + 1];
 static uint8_t  state = PVA_STATE_STOPPED;
 static uint8_t  mode;
 static uint8_t  volume = 80;
+static uint8_t  balance = 50;
 static uint8_t  play_error;
 static uint16_t track_id;
 static pva_track_info_t info;
@@ -1292,6 +1293,11 @@ static int execute(uint8_t code)
             return PVA_OK;
         case PVA_C_MODE:
             return cmd_mode();
+        case PVA_C_BALANCE:
+            balance = args[0] > 100 ? 100 : args[0];
+            pva_dec_set_balance(balance);
+            status_dirty = true;
+            return PVA_OK;
         case PVA_C_EQ:
             pva_eq_set((const int8_t *)args);
             status_dirty = true;
@@ -1397,6 +1403,7 @@ static void publish_status(void)
         pva_eq_get(g);
         for (int i = 0; i < PVA_EQ_BANDS; i++) st8(PVA_ST_EQ + (uint32_t)i, (uint8_t)g[i]);
     }
+    st8(PVA_ST_BALANCE, balance);
     st8(PVA_ST_DIR_STATE, dstate);
     st8(PVA_ST_DIR_ERR, derr);
     // display fields: coarse buffer level and rate, then the generation

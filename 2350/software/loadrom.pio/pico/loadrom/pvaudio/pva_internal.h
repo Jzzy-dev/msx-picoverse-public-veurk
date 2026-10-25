@@ -75,6 +75,7 @@ int  pva_dec_step(void);
 int  pva_dec_seek(uint32_t seconds);
 uint32_t pva_dec_elapsed(void);
 void pva_dec_set_volume(uint8_t vol);     // 0..100
+void pva_dec_set_balance(uint8_t bal);    // 0 left .. 50 centre .. 100 right
 void pva_dec_vu(uint8_t *l, uint8_t *r);
 uint8_t pva_dec_last_fresult(void);
 

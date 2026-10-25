@@ -81,12 +81,12 @@ PicoPlay finds the engine by scanning the slots for its signature. It accesses t
 
 ### Equalizer
 
-*File > Equalizer...* (or `E`) opens a 5-band equalizer: 60 Hz, 250 Hz, 1 kHz, 4 kHz and 12 kHz, each from -12 to +12 dB, with the presets Flat, Rock, Pop, Jazz, Classic, Voice, Bass and Loudness (buttons, or the keys `1` to `8` in the equalizer window). It works on files and streams alike.
+*File > Equalizer...* (or `E`) opens a 5-band equalizer: 60 Hz, 250 Hz, 1 kHz, 4 kHz and 12 kHz, each from -12 to +12 dB, with the presets Flat, Rock, Pop, Jazz, Classic, Voice, Bass and Loudness (buttons, or the keys `1` to `8` in the equalizer window). Below the presets is the **balance** slider: moving it to one side turns the other channel down (the near side stays at full level), and near the middle it snaps to *Centre*. It works on files and streams alike.
 
 - **Where it runs:** the DAC (UDA1334A) has no controls, so the engine filters the decoded sound itself before the volume: a low shelf (60 Hz), three peaking filters and a high shelf (12 kHz), in floating point on the RP2350 (a few percent of a core). With every band at 0 dB the filters are skipped.
 - **No clipping:** the largest boost is taken off the whole signal first. Boosting the bass by 8 dB therefore makes everything else 8 dB quieter; turn the volume up to match.
-- **Kept:** PicoPlay stores the setting in `PICOPLAY.CFG` next to `RADIOFAV.M3U` (one line, `EQ=Rock,5,2,-2,3,5`) and sends it to the engine at start-up.
-- **For developers:** command `EQ` (2Ah) takes five signed bytes (dB); status bytes 179-183 show the gains in use.
+- **Kept:** PicoPlay stores the setting in `PICOPLAY.CFG` next to `RADIOFAV.M3U` (`EQ=Rock,5,2,-2,3,5` and `BAL=50`) and sends it to the engine at start-up.
+- **For developers:** command `EQ` (2Ah) takes five signed bytes (dB); status bytes 179-183 show the gains in use. `BALANCE` (2Bh) takes 0 (left only) to 100 (right only), 50 is the centre; status byte 184.
 
 ## 6. Internet radio
 
@@ -151,7 +151,7 @@ The engine is in page 1 of sub-slot 3, `4000h-4FFFh`. The full definition is `23
 | `4100h` | 512 | command arguments |
 | `4400h` | 2048 | command reply |
 
-Commands: `PING`, `MOUNT`, `LOG`, `DIAG`, `DIR_OPEN path`, `DIR_READ first,count`, `DIR_ENTER index`, `ENTRY_INFO index`, `PLAY_INDEX index`, `PLAY_PATH path`, `PAUSE`, `STOP`, `NEXT`, `PREV`, `SEEK seconds`, `VOLUME 0-100`, `MODE repeat/shuffle`, `EQ g1..g5`, `PLAY_URL url,0,station,0` (also `PLAY_PATH` with a URL).
+Commands: `PING`, `MOUNT`, `LOG`, `DIAG`, `DIR_OPEN path`, `DIR_READ first,count`, `DIR_ENTER index`, `ENTRY_INFO index`, `PLAY_INDEX index`, `PLAY_PATH path`, `PAUSE`, `STOP`, `NEXT`, `PREV`, `SEEK seconds`, `VOLUME 0-100`, `MODE repeat/shuffle`, `EQ g1..g5`, `BALANCE 0-100`, `PLAY_URL url,0,station,0` (also `PLAY_PATH` with a URL).
 
 For streams the status block has the `STREAM` and `BUFFERING` flags, and from byte 162: network state, buffer fill in %, receive rate in 0.1 KB/s, reconnects, the last network error (`PVA_NERR_xxx`), the last HTTP status and the buffer size in KB. Results `9` (network) and `10` (no WiFi link) are new.
 

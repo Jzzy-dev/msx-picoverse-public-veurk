@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include "pva_proto.h"
 
-#define APP_VERSION "0.3"
+#define APP_VERSION "0.4"
 
 /* ------------------------------------------------------------ engine access */
 extern void pv_setslot(unsigned char prim, unsigned char sub);
@@ -934,6 +934,7 @@ static void fav_del(void)
 /* The engine filters the sound (the DAC has no controls); PicoPlay keeps the
    settings in PICOPLAY.CFG next to RADIOFAV.M3U and sends them at start-up. */
 signed char eq_gain[EQ_BANDS];
+unsigned char balance = 50;             /* 0 left .. 50 centre .. 100 right */
 
 unsigned char eq_preset;                /* 0..7, 8 = custom */
 char cfg_path[20];
@@ -985,11 +986,21 @@ static void eq_texts(void)
     }
     strcpy(txt_preset, "Preset: ");
     strcat(txt_preset, eq_preset_name(eq_preset));
+    /* balance: "Centre", "L 40" (left louder) or "R 40" */
+    cd_bal.value = balance;
+    if (balance == 50)
+        strcpy(txt_bal, "Centre");
+    else {
+        txt_bal[0] = balance < 50 ? 'L' : 'R';
+        txt_bal[1] = ' ';
+        put_u(txt_bal + 2, balance < 50 ? 50 - balance : balance - 50);
+    }
 }
 
 static void eq_send(void)
 {
     pv_cmd(PVA_C_EQ, (char *)eq_gain, EQ_BANDS);
+    pv_cmd_u8(PVA_C_BALANCE, balance);
 }
 
 static void eq_save(void)
@@ -1009,6 +1020,8 @@ static void eq_save(void)
         }
         d = put_u(d, (unsigned short)g);
     }
+    strcpy(d, "\r\nBAL=");
+    d = put_u(d + 6, balance);
     strcpy(d, "\r\n");
     id = File_New(_symbank, cfg_path, 0);
     if (id > 7)
@@ -1031,6 +1044,13 @@ static void eq_load(void)
     t[n] = 0;
     if (strncmp(t, "EQ=", 3))
         return;
+    p = strstr(t, "BAL=");
+    if (p) {
+        n = 0;
+        for (p += 4; *p >= '0' && *p <= '9'; ++p)
+            n = n * 10 + (*p - '0');
+        balance = n > 100 ? 100 : (unsigned char)n;
+    }
     p = t + 3;
     eq_preset = EQ_PRESETS;
     for (i = 0; i < EQ_PRESETS; ++i)
@@ -1096,6 +1116,18 @@ static void eq_click(unsigned char ctrl)
     unsigned char i;
     if (ctrl >= E_P0 && ctrl <= E_P7) {
         eq_set_preset((unsigned char)(ctrl - E_P0));
+        return;
+    }
+    if (ctrl == E_BAL) {
+        if (cd_bal.value > 100)
+            cd_bal.value = 100;
+        /* snap to the centre near it, so "Centre" is easy to find */
+        balance = (cd_bal.value > 46 && cd_bal.value < 54) ? 50 : (unsigned char)cd_bal.value;
+        pv_cmd_u8(PVA_C_BALANCE, balance);
+        eq_texts();
+        eq_dirty = 15;
+        Win_Redraw(eq_id, E_BAL, 0);
+        Win_Redraw(eq_id, E_BALV, 0);
         return;
     }
     if (ctrl < E_S0 || ctrl > E_S4)

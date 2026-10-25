@@ -214,10 +214,12 @@ static void build_image(void)
 // ------------------------------------------------------------------ audio check
 static int64_t sink_sum_abs;
 static uint32_t sink_frames;
+static uint64_t sink_l, sink_r;
 static void sink(const int16_t *pcm, uint32_t frames, uint32_t rate)
 {
     (void)rate;
     for (uint32_t i = 0; i < frames * 2; i++) sink_sum_abs += pcm[i] < 0 ? -pcm[i] : pcm[i];
+    for (uint32_t i = 0; i < frames; i++) { sink_l += pcm[2 * i] < 0 ? -pcm[2 * i] : pcm[2 * i]; sink_r += pcm[2 * i + 1] < 0 ? -pcm[2 * i + 1] : pcm[2 * i + 1]; }
     sink_frames += frames;
 }
 static double sink_level(void) { double v = sink_frames ? (double)sink_sum_abs / (sink_frames * 2.0) : 0; sink_sum_abs = 0; sink_frames = 0; return v; }
@@ -766,6 +768,22 @@ int main(int argc, char **argv)
         CHECK((int8_t)st[PVA_ST_EQ] == 12 && (int8_t)st[PVA_ST_EQ + 1] == -12, "gains are kept within +-12 dB");
         int8_t z[5] = { 0 };
         cmd(PVA_C_EQ, z, 5);
+        printf("[balance]\n");
+        struct { uint8_t b; double l, r; } bal[] = { { 50, 1, 1 }, { 0, 1, 0 }, { 100, 0, 1 }, { 75, 0.5, 1 }, { 25, 1, 0.5 } };
+        double ref_l = 0, ref_r = 0;
+        for (unsigned k = 0; k < sizeof bal / sizeof bal[0]; k++)
+        {
+            CHECK(cmd_u8(PVA_C_BALANCE, bal[k].b) == PVA_OK, "BALANCE %u", bal[k].b);
+            run_ms(300);
+            sink_l = sink_r = 0;
+            run_ms(1500);
+            double l = (double)sink_l, r = (double)sink_r;
+            if (k == 0) { ref_l = l; ref_r = r; }
+            read_status();
+            CHECK(st[PVA_ST_BALANCE] == bal[k].b && fabs(l / ref_l - bal[k].l) < 0.05 && fabs(r / ref_r - bal[k].r) < 0.05,
+                  "balance %u: left %.2f, right %.2f", bal[k].b, l / ref_l, r / ref_r);
+        }
+        cmd_u8(PVA_C_BALANCE, 50);
         cmd(PVA_C_STOP, NULL, 0);
     }
 

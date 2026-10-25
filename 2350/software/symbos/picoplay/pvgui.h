@@ -180,10 +180,14 @@ _transfer Ctrl_Text cd_eqf2 = { "1k",  (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LE
 _transfer Ctrl_Text cd_eqf3 = { "4k",  (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
 _transfer Ctrl_Text cd_eqf4 = { "12k", (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
 _data char txt_preset[24];
+_transfer Ctrl_Slider cd_bal = { SLIDER_H | SLIDER_VALUE, 0, 50, 100, 5, -5 };
+_data char txt_bal[12];
+_transfer Ctrl_Text cd_balt = { "Balance", (COLOR_RED << 2) | COLOR_ORANGE, ALIGN_LEFT };
+_transfer Ctrl_Text cd_balv = { txt_bal, (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
 _transfer Ctrl_Text cd_preset = { txt_preset, (COLOR_BLACK << 2) | COLOR_ORANGE | TEXT_FILL, ALIGN_LEFT };
 enum {
     E_BG, E_S0, E_S1, E_S2, E_S3, E_S4, E_V0, E_V1, E_V2, E_V3, E_V4, E_F0, E_F1, E_F2, E_F3, E_F4,
-    E_P0, E_P1, E_P2, E_P3, E_P4, E_P5, E_P6, E_P7, E_NAME, E_COUNT
+    E_P0, E_P1, E_P2, E_P3, E_P4, E_P5, E_P6, E_P7, E_NAME, E_BALT, E_BAL, E_BALV, E_COUNT
 };
 #define EQ_X(i) (14 + (i) * 34)
 _transfer Ctrl ectl_bg = { E_BG, C_AREA,   -1, COLOR_ORANGE, 0, 0, 10000, 10000 };
@@ -210,10 +214,13 @@ _transfer Ctrl ectl_p4 = { E_P4, C_BUTTON, -1, (unsigned short)"Classic",  4, 98
 _transfer Ctrl ectl_p5 = { E_P5, C_BUTTON, -1, (unsigned short)"Voice",   50, 98, 44, 12 };
 _transfer Ctrl ectl_p6 = { E_P6, C_BUTTON, -1, (unsigned short)"Bass",    96, 98, 44, 12 };
 _transfer Ctrl ectl_p7 = { E_P7, C_BUTTON, -1, (unsigned short)"Loud",   142, 98, 44, 12 };
-_transfer Ctrl ectl_nm = { E_NAME, C_TEXT, -1, (unsigned short)&cd_preset, 4, 113, 182, 8 };
+_transfer Ctrl ectl_nm = { E_NAME, C_TEXT, -1, (unsigned short)&cd_preset, 4, 127, 182, 8 };
+_transfer Ctrl ectl_bt = { E_BALT, C_TEXT, -1, (unsigned short)&cd_balt, 4, 114, 36, 8 };
+_transfer Ctrl ectl_bl = { E_BAL, C_SLIDER, -1, (unsigned short)&cd_bal, 42, 114, 96, 8 };
+_transfer Ctrl ectl_bv = { E_BALV, C_TEXT, -1, (unsigned short)&cd_balv, 142, 114, 44, 8 };
 _transfer Ctrl_Group ectrls = { E_COUNT, 0, &ectl_bg };
 #define EQ_W 190
-#define EQ_H 123
+#define EQ_H 137
 _transfer Window win_eq = {
     WIN_NORMAL,
     WIN_CLOSE | WIN_TITLE | WIN_ICON,
