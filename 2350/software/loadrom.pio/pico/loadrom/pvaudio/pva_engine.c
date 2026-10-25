@@ -1225,6 +1225,12 @@ static int cmd_diag(void)
     }
     else if (!pva_net_capacity())
         n += snprintf(t + n, sizeof t - (size_t)n, "Streams: no buffer memory\r\n");
+    {
+        int8_t g[PVA_EQ_BANDS];
+        pva_eq_get(g);
+        n += snprintf(t + n, sizeof t - (size_t)n, "Sound: volume %u, balance %u, EQ %d %d %d %d %d dB\r\n",
+                      (unsigned)volume, (unsigned)balance, g[0], g[1], g[2], g[3], g[4]);
+    }
     if (pva_dir_available())
         n += snprintf(t + n, sizeof t - (size_t)n, "Radio list: state %u, %u entries%s, error %u, HTTP %u\r\n",
                       (unsigned)pva_dir_state(), (unsigned)pva_dir_count(), pva_dir_truncated() ? " (cut)" : "",

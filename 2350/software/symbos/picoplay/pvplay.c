@@ -997,10 +997,21 @@ static void eq_texts(void)
     }
 }
 
+/* an older engine does not know the command: say so instead of nothing happening */
+static void sound_result(int r, char *what)
+{
+    char t[72];
+    if (r != PVA_E_UNKNOWN)
+        return;
+    strcpy(t, what);
+    strcat(t, " needs a newer engine: flash the new UF2");
+    set_status(t);
+}
+
 static void eq_send(void)
 {
-    pv_cmd(PVA_C_EQ, (char *)eq_gain, EQ_BANDS);
-    pv_cmd_u8(PVA_C_BALANCE, balance);
+    sound_result(pv_cmd(PVA_C_EQ, (char *)eq_gain, EQ_BANDS), "Equalizer");
+    sound_result(pv_cmd_u8(PVA_C_BALANCE, balance), "Balance");
 }
 
 static void eq_save(void)
@@ -1123,7 +1134,7 @@ static void eq_click(unsigned char ctrl)
             cd_bal.value = 100;
         /* snap to the centre near it, so "Centre" is easy to find */
         balance = (cd_bal.value > 46 && cd_bal.value < 54) ? 50 : (unsigned char)cd_bal.value;
-        pv_cmd_u8(PVA_C_BALANCE, balance);
+        sound_result(pv_cmd_u8(PVA_C_BALANCE, balance), "Balance");
         eq_texts();
         eq_dirty = 15;
         Win_Redraw(eq_id, E_BAL, 0);
