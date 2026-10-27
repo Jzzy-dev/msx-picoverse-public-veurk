@@ -11,7 +11,8 @@
 // A mouse in port 1 (optional): PICOAMP_MOUSE="t:x,y,b;t:x,y,b;..." - from t
 // seconds on the pointer goes to (x, y) (screen pixels, it starts at 128, 96)
 // with buttons b held (1 left, 2 right, 3 both). The harness answers GTPAD
-// with the offsets an MSX mouse gives (they count the other way).
+// as the BIOS does (+ is right / down; the BIOS turns the mouse's own
+// offsets round).
 //
 // It prints how long each main loop pass took (frames) and how long the
 // program took to answer the keys.
@@ -38,6 +39,9 @@ extern uint32_t host_audio_frames, host_audio_underruns;
 #define ENGINE  0x8D
 
 static uint8_t mem[65536];
+static unsigned long prof[65536], prof_next;       // PC samples (PICOAMP_PROF)
+static int prof_on;
+static unsigned long rd_ram, wr_ram, busy_cyc;                // the Z80's RAM traffic
 static uint8_t vram[0x4000];
 static uint16_t vaddr;
 static bool vlatch;
@@ -79,12 +83,14 @@ static uint8_t rd(void *u, uint16_t a)
 {
     (void)u;
     if (page1 == ENGINE && a >= 0x4000 && a < 0x8000) { sync_engine(); return pva_mem_read(a); }
+    rd_ram++;
     return mem[a];
 }
 static void wr(void *u, uint16_t a, uint8_t v)
 {
     (void)u;
     if (page1 == ENGINE && a >= 0x4000 && a < 0x8000) { sync_engine(); pva_mem_write(a, v); return; }
+    wr_ram++;
     if (a >= 0x100) mem[a] = v;
 }
 static uint8_t pin(z80 *z, uint8_t p) { (void)z; if (p == 0x99) vlatch = false; return 0; }
@@ -157,7 +163,7 @@ static int run(unsigned long max_cyc)
             mem[0xFC9E] = (uint8_t)j; mem[0xFC9F] = (uint8_t)(j >> 8);
             if (cpu.iff1) cpu.halted = false;
         }
-        if (cpu.halted) { cpu.cyc += 4; continue; }
+        if (cpu.halted) { cpu.cyc += 4; busy_cyc += 4; continue; }
         switch (cpu.pc)
         {
             case 0x0000: return 0;
@@ -217,7 +223,7 @@ static int run(unsigned long max_cyc)
                         // move towards the target, at most 12 pixels a read
                         int dx = clampi(m_tx - m_x, -12, 12), dy = clampi(m_ty - m_y, -12, 12);
                         m_x += dx; m_y += dy;
-                        m_dx = -dx; m_dy = -dy;
+                        m_dx = dx; m_dy = dy;     // GTPAD: + is right / down
                         cpu.a = 0xFF;
                     }
                     else if (cpu.a == 13) cpu.a = (uint8_t)m_dx;
@@ -242,6 +248,7 @@ static int run(unsigned long max_cyc)
                 cpu.cyc += 400;
                 continue;
         }
+        if (prof_on && cpu.cyc >= prof_next) { prof[cpu.pc]++; prof_next = cpu.cyc + 97; }
         if (mem[cpu.pc] == 0x76)    // HALT: a main loop pass ended
         {
             unsigned long gap = frames - last_halt_frame;
@@ -274,6 +281,7 @@ int main(int argc, char **argv)
     const char *a = argv[3];
     keys = argv[4];
     mouse_script(getenv("PICOAMP_MOUSE"));
+    prof_on = getenv("PICOAMP_PROF") != NULL;
     size_t al = strlen(a);
     mem[0x80] = (uint8_t)(al ? al + 1 : 0);
     mem[0x81] = ' ';
@@ -296,6 +304,14 @@ int main(int argc, char **argv)
     printf("[%s after %.1f s: %lu frames, %lu loop passes (%.1f frames each), worst %lu frames, %lu VRAM bytes, %u audio underruns]\n",
            r ? "time up" : "exit", cpu.cyc / (double)HZ, frames, halts, halts ? (double)frames / halts : 0.0, worst_gap, vwrites,
            host_audio_underruns);
+    printf("[RAM: %.0f reads, %.0f writes a second; busy %.0f%% (not in HALT)]\n",
+           rd_ram / (cpu.cyc / (double)HZ), wr_ram / (cpu.cyc / (double)HZ), 100.0 - 100.0 * busy_cyc / cpu.cyc);
+    if (prof_on)
+    {
+        FILE *pf = fopen(getenv("PICOAMP_PROF"), "w");
+        for (int i = 0; i < 65536; i++) if (prof[i]) fprintf(pf, "%04X %lu\n", i, prof[i]);
+        fclose(pf);
+    }
     {
         const char *d = getenv("PICOAMP_DUMP");     // "addr,len;addr,len" (hex)
         while (d && *d)

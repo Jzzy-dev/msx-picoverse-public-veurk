@@ -2822,55 +2822,67 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offse
     msx_pio_io_bus_init();
     msx_pio_bus_init();
 
+    // Memory and I/O writes. They are also drained right before a read is
+    // answered: a write the Z80 made just before (the sub-slot register at
+    // FFFFh, a mapper port, a byte of RAM it reads back) must land first, or
+    // the read sees the old state (a wrong sub-slot, segment or byte), which
+    // crashed MSX-DOS programs that switch slots often.
+#define PVA_DRAIN_WRITES()                                                              \
+    do {                                                                                \
+        uint16_t waddr;                                                                 \
+        uint8_t wdata;                                                                  \
+        while (pio_try_get_write(&waddr, &wdata))                                       \
+        {                                                                               \
+            if (waddr == 0xFFFFu)                                                       \
+            {                                                                           \
+                subslot_reg = wdata;                                                    \
+                continue;                                                               \
+            }                                                                           \
+            uint8_t wpage = (waddr >> 14) & 0x03u;                                      \
+            uint8_t wsub = (subslot_reg >> (wpage * 2)) & 0x03u;                        \
+            if (wsub == 0)                                                              \
+            {                                                                           \
+                if (wifi_enable)                                                        \
+                    (void)wifi_handle_mem_write(waddr, wdata);                          \
+            }                                                                           \
+            else if (wsub == 1)                                                         \
+            {                                                                           \
+                if (waddr >= 0x4000u && waddr <= 0x7FFFu)                               \
+                    sunrise_ide_handle_write(&ide, waddr, wdata);                       \
+            }                                                                           \
+            else if (wsub == 2)                                                         \
+            {                                                                           \
+                uint8_t mapper_page = mapper_page_from_reg(mapper_reg[wpage]);          \
+                uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu); \
+                mapper_write_byte(mapper_offset, wdata);                                \
+            }                                                                           \
+            else if (wpage == 1)                                                        \
+            {                                                                           \
+                pva_mem_write(waddr, wdata);                                            \
+            }                                                                           \
+        }                                                                               \
+        uint16_t iwaddr;                                                                \
+        uint8_t iwdata;                                                                 \
+        while (pio_try_get_io_write(&iwaddr, &iwdata))                                  \
+        {                                                                               \
+            uint8_t port = iwaddr & 0xFFu;                                              \
+            if (port >= 0xFCu)                                                          \
+                mapper_reg[port - 0xFCu] = iwdata & 0x3Fu;                              \
+        }                                                                               \
+    } while (0)
+
     while (true)
     {
         if (wifi_enable)
             wifi_service_rx();
 
-        uint16_t waddr;
-        uint8_t wdata;
-        while (pio_try_get_write(&waddr, &wdata))
-        {
-            if (waddr == 0xFFFFu)
-            {
-                subslot_reg = wdata;
-                continue;
-            }
-            uint8_t page = (waddr >> 14) & 0x03u;
-            uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
-            if (active_subslot == 0)
-            {
-                if (wifi_enable)
-                    (void)wifi_handle_mem_write(waddr, wdata);
-            }
-            else if (active_subslot == 1)
-            {
-                if (waddr >= 0x4000u && waddr <= 0x7FFFu)
-                    sunrise_ide_handle_write(&ide, waddr, wdata);
-            }
-            else if (active_subslot == 2)
-            {
-                uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
-                uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
-                mapper_write_byte(mapper_offset, wdata);
-            }
-            else if (page == 1)
-            {
-                pva_mem_write(waddr, wdata);
-            }
-        }
+        PVA_DRAIN_WRITES();
 
         {
             uint16_t io_addr;
-            uint8_t io_data;
-            while (pio_try_get_io_write(&io_addr, &io_data))
-            {
-                uint8_t port = io_addr & 0xFFu;
-                if (port >= 0xFCu)
-                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
-            }
             while (pio_try_get_io_read(&io_addr))
             {
+                PVA_DRAIN_WRITES();
                 uint8_t port = io_addr & 0xFFu;
                 bool in_window = false;
                 uint8_t data = 0xFFu;
@@ -2886,6 +2898,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offse
         if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
         {
             uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            PVA_DRAIN_WRITES();                 // whatever the Z80 wrote before this read
             uint8_t data = 0xFFu;
             bool in_window = true;              // always drive the bus when our slot is selected
 
@@ -2932,6 +2945,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offse
             pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
         }
     }
+#undef PVA_DRAIN_WRITES
 }
 
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)

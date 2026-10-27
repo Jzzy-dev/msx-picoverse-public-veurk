@@ -109,7 +109,6 @@ V_PEAK   equ #20
 V_VU     equ #40
 V_SCOPE  equ #48
 V_FREQ   equ #90
-V_COPY   equ #C0            ; bytes copied each frame (up to the frequencies)
 NBARS    equ 24
 
 ; palette indices (set by setpal)
@@ -233,6 +232,10 @@ bss_init:
         ld bc,64
         ld a,40
         call memset
+        ld hl,bar_last
+        ld bc,(NBARS+2)*4       ; and bar_raw
+        ld a,#FF
+        call memset
         ld a,#FF
         ld (tk_title+T_ROW),a
         ld (tk_artist+T_ROW),a
@@ -288,14 +291,36 @@ eng_copy:
         ei
         ret
 
+; the picture data (only when the engine has new data: its sequence byte
+; changed) and the display generation of the status, with page 1 switched
+; to the engine once
 fetch_frame:
-        ld hl,W_VIZ
-        ld de,viz
-        ld bc,V_COPY
-        call eng_copy
-        ld hl,W_STATUS+ST_DGEN
-        call rd
+        di
+        ld a,(slot)
+        ld h,#40
+        call ENASLT
+        di
+        ld a,(W_STATUS+ST_DGEN)
         ld (gen_new),a
+        ld a,(W_VIZ+V_SEQ)
+        ld hl,viz_seq
+        cp (hl)
+        jr z,.same
+        ld (hl),a
+        ld bc,V_SCOPE           ; levels, peaks, VU
+        ld a,(view)
+        or a
+        jr z,.cp
+        ld bc,V_SCOPE+64        ; and the scope
+.cp:    ld hl,W_VIZ
+        ld de,viz
+        ldir
+        ld a,1
+        ld (viz_new),a
+.same:  ld a,(RAMAD1)
+        ld h,#40
+        call ENASLT
+        ei
         ret
 
 fetch_status:
@@ -949,6 +974,11 @@ freq_label:
 ; or the equalizer. The VU meters (columns 26 and 29) are always drawn.
 
 draw_view:
+        ld a,(viz_new)
+        or a
+        ret z
+        xor a
+        ld (viz_new),a
         ld a,(eq_open)
         or a
         jp nz,draw_vu
@@ -971,7 +1001,15 @@ show_view:
         ld a,(view)
         or a
         jr nz,.scope
-        ld hl,cellcache         ; every bar cell drawn again
+        ld hl,bar_raw           ; every bar cell drawn again
+        ld bc,NBARS*2
+        ld a,#FF
+        call memset
+        ld hl,bar_last
+        ld bc,NBARS*2
+        ld a,#FF
+        call memset
+        ld hl,cellcache
         ld bc,NBARS*10
         ld a,#FF
         jp memset
@@ -1037,11 +1075,13 @@ bars_from:
 .b:     ld a,b
         cp NBARS
         jr nc,.vu
+        ld e,b
+        ld d,0
         ld hl,viz+V_LEVEL
-        call idx
+        add hl,de
         ld c,(hl)
         ld hl,viz+V_PEAK
-        call idx
+        add hl,de
         ld a,(hl)
         ld (pk_level),a
         ld a,b
@@ -1062,11 +1102,28 @@ bars_from:
         ld e,29
 .l:     ld a,e
         ld (bar_col),a
-.draw:  push bc
+.draw:  push bc                 ; the same level and peak as drawn: skip it
         ld a,b
         ld (bar_no),a
+        add a,a
+        ld e,a
+        ld d,0
+        ld hl,bar_raw
+        add hl,de
+        ld a,c
+        cp (hl)
+        jr nz,.new
+        inc hl
+        ld a,(pk_level)
+        cp (hl)
+        jr z,.skip
+        dec hl
+.new:   ld (hl),c
+        inc hl
+        ld a,(pk_level)
+        ld (hl),a
         call draw_bar
-        pop bc
+.skip:  pop bc
         inc b
         ld a,b
         cp NBARS+2
@@ -1103,6 +1160,60 @@ draw_bar:
         jr c,.pk2
         ld a,19
 .pk2:   ld (pk),a
+        ; the same as last time: nothing to do
+        ld a,(bar_no)
+        add a,a
+        ld e,a
+        ld d,0
+        ld hl,bar_last
+        add hl,de
+        ld a,(lit)
+        cp (hl)
+        jr nz,.chg
+        inc hl
+        ld a,(pk)
+        cp (hl)
+        ret z
+        dec hl
+.chg:   ; only the cells between the old and the new top, and the peaks
+        ld b,(hl)               ; old lit
+        inc hl
+        ld c,(hl)               ; old peak
+        ld a,(pk)
+        ld (hl),a
+        dec hl
+        ld a,(lit)
+        ld (hl),a
+        ld a,b
+        cp #FF
+        jr nz,.part
+        ld de,#0900             ; unknown: all of it (D = 9, E = 0)
+        jr .range
+.part:  ld e,a                  ; E = lowest segment, D = highest
+        ld d,a
+        ld a,(lit)
+        call .mm
+        ld a,c
+        call .mmp
+        ld a,(pk)
+        call .mmp
+        ld a,e                  ; cells: segment / 2 (a changed top is the
+        srl a                   ; segment just under it)
+        jr z,.lo0
+        ld a,e
+        dec a
+        srl a
+.lo0:   ld e,a
+        ld a,d
+        srl a
+        cp 10
+        jr c,.hi
+        ld a,9
+.hi:    ld d,a
+.range: ld a,e
+        ld (cell_hi),a          ; (used as the first cell)
+        ld a,d
+        ld (cell_top),a
         ; the cache of this bar's cells
         ld a,(bar_no)
         ld l,a
@@ -1116,7 +1227,18 @@ draw_bar:
         ld de,cellcache
         add hl,de
         ld (cache_p),hl
-        ld b,0                  ; cell 0 = bottom
+        ld a,(cell_hi)
+        ld b,a                  ; cell 0 = bottom
+        jr .c
+.mmp:   cp #FF                  ; a peak (FF: none)
+        ret z
+.mm:    cp e                    ; E = min(E, A), D = max(D, A)
+        jr nc,.m1
+        ld e,a
+.m1:    cp d
+        ret c
+        ld d,a
+        ret
 .c:     ; code: bit0 lower lit, bit1 upper lit, bit2 lower peak, bit3 upper peak
         ld a,b
         add a,a
@@ -1143,8 +1265,9 @@ draw_bar:
         jr nz,.n4
         set 3,c
 .n4:    ld hl,(cache_p)
-        ld a,b
-        call idx
+        ld e,b
+        ld d,0
+        add hl,de
         ld a,(hl)
         cp c
         jr z,.next
@@ -1152,11 +1275,11 @@ draw_bar:
         push bc
         call bar_cell
         pop bc
-.next:  inc b
-        ld a,b
-        cp 10
-        jr c,.c
-        ret
+.next:  ld a,(cell_top)
+        cp b
+        ret z
+        inc b
+        jr .c
 
 ; bar_cell: C = code, B = cell (0 bottom)
 bar_cell:
@@ -1430,6 +1553,10 @@ draw_scope:
         ld a,(viz+V_SEQ)
         bit 0,a
         ret nz
+        ld hl,scope_tick        ; every other update (25 a second): the trace
+        inc (hl)                ; is the busiest drawing, and the MSX's RAM is
+        bit 0,(hl)              ; the cartridge's, shared with the decoder
+        jp nz,draw_vu
         ld a,#A1                ; and c
         ld (vspan.op),a
         ld a,#FF
@@ -3028,8 +3155,7 @@ mouse:  ld a,(ms_port)
 .found: ld (ms_port),a
         jr .move
 .read:  call ms_read
-.move:  ld a,(ms_dx)            ; the offsets count the other way
-        neg
+.move:  ld a,(ms_dx)            ; GTPAD's offsets: + is right / down
         call sext
         ld a,(ms_x)
         ld l,a
@@ -3045,7 +3171,6 @@ mouse:  ld a,(ms_port)
 .x2:    ld a,l
         ld (ms_x),a
         ld a,(ms_dy)
-        neg
         call sext
         ld a,(ms_y)
         ld l,a
@@ -3885,6 +4010,9 @@ result:         db 0
 t0:             dw 0
 rlen:           dw 0
 gen_new:        db 0
+viz_seq:        db #FF
+viz_new:        db 0
+scope_tick:     db 0
 gen_shown:      db #FF
 loading:        db 0
 vol_shown:      db #FF
@@ -3905,6 +4033,8 @@ bar_no:         db 0
 pk_level:       db 0
 lit:            db 0
 pk:             db 0
+cell_hi:        db 0
+cell_top:       db 0
 cache_p:        dw 0
 cellcol:        db 0
 cellpat:        ds 8
@@ -3967,7 +4097,7 @@ scope_old       equ tk_end              ; the trace on screen (64 y values)
 cellcache       equ scope_old + 64      ; (NBARS + 2) x 10 bar cells
 st              equ cellcache + (NBARS+2)*10
 viz             equ st + 224
-args            equ viz + V_COPY        ; 256
+args            equ viz + V_SCOPE + 64  ; 256
 reply           equ args + 256          ; REPLY_MAX + 1
 linebuf         equ reply + REPLY_MAX + 1
 path            equ linebuf + 64
@@ -3975,5 +4105,7 @@ argbuf          equ path + 64           ; 128
 numbuf          equ argbuf + 128
 eqg             equ numbuf + 8          ; the equalizer screen's gains
 eqcols          equ eqg + 8             ; 3 x 24 colours of its parts
-bss_end         equ eqcols + 72
+bar_last        equ eqcols + 72         ; (NBARS + 2) x (lit segments, peak) drawn
+bar_raw         equ bar_last + (NBARS+2)*2  ; (level, peak) from the engine, drawn
+bss_end         equ bar_raw + (NBARS+2)*2
         assert bss_end < #4000

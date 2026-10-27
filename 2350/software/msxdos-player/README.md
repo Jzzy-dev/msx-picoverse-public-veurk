@@ -100,6 +100,9 @@ A mouse in either port is used as soon as it moves. An arrow appears.
   closes the screen.
 * **Close box** in the title bar: quit.
 
+An empty port (or a joystick) is not taken for a mouse: a mouse is used only
+after it has reported standing still once.
+
 ![Mouse on the equalizer](images/picoamp_mouse.png)
 
 ## How it works
@@ -109,10 +112,12 @@ A mouse in either port is used as soon as it moves. An arrow appears.
   bitmap with two colours per 8-pixel row. Text is the MSX font from the BIOS,
   moved one pixel right. The mouse pointer is two 8x8 sprites (the arrow and
   its shadow). The palette is set by the program and restored on exit.
-* Each frame PICOAMP maps the engine into page 1 and copies its
-  visualisation block (`4C00h`: levels, peaks, VU, scope samples). It does
-  the same for the status block, but only when the engine's display
-  generation has changed. Only the cells that changed are redrawn.
+* Each frame PICOAMP maps the engine into page 1 once, reads the display
+  generation and, when the engine has new data, copies its visualisation
+  block (`4C00h`: levels, peaks, VU, scope samples). The status block is
+  copied only when the display generation has changed. Bars whose level and
+  peak did not change are skipped; of the others only the cells between the
+  old and the new top are redrawn.
 * The oscilloscope and the equalizer are drawn into a 192 x 80 pixel buffer
   in RAM, in the order of the pattern table, so each row of cells goes to the
   VDP in one run. The scope takes its old trace off and puts the new one on,
@@ -132,7 +137,7 @@ python3 gen_tables.py > tables.inc      # scope and buffer tables (already gener
 sjasmplus --nologo --msg=war --raw=PICOAMP.COM picoamp.asm
 ```
 
-PICOAMP.COM is about 8.2 KB; with its buffers it uses memory up to about 3810h
+PICOAMP.COM is about 8.5 KB; with its buffers it uses memory up to about 3920h
 (page 1 has to stay free for the engine).
 
 ### Tests
@@ -154,9 +159,17 @@ Each key in the key string is half a second: `{` up, `}` down, `<` left,
 `PICOAMP_MOUSE="t:x,y,b;..."` moves the mouse to (x, y) from t seconds on with
 buttons b held (1 left, 2 right). `PICOAMP_DUMP="addr,len;..."` prints memory
 at the end. The harness prints how many frames each main loop pass took and
-how quickly each key was answered. On a 3.58 MHz Z80 a pass takes about 2
-frames (2.5 with the oscilloscope); equalizer changes are answered in 1-3
-frames.
+how quickly each key was answered, and how busy the Z80 is and how much it
+reads and writes its RAM. On a 3.58 MHz Z80 a pass takes about 1.1 frames
+with the spectrum (the Z80 is idle 75% of the time), about 1.5 with the
+oscilloscope; equalizer changes are answered in 1-3 frames.
+`PICOAMP_PROF=file` writes a profile (program counter samples).
+
+Keeping the Z80 idle matters on the cartridge: in MSX-DOS the main RAM is
+the cartridge's 1 MB mapper, in PSRAM behind the same RP2350 cache the
+decoder runs from. So PICOAMP draws only what changed, copies the engine's
+data only when the engine has new data, and draws the oscilloscope 25 times a
+second.
 
 `test/mkimg_picoamp.c` makes a card image with long file names and long tags
 (for the tickers). `test/fatput.c` copies files into a card image, for
