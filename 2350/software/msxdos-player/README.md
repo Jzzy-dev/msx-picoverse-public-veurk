@@ -72,7 +72,7 @@ PICOAMP shows "LOADING THE LIST...".
 | F | Add the chosen station (or the one that plays) to the favourites |
 | D or DEL | Remove the chosen station from the favourites (in Internet radio/Favourites) |
 | / or J | Search the station directory by name |
-| ? | The help page with all the keys (any key closes it) |
+| ? | The help page with all the keys (any key closes it); the credits at its bottom change colour on the beat of the music |
 | ESC / Q | Quit to MSX-DOS (the music keeps playing) |
 
 ### Favourites

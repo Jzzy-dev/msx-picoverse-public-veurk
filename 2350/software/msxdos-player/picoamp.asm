@@ -1006,7 +1006,7 @@ draw_view:
         ld (viz_new),a
         ld a,(help_on)
         or a
-        ret nz
+        jp nz,help_beat
         ld a,(fs_on)
         or a
         jp nz,fs_draw
@@ -3839,10 +3839,10 @@ help_open:
         ld d,0
 .l:     ld a,d
         cp 24
-        ret nc                  ; (the screen has 24 rows)
+        jp nc,help_credits      ; (the screen has 24 rows)
         ld a,(hl)
         cp #FF
-        ret z
+        jp z,help_credits
         ld c,a                  ; each line: colour, text, 0
         inc hl
         push de
@@ -3858,6 +3858,107 @@ help_open:
         jr nz,.z
         inc d
         jr .l
+
+; the credits at the bottom right, in 8-pixel letters (a cell each, so
+; each word can have colours of its own)
+help_credits:
+        ld de,#170B
+        ld hl,txt_credits
+        ld b,21
+        ld c,WHITE*16+NAVY
+        call put_str
+        xor a
+        ld (bt_avg),a
+        ld (bt_gap),a
+        ret
+
+; on a beat (the bass jumps above its running average) every word of the
+; credits gets the next background colour, each word a step apart
+help_beat:
+        ld a,(viz+V_SEQ)
+        bit 0,a
+        ret nz
+        ld a,(bt_gap)
+        or a
+        jr z,.g
+        dec a
+        ld (bt_gap),a
+.g:     ld a,(viz+V_LEVEL)      ; the bass: the loudest of the lowest 3 bands
+        ld b,a
+        ld a,(viz+V_LEVEL+1)
+        cp b
+        jr c,.b1
+        ld b,a
+.b1:    ld a,(viz+V_LEVEL+2)
+        cp b
+        jr c,.b2
+        ld b,a
+.b2:    ld a,(bt_avg)           ; average * 8: avg += bass - avg / 8
+        ld c,a
+        srl a
+        srl a
+        srl a
+        ld d,a                  ; D = the average
+        ld a,c
+        sub d
+        add a,b
+        ld (bt_avg),a
+        ld a,b
+        cp 12
+        ret c                   ; too quiet
+        ld a,d
+        add a,3
+        cp b
+        ret nc                  ; not above the average
+        ld a,(bt_gap)
+        or a
+        ret nz                  ; too soon after the last one
+        ld a,12
+        ld (bt_gap),a           ; (at most about 4 a second)
+        ld a,(bt_n)
+        inc a
+        cp 7
+        jr c,.n
+        xor a
+.n:     ld (bt_n),a
+        ld ix,cred_words
+        ld c,a                  ; the colour of the first word
+.w:     ld a,(ix+0)
+        or a
+        ret z
+        push bc
+        ld b,0
+        ld hl,beat_cols
+        add hl,bc
+        ld a,(hl)               ; the colour byte
+        ld e,(ix+0)             ; column
+        ld b,(ix+1)             ; letters
+.l:     push bc
+        push af
+        ld d,#17
+        call cell_addr
+        ld a,h
+        add a,#20
+        ld h,a
+        call vwrite
+        pop af
+        ld b,8
+.c:     out (VDP_D),a
+        djnz .c
+        ei
+        inc e
+        pop bc
+        djnz .l
+        pop bc
+        ld a,c
+        add a,2                 ; the next word: two colours on
+        cp 7
+        jr c,.w2
+        sub 7
+.w2:    ld c,a
+        inc ix
+        inc ix
+        jr .w
 
 help_close:                     ; (help_text: 24 lines at most, one a row)
         xor a
@@ -5645,7 +5746,7 @@ help_text:
         db #4E,"  Internet radio/Favourites)",0
         db #4E,"Mouse: click to choose, again to play;",0
         db #4E,"       the right button goes back",0
-        db #6E,"                 press a key",0
+        db #6E,"press a key",0
         db #FF
 txt_program:    db "PROGRAM",0
 txt_favpath:    db "/Internet radio/Favourites",0
@@ -5661,6 +5762,10 @@ txt_favwhere:   db "Choose it in Internet radio/Favourites",0
 txt_favnot:     db "Not in RADIOFAV.M3U",0
 txt_favremoved: db "Removed from the favourites",0
 txt_search:     db "Search: ",0
+txt_credits:    db "by JZZY & CLAUDE 2026",0
+cred_words:     db 11,2, 14,4, 19,1, 21,6, 28,4, 0     ; column, letters
+beat_cols:      db WHITE*16+RED, NAVY*16+ORANGE, NAVY*16+YELLOW, NAVY*16+GREEN
+                db NAVY*16+CYAN, WHITE*16+BLUE, WHITE*16+MAGENTA
 txt_srchnone:   db "No stations found",0
 txt_srchwifi:   db "Search: no WiFi (the ESP) for the directory",0
 txt_srchfail:   db "Search: the engine is too old (0.9 or newer)",0
@@ -5828,6 +5933,9 @@ ms_prev:        db 0
 ms_try:         db 0
 ms_rest:        db 0                    ; bit 0 / 1: port 1 / 2 gave 0,0
 help_on:        db 0
+bt_avg:         db 0
+bt_gap:         db 0
+bt_n:           db 0
 srch_on:        db 0
 srch_wait:      db 0
 srch_len:       db 0
