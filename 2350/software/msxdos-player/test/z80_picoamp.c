@@ -8,6 +8,11 @@
 //   keys: one character per half second; '{' up '}' down '<' left '>' right,
 //   '^' Enter, '_' Backspace, '.' nothing, others as they are
 //
+// A mouse in port 1 (optional): PICOAMP_MOUSE="t:x,y,b;t:x,y,b;..." - from t
+// seconds on the pointer goes to (x, y) (screen pixels, it starts at 128, 96)
+// with buttons b held (1 left, 2 right, 3 both). The harness answers GTPAD
+// with the offsets an MSX mouse gives (they count the other way).
+//
 // It prints how long each main loop pass took (frames) and how long the
 // program took to answer the keys.
 
@@ -45,6 +50,25 @@ static unsigned long next_key_cyc;
 static unsigned long frames, halts, last_halt_frame, worst_gap;
 static unsigned long key_frame, answered = 1;
 static unsigned long vwrites;
+
+// the mouse
+static struct { double t; int x, y, b; } mev[64];
+static int mev_n, mev_i;
+static int m_x = 128, m_y = 96, m_tx = 128, m_ty = 96, m_b;
+static int m_dx, m_dy;
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static void mouse_script(const char *s)
+{
+    while (s && *s && mev_n < 64)
+    {
+        double t; int x, y, b, n;
+        if (sscanf(s, "%lf:%d,%d,%d%n", &t, &x, &y, &b, &n) != 4) break;
+        mev[mev_n].t = t; mev[mev_n].x = x; mev[mev_n].y = y; mev[mev_n].b = b;
+        mev_n++;
+        s += n;
+        if (*s == ';') s++;
+    }
+}
 
 static void sync_engine(void)
 {
@@ -165,6 +189,7 @@ static int run(unsigned long max_cyc)
                 else if (a == 0x0004) cpu.a = 0x00;          // CGTABL -> 3000h (fake ROM)
                 else if (a == 0x0005) cpu.a = 0x30;
                 else if (a >= 0x3000 && a < 0x3800) cpu.a = font[a - 0x3000];
+                else if (a == 0x002B) cpu.a = 0x00;          // 60 Hz
                 else cpu.a = 0xFF;
                 cpu.iff1 = cpu.iff2 = false;
                 ret();
@@ -177,10 +202,39 @@ static int run(unsigned long max_cyc)
                 ret();
                 cpu.cyc += 150;
                 continue;
-            case 0x001C:                // CALSLT: CHGMOD etc. do nothing here
+            case 0x001C:                // CALSLT: the mouse BIOS calls; CHGMOD etc. do nothing here
+            {
+                double now = cpu.cyc / (double)HZ;
+                while (mev_i < mev_n && mev[mev_i].t <= now)
+                {
+                    m_tx = mev[mev_i].x; m_ty = mev[mev_i].y; m_b = mev[mev_i].b;
+                    mev_i++;
+                }
+                if (cpu.ix == 0x00DB && mev_n)          // GTPAD
+                {
+                    if (cpu.a == 12)
+                    {
+                        // move towards the target, at most 12 pixels a read
+                        int dx = clampi(m_tx - m_x, -12, 12), dy = clampi(m_ty - m_y, -12, 12);
+                        m_x += dx; m_y += dy;
+                        m_dx = -dx; m_dy = -dy;
+                        cpu.a = 0xFF;
+                    }
+                    else if (cpu.a == 13) cpu.a = (uint8_t)m_dx;
+                    else if (cpu.a == 14) cpu.a = (uint8_t)m_dy;
+                    else cpu.a = 0xFF;                  // port 2: nothing
+                    cpu.cyc += 3000;
+                }
+                else if (cpu.ix == 0x00DB) { cpu.a = 0xFF; cpu.cyc += 3000; }
+                else if (cpu.ix == 0x00D8)              // GTTRIG
+                {
+                    cpu.a = ((cpu.a == 1 && (m_b & 1)) || (cpu.a == 3 && (m_b & 2))) ? 0xFF : 0;
+                    cpu.cyc += 300;
+                }
+                else cpu.cyc += 2000;
                 ret();
-                cpu.cyc += 2000;
                 continue;
+            }
             case 0x0024:                // ENASLT A = slot, H = page
                 if ((cpu.h & 0xC0) == 0x40) page1 = cpu.a;
                 cpu.iff1 = cpu.iff2 = false;
@@ -219,6 +273,7 @@ int main(int argc, char **argv)
     pva_core1_init();
     const char *a = argv[3];
     keys = argv[4];
+    mouse_script(getenv("PICOAMP_MOUSE"));
     size_t al = strlen(a);
     mem[0x80] = (uint8_t)(al ? al + 1 : 0);
     mem[0x81] = ' ';
@@ -241,6 +296,19 @@ int main(int argc, char **argv)
     printf("[%s after %.1f s: %lu frames, %lu loop passes (%.1f frames each), worst %lu frames, %lu VRAM bytes, %u audio underruns]\n",
            r ? "time up" : "exit", cpu.cyc / (double)HZ, frames, halts, halts ? (double)frames / halts : 0.0, worst_gap, vwrites,
            host_audio_underruns);
+    {
+        const char *d = getenv("PICOAMP_DUMP");     // "addr,len;addr,len" (hex)
+        while (d && *d)
+        {
+            unsigned a, l; int n;
+            if (sscanf(d, "%x,%x%n", &a, &l, &n) != 2) break;
+            printf("[%04X]", a);
+            for (unsigned i = 0; i < l; i++) printf(" %02X", mem[(a + i) & 0xFFFF]);
+            printf("\n");
+            d += n;
+            if (*d == ';') d++;
+        }
+    }
     f = fopen(argv[6], "wb");
     fwrite(vram, 1, sizeof vram, f);
     fclose(f);

@@ -6,15 +6,23 @@
 ;
 ; MSX2: SCREEN 4 with every screen cell a pattern of its own (a bitmap with
 ; two colours per 8-pixel row). The engine decodes and analyses the sound;
-; this program copies its status and its spectrum/VU data once a frame and
-; draws what changed.
+; this program copies its status and its spectrum/VU/scope data once a frame
+; and draws what changed.
 ;
 ; Keys: Up/Down select, Left/Right page, Enter open/play, BS parent folder,
-;       Space pause/play, S stop, N next, P previous, + / - volume,
-;       H shuffle, R repeat, E next equalizer preset,
-;       ESC quit (the music keeps playing: the cartridge plays it).
+;       Space pause/play, S stop, N next, P previous, + (or =) / - volume,
+;       , / . 10 seconds back / on, H shuffle, R repeat,
+;       V spectrum / oscilloscope, G equalizer screen, E next preset,
+;       ESC or Q quit (the music keeps playing: the cartridge plays it).
+; Equalizer screen: Left/Right choose a band (or the balance), Up/Down set
+;       it, 0 back to the middle, E next preset, G / ESC / Enter close.
+; Mouse (either port): click a list entry to select it, click it again to
+;       open or play it; the right button goes to the parent folder (closes
+;       the equalizer). The control row, SHF/REP/EQ, the volume, the seek
+;       bar, the view label and the equalizer sliders can all be clicked.
 ;
 ; Assemble: sjasmplus --raw=PICOAMP.COM picoamp.asm
+;           (digits.inc from gen_digits.py, tables.inc from gen_tables.py)
 ;==============================================================================
 
         org #0100
@@ -24,11 +32,16 @@ RDSLT   equ #000C
 WRSLT   equ #0014
 CALSLT  equ #001C
 ENASLT  equ #0024
+CHGMOD  equ #005F
+GTTRIG  equ #00D8
+GTPAD   equ #00DB
 EXPTBL  equ #FCC1
 JIFFY   equ #FC9E
 RAMAD1  equ #F342
-CHGMOD  equ #005F
+RG1SAV  equ #F3E0
+RG8SAV  equ #FFE7
 CGTABL  equ #0004
+ROMID   equ #002B               ; bit 7: 50 Hz
 
 VDP_D   equ #98
 VDP_C   equ #99
@@ -55,9 +68,11 @@ C_PAUSE  equ #22
 C_STOP   equ #23
 C_NEXT   equ #24
 C_PREV   equ #25
+C_SEEK   equ #26
 C_VOLUME equ #27
 C_MODE   equ #28
 C_EQ     equ #2A
+C_BAL    equ #2B
 M_REPEAT equ #01
 M_SHUF   equ #02
 E_BUSY   equ #0B
@@ -81,6 +96,9 @@ ST_ALBUM equ 120
 ST_BUFP  equ 163
 ST_DGEN  equ 173
 ST_DIRST equ 177
+ST_EQ    equ 179
+ST_BAL   equ 184
+F_SEEK   equ #04
 F_STREAM equ #10
 F_BUFFER equ #20
 
@@ -89,6 +107,7 @@ V_SEQ    equ #00
 V_LEVEL  equ #04
 V_PEAK   equ #20
 V_VU     equ #40
+V_SCOPE  equ #48
 V_FREQ   equ #90
 V_COPY   equ #C0            ; bytes copied each frame (up to the frequencies)
 NBARS    equ 24
@@ -117,8 +136,21 @@ A_BAR   equ GREY_L*16+BLUE_D
 LIST_ROW equ 19
 LIST_N   equ 4
 
+; tickers (long texts that scroll): one record each
+T_ACT    equ 0              ; 1 = longer than its place
+T_LEN    equ 1
+T_W      equ 2
+T_ROW    equ 3
+T_COL    equ 4
+T_START  equ 5              ; JIFFY when its turn (or its round) began
+T_LAST   equ 7              ; pixel offset shown
+T_TEXT   equ 9              ; up to 63 characters and a 0
+TSIZE    equ T_TEXT+64
+GAP      equ 4              ; spaces between the end and the start again
+
 ;------------------------------------------------------------------------------
 start:  ld sp,(#0006)
+        call bss_init
         call find
         jp c,notfound
         ld hl,W_DONE
@@ -158,18 +190,20 @@ start:  ld sp,(#0006)
         xor a
         ld (de),a
 .go:    call screen_init
+        call hz_init
         call draw_static
+        call fetch_status
+        ld hl,st+ST_EQ
         call find_eq
-        call draw_eq_name
+        call show_view
         ld hl,argbuf
         call open_path
-        call fetch_status
         call draw_info
 mainloop:
         ei
         halt
         call fetch_frame
-        call draw_bars
+        call draw_view
         ld a,(gen_new)
         ld hl,gen_shown
         cp (hl)
@@ -180,8 +214,55 @@ mainloop:
 .same:  ld a,(loading)
         or a
         call nz,check_loading
+        call ticker_run
+        call mouse
         call keys
         jr mainloop
+
+bss_init:
+        ld hl,bss_start
+        ld de,bss_start+1
+        ld bc,bss_end-bss_start-1
+        ld (hl),0
+        ldir
+        ld hl,cellcache
+        ld bc,(NBARS+2)*10
+        ld a,#FF
+        call memset
+        ld hl,scope_old
+        ld bc,64
+        ld a,40
+        call memset
+        ld a,#FF
+        ld (tk_title+T_ROW),a
+        ld (tk_artist+T_ROW),a
+        ld (tk_list+T_ROW),a
+        ret
+
+memset: ld (hl),a               ; BC bytes at HL = A (BC > 0)
+        ld d,h
+        ld e,l
+        inc de
+        dec bc
+        ld a,b
+        or c
+        ret z
+        ldir
+        ret
+
+; one second in interrupts: 50 or 60
+hz_init:
+        ld a,(EXPTBL)
+        ld hl,ROMID
+        call RDSLT
+        ei
+        ld b,60
+        bit 7,a
+        jr z,.s
+        ld b,50
+.s:     ld a,b
+        ld (hold),a
+        ret
 
 ;------------------------------------------------------------------------------
 ; engine access: commands through RDSLT/WRSLT (as PVTEST), the per-frame block
@@ -267,7 +348,13 @@ cmd:    ld (code),a
         call rd
         and 7
         ld (rlen+1),a
-        ld bc,(rlen)
+        ld hl,(rlen)
+        ld de,REPLY_MAX
+        or a
+        sbc hl,de
+        jr c,.lenok
+        ld (rlen),de
+.lenok: ld bc,(rlen)
         ld a,b
         or c
         jr z,.empty
@@ -295,6 +382,9 @@ cmd_u8:                         ; A = command, E = argument
         ld (args),a
         pop af
         ld bc,1
+        jp cmd
+
+cmd0:   ld bc,0                 ; A = command, no arguments
         jp cmd
 
 rd:     push bc
@@ -396,7 +486,8 @@ check:  ld hl,W_ID
         ret
 
 ;------------------------------------------------------------------------------
-; screen: SCREEN 4, palette, every cell its own pattern, sprites off, the font
+; screen: SCREEN 4, palette, every cell its own pattern, the mouse pointer
+; sprites (8 x 8, hidden), the font
 screen_init:
         ld a,4
         ld ix,CHGMOD
@@ -423,8 +514,33 @@ screen_init:
         ld bc,#1800
         ld a,NAVY*16+NAVY
         call vfill
-        ; no sprites
-        ld hl,#1E00
+        ; sprites: 8 x 8, not magnified, shown (R#1 bits 1-0, R#8 bit 1)
+        ld a,(RG1SAV)
+        and #FC
+        ld (RG1SAV),a
+        ld b,1
+        call vreg
+        ld a,(RG8SAV)
+        and #FD
+        ld (RG8SAV),a
+        ld b,8
+        call vreg
+        ld hl,#3800             ; pattern 0: the arrow
+        call vwrite
+        ld hl,pat_arrow
+        ld b,8
+        ld c,VDP_D
+        otir
+        ei
+        ld hl,#1C00             ; colours: sprite 0 white, sprite 1 (its shadow) black
+        ld bc,16
+        ld a,WHITE
+        call vfill
+        ld hl,#1C10
+        ld bc,16
+        ld a,BLK
+        call vfill
+        ld hl,#1E00             ; none shown
         call vwrite
         ld a,216
         out (VDP_D),a
@@ -465,7 +581,7 @@ screen_init:
         ei
         ret
 
-; call the main ROM routine at IX
+; call the main ROM routine at IX (A and the other registers passed)
 bios:   ld iy,(EXPTBL-1)
         call CALSLT
         ei
@@ -537,7 +653,6 @@ cell_addr:                      ; HL = pattern address of cell DE
         ld l,a
         ret
 
-; write the 8 pattern bytes at HL' (IX) and 8 colour bytes (IY) of cell DE
 ; put_cell: DE = cell, IX = 8 pattern bytes, A = colour byte for all rows
 put_cell:
         ld (cellcol),a
@@ -647,7 +762,7 @@ fill_row:
         djnz .l
         ret
 
-; a big digit (0-9 in A) at cell DE, colour C: 2 x 3 cells
+; a big digit (0-9 in A) at cell DE: 2 x 3 cells
 put_digit:
         push de
         ld l,a
@@ -709,6 +824,10 @@ draw_static:
         ld b,9
         ld c,A_TITLE
         call put_str
+        ld de,#001F             ; close box for the mouse
+        ld ix,pat_close
+        ld a,WHITE*16+RED
+        call put_cell
         ; seek track
         ld de,#0401
         ld b,30
@@ -719,11 +838,6 @@ draw_static:
         inc e
         pop bc
         djnz .t
-        ld de,#0501
-        ld hl,txt_spectrum
-        ld b,8
-        ld c,MAGENTA*16+NAVY
-        call put_str
         ld de,#0519
         ld hl,txt_level
         ld b,5
@@ -736,17 +850,6 @@ draw_static:
         ld de,#101D
         ld a,'R'
         call put_char
-        ; frequency labels under bars 0, 6, 12, 17, 21 (from the engine's table)
-        ld hl,label_bars
-.lab:   ld a,(hl)
-        cp #FF
-        jr z,.labend
-        inc hl
-        push hl
-        call freq_label
-        pop hl
-        jr .lab
-.labend:
         ; separator
         ld de,#1100
         ld b,32
@@ -757,6 +860,15 @@ draw_static:
         inc e
         pop bc
         djnz .s
+        ; list page arrows
+        ld de,#131F
+        ld ix,pat_up
+        ld a,GREY*16+NAVY
+        call put_cell
+        ld de,#161F
+        ld ix,pat_down
+        ld a,GREY*16+NAVY
+        call put_cell
         ; control row
         ld de,#1700
         ld b,32
@@ -833,12 +945,95 @@ freq_label:
         jp put_str
 
 ;------------------------------------------------------------------------------
+; the picture area (rows 6-15, columns 1-24): spectrum bars, the oscilloscope
+; or the equalizer. The VU meters (columns 26 and 29) are always drawn.
+
+draw_view:
+        ld a,(eq_open)
+        or a
+        jp nz,draw_vu
+        ld a,(view)
+        or a
+        jp z,draw_bars
+        jp draw_scope
+
+; V / a click on the label: spectrum <-> oscilloscope
+toggle_view:
+        xor a
+        ld (eq_open),a
+        ld a,(view)
+        xor 1
+        ld (view),a
+        ; fall through
+; draw what the area shows now (the equalizer closed)
+show_view:
+        call draw_area_labels
+        ld a,(view)
+        or a
+        jr nz,.scope
+        ld hl,cellcache         ; every bar cell drawn again
+        ld bc,NBARS*10
+        ld a,#FF
+        jp memset
+.scope: call vb_clear
+        ld hl,scope_old
+        ld bc,64
+        ld a,40
+        call memset
+        ld hl,scope_colrow
+        ld (colfn),hl
+        call area_out_col
+        jp area_out_pat
+
+; row 5: what the area is and the equalizer preset; row 16: its labels
+draw_area_labels:
+        ld hl,txt_spectrum
+        ld a,(view)
+        or a
+        jr z,.l
+        ld hl,txt_scope
+.l:     ld a,(eq_open)
+        or a
+        jr z,.l2
+        ld hl,txt_equalizer
+.l2:    ld de,#0501
+        ld b,9
+        ld c,MAGENTA*16+NAVY
+        call put_str
+        ld a,#FF
+        ld (eq_shown),a
+        call draw_eq_name
+        ld de,#1001
+        ld b,24
+        ld c,CYAN*16+NAVY
+        call fill_row
+        ld a,(eq_open)
+        or a
+        jp nz,draw_eq_info
+        ld a,(view)
+        or a
+        ret nz
+        ; frequency labels under bars 0, 6, 12, 17, 21 (from the engine's table)
+        ld hl,label_bars
+.lab:   ld a,(hl)
+        cp #FF
+        ret z
+        inc hl
+        push hl
+        call freq_label
+        pop hl
+        jr .lab
+
 ; spectrum and VU: 24 + 2 bars of 10 cells, 2 LED segments a cell (20 levels)
 draw_bars:
+        ld b,0
+        jr bars_from
+draw_vu:
+        ld b,NBARS
+bars_from:
         ld a,(viz+V_SEQ)
         bit 0,a
         ret nz                  ; caught while the engine wrote it: next frame
-        ld b,0
 .b:     ld a,b
         cp NBARS
         jr nc,.vu
@@ -1021,12 +1216,961 @@ bar_cell:
         jp put_cell2
 
 ;------------------------------------------------------------------------------
+; the bitmap of the area: 'vizbuf', 10 rows of 24 cells x 8 bytes, the same
+; order as the pattern table, so each row goes out in one run.
+
+vb_clear:
+        ld hl,vizbuf
+        ld bc,1920
+        xor a
+        jp memset
+
+; patterns of the area from vizbuf
+area_out_pat:
+        ld d,6
+        ld e,16
+; area_out_rows: screen rows D up to E (not included)
+area_out_rows:
+        push de
+        ld a,d
+        sub 6
+        ld l,a
+        ld h,0
+        ld de,192
+        call mul16
+        ld de,vizbuf
+        add hl,de
+        pop de
+.r:     push de
+        push hl
+        ld h,d
+        ld l,8
+        call vwrite
+        pop hl
+        ld b,192
+        ld c,VDP_D
+        otir
+        ei
+        pop de
+        inc d
+        ld a,d
+        cp e
+        jr c,.r
+        ret
+
+; colours of the area, a row at a time from the routine at (colfn): A = row
+; 0-9, fills rowcol (24 cells x 8 bytes)
+area_out_col:
+        ld a,#FF
+        ld (cr_last),a
+        ld d,6
+.r:     push de
+        ld a,d
+        sub 6
+        ld hl,(colfn)
+        call jp_hl
+        pop de
+        push de
+        ld a,d
+        add a,#20
+        ld h,a
+        ld l,8
+        call vwrite
+        ld hl,rowcol
+        ld b,192
+        ld c,VDP_D
+        otir
+        ei
+        pop de
+        inc d
+        ld a,d
+        cp 16
+        jr c,.r
+        ret
+
+jp_hl:  jp (hl)
+
+; vb_ptr: A = y (0-79), C = cell (0-23) -> HL = its byte in vizbuf
+vb_ptr: push de
+        ld l,a
+        ld h,0
+        add hl,hl
+        ld de,row_off
+        add hl,de
+        ld e,(hl)
+        inc hl
+        ld d,(hl)
+        ld hl,vizbuf
+        add hl,de
+        ld a,c
+        add a,a
+        add a,a
+        add a,a
+        ld e,a
+        ld d,0
+        add hl,de
+        pop de
+        ret
+
+; vb_text: HL = text, C = first cell, B = y of its top line
+vb_text:
+.ch:    ld a,(hl)
+        or a
+        ret z
+        push hl
+        sub 32
+        ld l,a
+        ld h,0
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld de,font
+        add hl,de
+        ld e,0
+.ln:    push hl
+        ld a,b
+        add a,e
+        call vb_ptr
+        ex (sp),hl
+        ld a,(hl)
+        ex (sp),hl
+        or (hl)
+        ld (hl),a
+        pop hl
+        inc hl
+        inc e
+        ld a,e
+        cp 8
+        jr c,.ln
+        pop hl
+        inc hl
+        inc c
+        jr .ch
+
+; vb_hline: B = y, C = first cell, D = cells, E = byte ORed in
+vb_hline:
+.l:     ld a,b
+        call vb_ptr
+        ld a,(hl)
+        or e
+        ld (hl),a
+        inc c
+        dec d
+        jr nz,.l
+        ret
+
+; vb_sprite8: E = x, B = y, D = lines, IX = an 8-pixel-wide pattern
+vb_sprite8:
+.ln:    push de
+        push bc
+        ld a,(ix+0)
+        inc ix
+        ld h,a
+        ld l,0
+        ld a,e
+        and 7
+        jr z,.ns
+.sh:    srl h
+        rr l
+        dec a
+        jr nz,.sh
+.ns:    push hl
+        ld a,e
+        rrca
+        rrca
+        rrca
+        and #1F
+        ld c,a
+        ld a,b
+        call vb_ptr
+        pop de
+        ld a,(hl)
+        or d
+        ld (hl),a
+        ld a,e
+        or a
+        jr z,.n2
+        ld bc,8
+        add hl,bc
+        ld a,(hl)
+        or e
+        ld (hl),a
+.n2:    pop bc
+        pop de
+        inc b
+        dec d
+        jr nz,.ln
+        ret
+
+;------------------------------------------------------------------------------
+; the oscilloscope: the engine's 64 newest samples (every 4th one), 3 pixels
+; each, joined by vertical lines. The old trace is taken off (AND), the new
+; one put on (OR), and the area sent.
+
+scope_colrow:                   ; A = row: the colours by line (scope_col)
+        add a,a
+        add a,a
+        add a,a
+        ld e,a
+        ld d,0
+        ld hl,scope_col
+        add hl,de
+        ld de,rowcol
+        ld b,24
+.c:     push bc
+        push hl
+        ld bc,8
+        ldir
+        pop hl
+        pop bc
+        djnz .c
+        ret
+
+draw_scope:
+        ld a,(viz+V_SEQ)
+        bit 0,a
+        ret nz
+        ld a,#A1                ; and c
+        ld (vspan.op),a
+        ld a,#FF
+        ld (plot_inv),a
+        ld hl,scope_old
+        call scope_plot
+        ld ix,viz+V_SCOPE
+        ld hl,scope_old
+        ld b,64
+.y:     ld a,(ix+0)
+        inc ix
+        push hl
+        ld e,a
+        ld d,0
+        ld hl,scope_y
+        add hl,de
+        ld a,(hl)
+        pop hl
+        ld (hl),a
+        inc hl
+        djnz .y
+        ld a,#B1                ; or c
+        ld (vspan.op),a
+        xor a
+        ld (plot_inv),a
+        ld hl,scope_old
+        call scope_plot
+        call area_out_pat
+        jp draw_vu
+
+; scope_plot: HL = 64 y values
+scope_plot:
+        ld (sp_ys),hl
+        ld a,(hl)
+        ld (sp_prev),a
+        xor a
+        ld (sp_x),a
+        ld b,64
+.s:     push bc
+        ld hl,(sp_ys)
+        ld a,(hl)
+        inc hl
+        ld (sp_ys),hl
+        ld (sp_cur),a
+        ld c,a
+        ld a,(sp_prev)
+        cp c
+        jr c,.ok                ; A = top, C = bottom
+        ld e,c
+        ld c,a
+        ld a,e
+.ok:    ld e,a
+        ld a,c
+        sub e
+        inc a
+        ld b,a
+        ld a,(sp_x)
+        ld d,a
+        call vspan
+        ld a,(sp_x)
+        inc a
+        ld d,a
+        ld a,(sp_cur)
+        ld e,a
+        ld b,2                  ; the next two pixels: x+1 and x+2 share a
+        call hspan2             ; byte unless x+1 ends one
+        ld a,(sp_cur)
+        ld (sp_prev),a
+        ld a,(sp_x)
+        add a,3
+        ld (sp_x),a
+        pop bc
+        djnz .s
+        ret
+
+hspan2: push de                 ; D = x, E = y: pixels (x, y) and (x+1, y)
+        ld b,1
+        call vspan
+        pop de
+        inc d
+        ld b,1
+        ; fall through
+
+; vspan: D = x, E = top y, B = pixels down
+vspan:  ld a,d
+        and 7
+        ld c,a
+        push bc
+        ld b,0
+        ld hl,bitmask
+        add hl,bc
+        ld a,(plot_inv)
+        xor (hl)
+        ld c,a                  ; C = the pixel's bit (or all but it)
+        ld a,d
+        and #F8
+        ld (vs_x),a
+        ld l,e
+        ld h,0
+        add hl,hl
+        push de
+        ld de,row_off
+        add hl,de
+        ld e,(hl)
+        inc hl
+        ld d,(hl)
+        ld hl,vizbuf
+        add hl,de
+        ld a,(vs_x)
+        ld e,a
+        ld d,0
+        add hl,de
+        pop de
+        ld a,e
+        and 7
+        ld d,a                  ; D = line in the cell
+        pop af                  ; A = count (B)
+        ld b,a
+.l:     ld a,(hl)
+.op:    or c
+        ld (hl),a
+        dec b
+        ret z
+        inc d
+        bit 3,d
+        jr nz,.nr
+        inc hl
+        jr .l
+.nr:    ld d,0
+        ld a,l
+        add a,185               ; to line 0 of the cell below: + 192 - 7
+        ld l,a
+        jr nc,.l
+        inc h
+        jr .l
+
+;------------------------------------------------------------------------------
+; the equalizer screen: five sliders (-12..+12 dB) and the balance
+
+eq_open_screen:
+        ld a,1
+        ld (eq_open),a
+        ld hl,st+ST_EQ
+        ld de,eqg
+        ld bc,5
+        ldir
+        ld a,(st+ST_BAL)
+        ld (eqbal),a
+        call draw_area_labels
+        call eq_build_cols
+        ld hl,eq_colrow
+        ld (colfn),hl
+        call area_out_col
+        jp eq_render
+
+eq_close:
+        xor a
+        ld (eq_open),a
+        ld a,#FF
+        ld (eq_drag),a
+        jp show_view
+
+eq_redraw:
+        call eq_render
+        jp draw_eq_info
+
+; the bitmap: scale, 0 dB line, tracks, knobs, band names, balance
+eq_render:
+        call vb_clear
+        ld hl,txt_p12
+        ld c,0
+        ld b,3
+        call vb_text
+        ld hl,txt_z
+        ld c,1
+        ld b,27
+        call vb_text
+        ld hl,txt_m12
+        ld c,0
+        ld b,51
+        call vb_text
+        ld b,30
+        ld c,3
+        ld d,20
+        ld e,#88
+        call vb_hline
+        ld hl,txt_bal
+        ld c,0
+        ld b,70
+        call vb_text
+        ld b,73
+        ld c,3
+        ld d,20
+        ld e,#FF
+        call vb_hline
+        ld b,74
+        ld c,3
+        ld d,20
+        ld e,#FF
+        call vb_hline
+        xor a
+.band:  push af
+        call eq_draw_band
+        pop af
+        inc a
+        cp 5
+        jr c,.band
+        call eq_draw_balknob
+        jp area_out_pat
+
+; eq_draw_band: A = band: its track, knob and name into vizbuf
+eq_draw_band:
+        ld (er_b),a
+        add a,a
+        add a,a
+        add a,5
+        ld (er_cc),a            ; the band's cell: 5, 9, 13, 17, 21
+        ld b,2
+.tr:    ld a,(er_cc)
+        ld c,a
+        ld a,b
+        call vb_ptr
+        ld a,(hl)
+        or #18
+        ld (hl),a
+        inc b
+        ld a,b
+        cp 59
+        jr c,.tr
+        ; the knob: top line 27 - 2 * gain (centre 6 at +12, 54 at -12)
+        ld a,(er_b)
+        ld e,a
+        ld d,0
+        ld hl,eqg
+        add hl,de
+        ld a,(hl)
+        add a,a
+        ld c,a
+        ld a,27
+        sub c
+        ld b,a
+        ld a,(er_cc)
+        add a,a
+        add a,a
+        add a,a
+        ld e,a
+        ld d,7
+        ld ix,knob_v
+        call vb_sprite8
+        ld a,(er_b)
+        add a,a
+        add a,a
+        ld e,a
+        ld d,0
+        ld hl,eq_lab
+        add hl,de
+        ld a,(er_cc)
+        dec a
+        ld c,a
+        ld b,60
+        jp vb_text
+
+; the balance knob: x = 28 + balance * 148 / 100
+eq_draw_balknob:
+        ld a,(eqbal)
+        ld l,a
+        ld h,0
+        ld de,148
+        call mul16
+        ld de,100
+        call div16
+        ld a,l
+        add a,28
+        ld e,a
+        ld b,70
+        ld d,8
+        ld ix,knob_h
+        jp vb_sprite8
+
+; eq_band_redraw: A = band: only its column again
+eq_band_redraw:
+        push af
+        add a,a
+        add a,a
+        add a,5
+        ld c,a
+        ld b,0
+.cl:    ld a,b
+        call vb_ptr
+        ld (hl),0
+        inc b
+        ld a,b
+        cp 80
+        jr c,.cl
+        ld d,1
+        ld e,#88
+        ld b,30
+        push bc
+        call vb_hline
+        pop bc
+        ld d,1
+        ld e,#FF
+        ld b,73
+        push bc
+        call vb_hline
+        pop bc
+        ld d,1
+        ld e,#FF
+        ld b,74
+        push bc
+        call vb_hline
+        pop bc
+        pop af
+        call eq_draw_band
+        call eq_draw_balknob
+        ; out: the column's 10 cells
+        ld a,(er_cc)
+        add a,a
+        add a,a
+        add a,a
+        ld e,a
+        ld d,0
+        ld hl,vizbuf
+        add hl,de
+        ld a,(er_cc)
+        inc a
+        ld e,a
+        ld d,6
+.o:     push de
+        push hl
+        call cell_addr
+        call vwrite
+        pop hl
+        push hl
+        ld b,8
+        ld c,VDP_D
+        otir
+        ei
+        pop hl
+        ld bc,192
+        add hl,bc
+        pop de
+        inc d
+        ld a,d
+        cp 16
+        jr c,.o
+        ret
+
+; eq_bal_redraw: only the balance lines (70-77) again
+eq_bal_redraw:
+        ld b,70
+.l:     ld c,3
+.c:     ld a,b
+        call vb_ptr
+        ld (hl),0
+        inc c
+        ld a,c
+        cp 23
+        jr c,.c
+        inc b
+        ld a,b
+        cp 78
+        jr c,.l
+        ld b,73
+        ld c,3
+        ld d,20
+        ld e,#FF
+        call vb_hline
+        ld b,74
+        ld c,3
+        ld d,20
+        ld e,#FF
+        call vb_hline
+        call eq_draw_balknob
+        ld d,14
+        ld e,16
+        jp area_out_rows
+
+; the colours of the three parts (sliders, names, balance) by cell
+eq_build_cols:
+        ld hl,eqcols
+        ld ix,eq_party
+        ld b,3
+.p:     push bc
+        ld c,0
+.c:     push bc
+        push hl
+        ld a,(ix+0)
+        call eq_colour
+        pop hl
+        ld (hl),a
+        inc hl
+        pop bc
+        inc c
+        ld a,c
+        cp 24
+        jr c,.c
+        inc ix
+        pop bc
+        djnz .p
+        ret
+
+; eq_colrow: A = row: rowcol from eqcols; rows 0-6 are all alike
+eq_colrow:
+        cp 7
+        jr nc,.go
+        ld hl,cr_last
+        cp (hl)                 ; FF after a change: built once for rows 0-6
+        ret z
+        ld a,0
+        ld (hl),a
+.go:    add a,a
+        add a,a
+        add a,a
+        ld (cr_y0),a
+        ld de,rowcol
+        ld b,0                  ; line
+.l:     ld a,(cr_y0)
+        add a,b
+        ld hl,eqcols
+        cp 58
+        jr c,.r
+        ld hl,eqcols+24
+        cp 66
+        jr c,.r
+        ld hl,eqcols+48
+.r:     push de
+        push bc
+        ld b,24
+.c:     ld a,(hl)
+        ld (de),a
+        inc hl
+        ld a,e
+        add a,8
+        ld e,a
+        jr nc,.n
+        inc d
+.n:     djnz .c
+        pop bc
+        pop de
+        inc de
+        inc b
+        ld a,b
+        cp 8
+        jr c,.l
+        ret
+
+; eq_colour: C = cell, A = y -> A = colour byte
+eq_colour:
+        ld b,a
+        cp 66
+        jr c,.top
+        ld a,c                  ; the balance part
+        cp 3
+        ld a,CYAN
+        jr c,.out
+        ld a,(eq_sel)
+        cp 5
+        ld a,YELLOW
+        jr z,.out
+        ld a,WHITE
+        jr .out
+.top:   ld a,c
+        cp 3
+        ld a,CYAN
+        jr c,.out               ; the scale
+        ld hl,band_cell
+        ld a,c
+        call idx
+        ld a,(hl)
+        cp #FF
+        ld a,GREY
+        jr z,.out               ; between the bands: the 0 dB dots
+        ld d,(hl)
+        ld a,(eq_sel)
+        cp d
+        ld a,YELLOW
+        jr z,.out
+        ld a,b
+        cp 58
+        ld a,CYAN
+        jr nc,.out              ; the band names
+        ld a,d
+        add a,a
+        add a,a
+        add a,5
+        cp c
+        ld a,WHITE
+        jr z,.out               ; the slider
+        ld a,GREY
+.out:   add a,a
+        add a,a
+        add a,a
+        add a,a
+        add a,NAVY
+        ret
+
+; row 16: the chosen band and its gain, or the balance
+draw_eq_info:
+        ld de,linebuf
+        ld a,(eq_sel)
+        cp 5
+        jr z,.bal
+        ld l,a
+        ld h,0
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld bc,eq_hz
+        add hl,bc
+        call strcpy
+        ld a,' '
+        ld (de),a
+        inc de
+        ld a,(eq_sel)
+        ld c,a
+        ld b,0
+        ld hl,eqg
+        add hl,bc
+        ld a,(hl)
+        or a
+        jr z,.num
+        ld c,'+'
+        bit 7,a
+        jr z,.pos
+        neg
+        ld c,'-'
+.pos:   push af
+        ld a,c
+        ld (de),a
+        inc de
+        pop af
+.num:   ld l,a
+        ld h,0
+        call fmt_u16
+        ld hl,txt_db
+        call strcpy
+        jr .put
+.bal:   ld hl,txt_balance
+        call strcpy
+        ld a,(eqbal)
+        cp 50
+        jr nz,.bn
+        ld hl,txt_centre
+        call strcpy
+        jr .put
+.bn:    ld l,a
+        ld h,0
+        call fmt_u16
+.put:   ld de,#1001
+        ld hl,linebuf
+        ld b,16
+        ld c,WHITE*16+NAVY
+        call put_str
+        ld de,#1011
+        ld hl,txt_gclose
+        ld b,8
+        ld c,GREY*16+NAVY
+        jp put_str
+
+eq_select:                      ; A = band 0-4, 5 = balance
+        ld hl,eq_sel
+        cp (hl)
+        ret z
+        ld (hl),a
+        call eq_build_cols
+        ld hl,eq_colrow
+        ld (colfn),hl
+        call area_out_col
+        jp draw_eq_info
+
+eq_set_gain:                    ; A = band, C = gain
+        ld (er_band),a
+        ld e,a
+        ld d,0
+        ld hl,eqg
+        add hl,de
+        ld a,(hl)
+        cp c
+        ret z
+        ld (hl),c
+        call eq_send
+        ld a,(er_band)
+        call eq_band_redraw
+        jp draw_eq_info
+
+eq_send:
+        ld hl,eqg
+        ld de,args
+        ld bc,5
+        ldir
+        ld a,C_EQ
+        ld bc,5
+        call cmd
+        ld hl,eqg
+        call find_eq
+        jp draw_eq_name
+
+eq_set_bal:                     ; C = 0..100
+        ld a,(eqbal)
+        cp c
+        ret z
+        ld a,c
+        ld (eqbal),a
+        ld e,a
+        ld a,C_BAL
+        call cmd_u8
+        call eq_bal_redraw
+        jp draw_eq_info
+
+; Up / Down: C = +1 or -1
+eq_step:
+        ld a,(eq_sel)
+        cp 5
+        jr z,.bal
+        ld e,a
+        ld d,0
+        ld hl,eqg
+        add hl,de
+        ld a,(hl)
+        bit 7,c
+        jr nz,.dn
+        cp 12
+        ret z
+        inc a
+        jr .set
+.dn:    cp -12
+        ret z
+        dec a
+.set:   ld c,a
+        ld a,(eq_sel)
+        jp eq_set_gain
+.bal:   ld a,(eqbal)
+        bit 7,c
+        jr nz,.bd
+        add a,5
+        cp 101
+        jr c,.bs
+        ld a,100
+        jr .bs
+.bd:    sub 5
+        jr nc,.bs
+        xor a
+.bs:    ld c,a
+        jp eq_set_bal
+
+eq_reset:                       ; 0: the chosen one back to the middle
+        ld a,(eq_sel)
+        cp 5
+        ld c,50
+        jp z,eq_set_bal
+        ld c,0
+        jp eq_set_gain
+
+; E: the next equalizer preset (the same ones as PicoPlay)
+next_eq:
+        ld a,(eq_preset)
+        inc a
+        cp 8
+        jr c,.ok
+        xor a
+.ok:    ld l,a
+        ld h,0
+        ld e,l
+        ld d,h
+        add hl,hl
+        add hl,hl
+        add hl,de               ; *5
+        ld de,eq_tab
+        add hl,de
+        ld de,eqg
+        ld bc,5
+        ldir
+        call eq_send
+        ld a,(eq_open)
+        or a
+        ret z
+        jp eq_redraw
+
+; find_eq: HL = 5 gains -> eq_preset (8 = its own setting, from PicoPlay)
+find_eq:
+        ld (fe_p),hl
+        ld b,0
+        ld hl,eq_tab
+.p:     push bc
+        push hl
+        ld de,(fe_p)
+        ld b,5
+.c:     ld a,(de)
+        cp (hl)
+        jr nz,.no
+        inc hl
+        inc de
+        djnz .c
+        pop hl
+        pop bc
+        ld a,b
+        ld (eq_preset),a
+        ret
+.no:    pop hl
+        ld bc,5
+        add hl,bc
+        pop bc
+        inc b
+        ld a,b
+        cp 8
+        jr c,.p
+        ld (eq_preset),a
+        ret
+
+draw_eq_name:                   ; "EQ ROCK" between the area's and the LEVEL labels
+        ld a,(eq_preset)
+        ld hl,eq_shown
+        cp (hl)
+        ret z
+        ld (hl),a
+        add a,a                 ; *10
+        ld l,a
+        add a,a
+        add a,a
+        add a,l
+        ld l,a
+        ld h,0
+        ld de,eq_names
+        add hl,de
+        ld de,#050B
+        ld b,9
+        ld c,GREY*16+NAVY
+        ld a,(eq_open)
+        or a
+        jr z,.p
+        ld c,YELLOW*16+NAVY
+.p:     jp put_str
+
+;------------------------------------------------------------------------------
 ; the status: time, title, artist, format, seek bar, state, volume
 draw_info:
         ; time m:ss (elapsed)
         ld hl,(st+ST_ELAPS)
         ld de,60
-        call div16              ; HL = minutes, A = seconds... (remainder in DE)
+        call div16              ; HL = minutes, DE = seconds
         push de
         ld a,l
         cp 100
@@ -1054,25 +2198,27 @@ draw_info:
         ld a,e
         ld de,#0108
         call put_digit
-        ; title / artist / format
-        ld de,#010B
-        ld hl,st+ST_TITLE
-        ld a,(hl)
-        or a
-        jr nz,.t
-        ld hl,txt_notrack
-.t:     ld b,21
-        ld c,YELLOW*16+NAVY
-        call put_str
-        ld de,#020B
+        ; title / artist (they scroll when long) / format
         ld hl,st+ST_ARTIST
         ld a,(hl)
         or a
         jr nz,.a
         ld hl,st+ST_ALBUM       ; a stream: the station
-.a:     ld b,21
+.a:     ld de,#020B
+        ld b,21
         ld c,CYAN*16+NAVY
-        call put_str
+        ld ix,tk_artist
+        call ticker_text          ; (the artist first: a new title then has the turn)
+        ld hl,st+ST_TITLE
+        ld a,(hl)
+        or a
+        jr nz,.t
+        ld hl,txt_notrack
+.t:     ld de,#010B
+        ld b,21
+        ld c,YELLOW*16+NAVY
+        ld ix,tk_title
+        call ticker_text
         call fmt_format
         ld de,#030B
         ld hl,linebuf
@@ -1082,6 +2228,9 @@ draw_info:
         call draw_seek
         call draw_state
         call draw_modes
+        ld hl,st+ST_EQ
+        call find_eq
+        call draw_eq_name
         jp draw_volume
 
 draw_modes:
@@ -1245,7 +2394,7 @@ draw_state:
         call fmt_u16
 .put:   ld de,#000B
         ld hl,linebuf
-        ld b,21
+        ld b,20
         ld c,A_TITLE
         jp put_str
 
@@ -1337,8 +2486,13 @@ show_path_msg:
         ld c,RED*16+NAVY
         jp put_str
 
-; read the visible entries (DIR_READ top, 4) and draw them
+; read the visible entries (DIR_READ top, 4) and draw them; the chosen one
+; becomes a ticker when its name is longer than the row
 draw_list:
+        xor a
+        ld (tk_list+T_ACT),a
+        dec a
+        ld (tk_list+T_ROW),a
         ld hl,(top)
         ld (args),hl
         ld a,LIST_N
@@ -1396,9 +2550,9 @@ draw_list:
         ld (de),a
         inc de
 .nm:    ld a,c
-        cp 26
+        cp 60
         jr c,.cp
-        ld c,26
+        ld c,60
 .cp:    ld b,0
         ld a,c
         or a
@@ -1418,13 +2572,20 @@ draw_list:
         ld de,(sel)
         or a
         sbc hl,de
-        ld c,A_NORM
-        jr nz,.col
-        ld c,A_SEL
-.col:   ld de,(row_cell)
+        jr z,.chosen
+        ld de,(row_cell)
         ld hl,linebuf
         ld b,30
+        ld c,A_NORM
         call put_str
+        jr .next
+.chosen:
+        ld de,(row_cell)
+        ld hl,linebuf
+        ld b,30
+        ld c,A_SEL
+        ld ix,tk_list
+        call ticker_text
         jr .next
 .blank: ld de,(row_cell)
         ld b,30
@@ -1517,6 +2678,15 @@ activate:
         ld (loading),a
         jp draw_state
 
+; BS / right button / a click on the path: the parent folder (entry 0 is
+; ".." outside the root)
+parent: ld hl,0
+        ld (sel),hl
+        call sel_type
+        cp 5
+        ret nz
+        jp activate
+
 check_loading:
         ld hl,W_STATUS+ST_DIRST
         call rd
@@ -1541,16 +2711,772 @@ check_loading:
         jp draw_state
 
 ;------------------------------------------------------------------------------
+; tickers: a text longer than its place stands still for a second, then moves
+; left a pixel at a time, round and round with a gap. One moves at a time
+; (title, artist, the chosen list entry in turn) so the rest stays smooth.
+
+; ticker_text: IX = ticker, HL = text, DE = cell, B = width, C = colour.
+; Draws the text; nothing happens when it is the same text in the same place.
+ticker_text:
+        ld (tt_text),hl
+        ld (tt_cell),de
+        ld (tt_wc),bc
+        ld a,(ix+T_ROW)
+        cp d
+        jr nz,.new
+        ld a,(ix+T_COL)
+        cp e
+        jr nz,.new
+        push ix
+        pop de
+        ld hl,T_TEXT
+        add hl,de
+        ex de,hl
+        ld hl,(tt_text)
+        ld b,63
+.cmp:   ld a,(de)
+        cp (hl)
+        jr nz,.new
+        or a
+        ret z
+        inc hl
+        inc de
+        djnz .cmp
+        ret
+.new:   ld de,(tt_cell)
+        ld (ix+T_ROW),d
+        ld (ix+T_COL),e
+        ld bc,(tt_wc)
+        ld (ix+T_W),b
+        push ix
+        pop de
+        ld hl,T_TEXT
+        add hl,de
+        ex de,hl
+        ld hl,(tt_text)
+        ld b,0
+.cp:    ld a,(hl)
+        or a
+        jr z,.ce
+        ld a,b
+        cp 63
+        jr nc,.ce
+        ld a,(hl)
+        ld (de),a
+        inc hl
+        inc de
+        inc b
+        jr .cp
+.ce:    xor a
+        ld (de),a
+        ld (ix+T_LEN),b
+        ld (ix+T_LAST),a
+        ld (ix+T_LAST+1),a
+        push ix
+        pop hl
+        ld de,T_TEXT
+        add hl,de
+        ld de,(tt_cell)
+        ld bc,(tt_wc)
+        push ix
+        call put_str
+        pop ix
+        ld a,(ix+T_W)
+        cp (ix+T_LEN)
+        jr nc,.still
+        ld (ix+T_ACT),1
+        jp tk_take
+.still: ld (ix+T_ACT),0
+        ret
+
+; give the turn to IX (the one that had it goes back to its start)
+tk_take:
+        ld hl,(tk_turn)
+        ld a,h
+        or l
+        jr z,.set
+        push ix
+        pop de
+        or a
+        sbc hl,de
+        jr z,.set
+        add hl,de
+        push ix
+        push hl
+        pop ix
+        call tk_home
+        pop ix
+.set:   ld (tk_turn),ix
+        ld hl,(JIFFY)
+        ld (ix+T_START),l
+        ld (ix+T_START+1),h
+        ret
+
+tk_home:                        ; IX back at its start
+        ld a,(ix+T_LAST)
+        or (ix+T_LAST+1)
+        ret z
+        xor a
+        ld (ix+T_LAST),a
+        ld (ix+T_LAST+1),a
+        ld a,(ix+T_ACT)
+        or a
+        ret z
+        ld hl,0
+        jp tk_render
+
+ticker_run:
+        ld hl,(tk_turn)
+        ld a,h
+        or l
+        jp z,.find
+        push hl
+        pop ix
+        ld a,(ix+T_ACT)
+        or a
+        jr z,.next
+        ld hl,(JIFFY)
+        ld e,(ix+T_START)
+        ld d,(ix+T_START+1)
+        or a
+        sbc hl,de
+        ld a,(hold)
+        ld e,a
+        ld d,0
+        or a
+        sbc hl,de
+        ret c                   ; the still second
+        ld d,h                  ; offset = time * 3 / 4 (45 pixels a second)
+        ld e,l
+        add hl,hl
+        add hl,de
+        srl h
+        rr l
+        srl h
+        rr l
+        push hl
+        ld a,(ix+T_LEN)
+        add a,GAP
+        ld l,a
+        ld h,0
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ex de,hl
+        pop hl
+        or a
+        sbc hl,de
+        jr nc,.done
+        add hl,de
+        ld a,l
+        cp (ix+T_LAST)
+        jr nz,.draw
+        ld a,h
+        cp (ix+T_LAST+1)
+        ret z
+.draw:  ld (ix+T_LAST),l
+        ld (ix+T_LAST+1),h
+        jp tk_render
+.done:  call tk_home            ; a whole round
+.next:  ld b,3
+.nx:    ld de,TSIZE
+        add ix,de
+        push ix
+        pop hl
+        ld de,tk_end
+        or a
+        sbc hl,de
+        jr c,.chk
+        ld ix,tk_title
+.chk:   ld a,(ix+T_ACT)
+        or a
+        jr nz,.got
+        djnz .nx
+        ld hl,0
+        ld (tk_turn),hl
+        ret
+.got:   ld (tk_turn),ix
+        ld hl,(JIFFY)
+        ld (ix+T_START),l
+        ld (ix+T_START+1),h
+        ret
+.find:  ld ix,tk_list           ; nobody's turn: look from the title on
+        jr .next
+
+; tk_render: IX = ticker, HL = pixel offset
+tk_render:
+        ld a,l
+        and 7
+        ld b,a
+        ld a,7
+        sub b
+        ld (.jr+1),a          ; the shift: skip 7 - s of the 7 'add hl,hl'
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        ld a,l
+        ld (tr_k),a
+        ld a,(ix+T_LEN)
+        add a,GAP
+        ld (tr_n),a
+        ld de,tkbuf
+        ld b,(ix+T_W)
+.cell:  push bc
+        ld a,(tr_k)
+        call tk_glyph
+        push bc
+        ld a,(tr_k)
+        inc a
+        ld hl,tr_n
+        cp (hl)
+        jr c,.k2
+        xor a
+.k2:    ld (tr_k),a
+        call tk_glyph
+        push bc
+        pop iy
+        pop bc
+.ln:    ld a,(bc)
+        ld h,a
+        ld l,(iy+0)
+.jr:    jr .sh                  ; displacement patched
+.sh:    add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld a,h
+        ld (de),a
+        inc de
+        inc bc
+        inc iy
+        ld a,c
+        and 7
+        jr nz,.ln
+        pop bc
+        djnz .cell
+        ld d,(ix+T_ROW)
+        ld e,(ix+T_COL)
+        call cell_addr
+        call vwrite
+        ld a,(ix+T_W)
+        add a,a
+        add a,a
+        add a,a
+        ld b,a
+        ld c,VDP_D
+        ld hl,tkbuf
+        otir
+        ei
+        ret
+
+; tk_glyph: A = position in the text (and gap) -> BC = its glyph
+tk_glyph:
+        push de
+        ld c,' '
+        cp (ix+T_LEN)
+        jr nc,.ch
+        push ix
+        pop hl
+        ld e,a
+        ld d,0
+        add hl,de
+        ld de,T_TEXT
+        add hl,de
+        ld c,(hl)
+.ch:    ld a,c
+        sub 32
+        jr nc,.a
+        xor a
+.a:     cp 96
+        jr c,.b
+        ld a,'?'-32
+.b:     ld l,a
+        ld h,0
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld de,font
+        add hl,de
+        ld b,h
+        ld c,l
+        pop de
+        ret
+
+;------------------------------------------------------------------------------
+; the mouse, in either port (found when it first moves); an arrow sprite with
+; a shadow
+mouse:  ld a,(ms_port)
+        or a
+        jr nz,.read
+        ld a,(ms_probe)         ; not found yet: look every 8th pass
+        inc a
+        ld (ms_probe),a
+        and 7
+        ret nz
+        ld a,1
+        call ms_probe1
+        jr nz,.found
+        ld a,2
+        call ms_probe1
+        ret z
+.found: ld (ms_port),a
+        jr .move
+.read:  call ms_read
+.move:  ld a,(ms_dx)            ; the offsets count the other way
+        neg
+        call sext
+        ld a,(ms_x)
+        ld l,a
+        ld h,0
+        add hl,de
+        bit 7,h
+        jr z,.x1
+        ld hl,0
+.x1:    ld a,h
+        or a
+        jr z,.x2
+        ld l,255
+.x2:    ld a,l
+        ld (ms_x),a
+        ld a,(ms_dy)
+        neg
+        call sext
+        ld a,(ms_y)
+        ld l,a
+        ld h,0
+        add hl,de
+        bit 7,h
+        jr z,.y1
+        ld hl,0
+.y1:    ld a,h
+        or a
+        jr nz,.yc
+        ld a,l
+        cp 192
+        jr c,.y2
+.yc:    ld l,191
+.y2:    ld a,l
+        ld (ms_y),a
+        call ms_sprite
+        ; the buttons
+        ld a,(ms_port)
+        ld ix,GTTRIG
+        call bios
+        and 1
+        ld b,a
+        push bc
+        ld a,(ms_port)
+        add a,2
+        ld ix,GTTRIG
+        call bios
+        pop bc
+        and 2
+        or b
+        ld b,a
+        ld a,(ms_prev)
+        cpl
+        and b
+        ld c,a                  ; just pressed
+        ld a,b
+        ld (ms_prev),a
+        bit 0,c
+        jp nz,left_click
+        bit 1,c
+        jp nz,right_click
+        bit 0,b
+        jr z,.up
+        ld a,(eq_open)          ; held: dragging an equalizer slider
+        or a
+        ret z
+        jp eq_drag_update
+.up:    ld a,#FF
+        ld (eq_drag),a
+        ret
+
+; ms_probe1: A = port; ZF=0 (A = port) when a mouse is there: an empty port
+; (or a joystick) gives the same non-zero offsets every time (1,1 or -1,-1),
+; a mouse gives 0,0 at rest. So first a rest, then a movement.
+ms_probe1:
+        ld (ms_try),a
+        call ms_read
+        ld a,(ms_try)
+        ld hl,ms_rest
+        jr nz,.moved
+        ld a,(ms_dx)            ; 0,0: a mouse at rest (or FF,FF: nothing)
+        ld b,a
+        ld a,(ms_dy)
+        or b
+        jr nz,.none             ; FF,FF: nothing there
+        ld a,(ms_try)
+        or (hl)
+        ld (hl),a               ; this port has rested
+        xor a
+        ret
+.moved: and (hl)                ; moved, after a rest?
+        ret z
+        ld a,(ms_try)
+        or a
+        ret
+.none:  xor a
+        ret
+
+; ms_read: A = port -> ms_dx, ms_dy; ZF=1 when nothing moved (or no mouse)
+ms_read:
+        cp 1
+        ld a,12
+        jr z,.p
+        ld a,16
+.p:     ld (ms_fn),a
+        ld ix,GTPAD
+        call bios
+        ld a,(ms_fn)
+        inc a
+        ld ix,GTPAD
+        call bios
+        ld (ms_dx),a
+        ld a,(ms_fn)
+        add a,2
+        ld ix,GTPAD
+        call bios
+        ld (ms_dy),a
+        ld c,a
+        ld a,(ms_dx)
+        ld b,a
+        and c
+        inc a
+        ret z                   ; FF, FF: nothing in the port
+        ld a,b
+        or c
+        ret
+
+sext:   ld e,a                  ; DE = A, signed
+        add a,a
+        sbc a,a
+        ld d,a
+        ret
+
+ms_sprite:
+        ld a,(ms_x)
+        ld hl,ms_shown_x
+        cp (hl)
+        jr nz,.d
+        ld a,(ms_y)
+        ld hl,ms_shown_y
+        cp (hl)
+        ret z
+.d:     ld a,(ms_x)
+        ld (ms_shown_x),a
+        ld a,(ms_y)
+        ld (ms_shown_y),a
+        ld hl,#1E00
+        call vwrite
+        ld a,(ms_y)
+        dec a
+        ld b,a
+        out (VDP_D),a
+        ld a,(ms_x)
+        ld c,a
+        out (VDP_D),a
+        xor a
+        out (VDP_D),a
+        out (VDP_D),a
+        ld a,b                  ; the shadow, a pixel right and down
+        inc a
+        out (VDP_D),a
+        ld a,c
+        inc a
+        jr nz,.sx
+        dec a
+.sx:    out (VDP_D),a
+        xor a
+        out (VDP_D),a
+        out (VDP_D),a
+        ld a,216
+        out (VDP_D),a
+        ei
+        ret
+
+right_click:
+        ld a,(eq_open)
+        or a
+        jp nz,eq_close
+        jp parent
+
+; left_click: what is under the pointer
+left_click:
+        ld a,(ms_x)
+        rrca
+        rrca
+        rrca
+        and #1F
+        ld e,a                  ; E = column
+        ld a,(ms_y)
+        rrca
+        rrca
+        rrca
+        and #1F
+        ld d,a                  ; D = row
+        or a
+        jr nz,.r4
+        ld a,e                  ; the title bar's close box
+        cp 31
+        jp z,quit
+        ret
+.r4:    cp 4
+        jr nz,.r5
+        ld a,e
+        or a
+        ret z
+        cp 31
+        ret nc
+        jp click_seek
+.r5:    cp 5
+        jr nz,.area
+        ld a,e
+        cp 10
+        jr nc,.r5b
+        ld a,(eq_open)
+        or a
+        jp nz,eq_close
+        jp toggle_view
+.r5b:   cp 20
+        ret nc
+        ld a,(eq_open)
+        or a
+        jp nz,next_eq
+        jp eq_open_screen
+.area:  cp 6
+        ret c
+        cp 16
+        jr nc,.r18
+        ld a,(eq_open)
+        or a
+        jp nz,eq_press
+        ld a,e
+        or a
+        ret z
+        cp 25
+        ret nc
+        jp toggle_view
+.r18:   cp 18
+        jp z,parent
+        cp 19
+        ret c
+        cp 23
+        jp z,click_bar
+        ld a,e                  ; the list
+        cp 31
+        jr nz,.row
+        ld a,d
+        cp 19
+        ld hl,-LIST_N
+        jp z,move
+        cp 22
+        ld hl,LIST_N
+        jp z,move
+        ret
+.row:   or a
+        ret z
+        ld a,d
+        sub LIST_ROW
+        ld e,a
+        ld d,0
+        ld hl,(top)
+        add hl,de
+        ld de,(count)
+        or a
+        sbc hl,de
+        ret nc
+        add hl,de
+        ld de,(sel)
+        or a
+        sbc hl,de
+        jp z,activate           ; the chosen one again: open or play it
+        add hl,de
+        ld (sel),hl
+        jp draw_list
+
+; the control row: E = column
+click_bar:
+        ld a,e
+        cp 1
+        jp z,do_prev
+        cp 2
+        jp z,seek_back
+        cp 3
+        jp z,play_btn
+        cp 4
+        jp z,pause_btn
+        cp 5
+        jp z,do_stop
+        cp 6
+        jp z,seek_fwd
+        cp 7
+        jp z,do_next
+        cp 9
+        ret c
+        cp 12
+        jp c,tog_shuf
+        cp 13
+        ret c
+        cp 16
+        jp c,tog_rep
+        cp 17
+        ret c
+        cp 19
+        jp c,eq_toggle
+        cp 24
+        ret c
+        ; the volume meter: (x - 191) * 25 / 16
+        ld a,(ms_x)
+        sub 191
+        ld l,a
+        ld h,0
+        ld de,25
+        call mul16
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        ld a,l
+        cp 101
+        jr c,.v
+        ld a,100
+.v:     ld e,a
+        ld a,C_VOLUME
+        jp cmd_u8
+
+click_seek:                     ; the seek bar: (total / 16) * (x - 8) / 15
+        ld a,(st+ST_FLAGS)
+        and F_STREAM
+        ret nz
+        ld hl,(st+ST_TOTAL)
+        ld a,h
+        or l
+        ret z
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        ld a,(ms_x)
+        sub 8
+        ld e,a
+        ld d,0
+        call mul16
+        ld de,15
+        call div16
+        ld a,C_SEEK
+        jp cmd_u16
+
+; the equalizer screen under the pointer: which slider
+eq_press:
+        call eq_hit
+        ld a,(eq_drag)
+        cp #FF
+        ret z
+        call eq_select
+        ; fall through
+eq_drag_update:
+        ld a,(eq_drag)
+        cp 5
+        jr z,.bal
+        cp #FF
+        ret z
+        ld d,a
+        ld a,(ms_y)             ; gain = 12 - (y - 48 - 5) / 2
+        sub 53
+        jr nc,.y1
+        xor a
+.y1:    srl a
+        cp 25
+        jr c,.y2
+        ld a,24
+.y2:    ld c,a
+        ld a,12
+        sub c
+        ld c,a
+        ld a,d
+        jp eq_set_gain
+.bal:   ld a,(ms_x)             ; balance = (x - 40) * 100 / 148
+        sub 40
+        jr nc,.b1
+        xor a
+.b1:    ld l,a
+        ld h,0
+        ld de,100
+        call mul16
+        ld de,148
+        call div16
+        ld a,l
+        cp 101
+        jr c,.b2
+        ld a,100
+.b2:    cp 47                   ; near the middle: the middle
+        jr c,.b3
+        cp 54
+        jr nc,.b3
+        ld a,50
+.b3:    ld c,a
+        jp eq_set_bal
+
+eq_hit: ld a,#FF
+        ld (eq_drag),a
+        ld a,(ms_x)
+        sub 8
+        ret c
+        cp 192
+        ret nc
+        ld b,a
+        ld a,(ms_y)
+        sub 48
+        ret c
+        cp 80
+        ret nc
+        cp 64
+        jr nc,.bal
+        ld a,b
+        rrca
+        rrca
+        rrca
+        and #1F
+        ld hl,band_cell
+        call idx
+        ld a,(hl)
+        ld (eq_drag),a
+        ret
+.bal:   ld a,b
+        cp 24
+        ret c
+        ld a,5
+        ld (eq_drag),a
+        ret
+
+;------------------------------------------------------------------------------
 keys:   ld c,#06
         ld e,#FF
         call BDOS
         or a
         ret z
+        ld b,a
+        ld a,(eq_open)
+        or a
+        ld a,b
+        jp nz,eq_keys
         cp 27
-        jp z,quit
-        cp 'q'
-        jp z,quit
-        cp 'Q'
         jp z,quit
         cp 30
         jr nz,.k1
@@ -1571,144 +3497,160 @@ keys:   ld c,#06
 .k4:    cp 13
         jp z,activate
         cp 8
-        jr nz,.k5
-        ; parent: entry 0 is ".." outside the root
-        ld hl,0
-        ld (sel),hl
-        call sel_type
-        cp 5
+        jp z,parent
+        ; fall through
+
+; the keys of both screens: A = key
+keys_common:
+        cp ' '
+        jp z,do_pause
+        cp '+'
+        jr z,vol_up
+        cp '='
+        jr z,vol_up
+        cp '-'
+        jr z,vol_down
+        cp ','
+        jp z,seek_back
+        cp '<'
+        jp z,seek_back
+        cp '.'
+        jp z,seek_fwd
+        cp '>'
+        jp z,seek_fwd
+        and #DF
+        cp 'Q'
+        jp z,quit
+        cp 'S'
+        jp z,do_stop
+        cp 'N'
+        jp z,do_next
+        cp 'P'
+        jp z,do_prev
+        cp 'H'
+        jp z,tog_shuf
+        cp 'R'
+        jp z,tog_rep
+        cp 'E'
+        jp z,next_eq
+        cp 'G'
+        jp z,eq_toggle
+        cp 'V'
+        jp z,toggle_view
+        ret
+
+vol_up: ld a,(st+ST_VOL)
+        add a,5
+        cp 101
+        jr c,vol_set
+        ld a,100
+        jr vol_set
+vol_down:
+        ld a,(st+ST_VOL)
+        sub 5
+        jr nc,vol_set
+        xor a
+vol_set:
+        ld e,a
+        ld a,C_VOLUME
+        jp cmd_u8
+
+do_pause:
+        ld a,C_PAUSE
+        jp cmd0
+do_stop:
+        ld a,C_STOP
+        jp cmd0
+do_next:
+        ld a,C_NEXT
+        jp cmd0
+do_prev:
+        ld a,C_PREV
+        jp cmd0
+
+play_btn:                       ; resume, or play the chosen entry
+        ld a,(st+ST_STATE)
+        cp 2
+        jr z,do_pause
+        or a
         ret nz
         jp activate
-.k5:    cp ' '
-        jr nz,.k6
-        ld a,C_PAUSE
-        ld bc,0
-        jp cmd
-.k6:    and #DF
-        cp 'S'
-        jr nz,.k7
-        ld a,C_STOP
-        ld bc,0
-        jp cmd
-.k7:    cp 'N'
-        jr nz,.k8
-        ld a,C_NEXT
-        ld bc,0
-        jp cmd
-.k8:    cp 'P'
-        jr nz,.k8b
-        ld a,C_PREV
-        ld bc,0
-        jp cmd
-.k8b:   cp 'H'
-        jr nz,.k8c
+pause_btn:
+        ld a,(st+ST_STATE)
+        cp 1
+        ret nz
+        jr do_pause
+
+seek_back:
+        ld de,-10
+        jr seek_by
+seek_fwd:
+        ld de,10
+seek_by:                        ; DE = seconds (signed)
+        ld a,(st+ST_FLAGS)
+        and F_SEEK
+        ret z
+        ld hl,(st+ST_ELAPS)
+        add hl,de
+        bit 7,h
+        jr z,.ok
+        ld hl,0
+.ok:    ld a,C_SEEK
+        jp cmd_u16
+
+tog_shuf:
         ld e,M_SHUF
-        jr .mode
-.k8c:   cp 'R'
-        jr nz,.k8d
+        jr tog_mode
+tog_rep:
         ld e,M_REPEAT
-.mode:  ld a,(st+ST_MODE)
+tog_mode:
+        ld a,(st+ST_MODE)
         xor e
         ld e,a
         ld a,C_MODE
         call cmd_u8
-        jp fetch_status_info
-.k8d:   cp 'E'
-        jr nz,.k9
-        jp next_eq
-.k9:    cp '+' & #DF
-        jr z,.up
-        cp '-' & #DF
-        jr z,.down
-        ret
-.up:    ld a,(st+ST_VOL)
-        add a,5
-        cp 101
-        jr c,.v
-        ld a,100
-        jr .v
-.down:  ld a,(st+ST_VOL)
-        sub 5
-        jr nc,.v
-        xor a
-.v:     ld e,a
-        ld a,C_VOLUME
-        jp cmd_u8
-
-; E: the next equalizer preset (the same ones as PicoPlay)
-next_eq:
-        ld a,(eq_preset)
-        inc a
-        cp 8
-        jr c,.ok
-        xor a
-.ok:    ld (eq_preset),a
-        ld l,a
-        ld h,0
-        ld e,l
-        ld d,h
-        add hl,hl
-        add hl,hl
-        add hl,de               ; *5
-        ld de,eq_tab
-        add hl,de
-        ld de,args
-        ld bc,5
-        ldir
-        ld bc,5
-        ld a,C_EQ
-        call cmd
-; which preset the engine's equalizer is (8 = its own setting, from PicoPlay)
-find_eq:
-        ld hl,W_STATUS+179
-        ld de,linebuf
-        ld bc,5
-        call eng_copy
-        ld b,0
-        ld hl,eq_tab
-.p:     push bc
-        push hl
-        ld de,linebuf
-        ld b,5
-.c:     ld a,(de)
-        cp (hl)
-        jr nz,.no
-        inc hl
-        inc de
-        djnz .c
-        pop hl
-        pop bc
-        ld a,b
-        ld (eq_preset),a
-        ret
-.no:    pop hl
-        ld bc,5
-        add hl,bc
-        pop bc
-        inc b
-        ld a,b
-        cp 8
-        jr c,.p
-        ld (eq_preset),a
-        ret
-
-draw_eq_name:                   ; "EQ ROCK" between the SPECTRUM and LEVEL labels
-        ld a,(eq_preset)
-        add a,a
-        add a,a
-        add a,a                 ; *8
-        ld l,a
-        ld h,0
-        ld de,eq_names
-        add hl,de
-        ld de,#050B
-        ld b,9
-        ld c,GREY*16+NAVY
-        jp put_str
-
-fetch_status_info:
         call fetch_status
         jp draw_info
+
+eq_toggle:
+        ld a,(eq_open)
+        or a
+        jp nz,eq_close
+        jp eq_open_screen
+
+; the equalizer screen's keys
+eq_keys:
+        cp 27
+        jp z,eq_close
+        cp 13
+        jp z,eq_close
+        cp 8
+        jp z,eq_close
+        cp 29
+        jr nz,.k1
+        ld a,(eq_sel)
+        or a
+        ret z
+        dec a
+        jp eq_select
+.k1:    cp 28
+        jr nz,.k2
+        ld a,(eq_sel)
+        cp 5
+        ret z
+        inc a
+        jp eq_select
+.k2:    cp 30
+        jr nz,.k3
+        ld c,1
+        jp eq_step
+.k3:    cp 31
+        jr nz,.k4
+        ld c,-1
+        jp eq_step
+.k4:    cp '0'
+        jp z,eq_reset
+        jp keys_common
 
 quit:   call restore_screen
         ld de,txt_bye
@@ -1855,6 +3797,8 @@ mul16:  push bc
 idtext:         db "PVAUDIO",0
 txt_title:      db "PICOAMP",0
 txt_spectrum:   db "SPECTRUM",0
+txt_scope:      db "SCOPE",0
+txt_equalizer:  db "EQUALIZER",0
 txt_level:      db "LEVEL",0
 txt_keys:       db "SHF REP EQ",0
 txt_shf:        db "SHF",0
@@ -1872,6 +3816,14 @@ txt_mono:       db "MONO",0
 txt_stereo:     db "ST",0
 txt_nofolder:   db "FOLDER NOT FOUND",0
 txt_listfail:   db "THE STATION LIST DID NOT LOAD",0
+txt_p12:        db "+12",0
+txt_z:          db "0",0
+txt_m12:        db "-12",0
+txt_bal:        db "BAL",0
+txt_db:         db " DB",0
+txt_balance:    db "BALANCE ",0
+txt_centre:     db "CENTRE",0
+txt_gclose:     db "G:CLOSE",0
 txt_empty:      db 0
 txt_bye:        db "PicoAmp: the music plays on.",13,10,"$"
 txt_notfound:   db "No PicoVerse Audio Engine found (flash LoadROM -p1).",13,10,"$"
@@ -1879,7 +3831,16 @@ txt_noanswer:   db "The engine does not answer.",13,10,"$"
 label_bars:     db 0,6,12,17,21,#FF
 
 eq_tab:         db 0,0,0,0,0, 5,2,-2,3,5, -1,3,4,2,-1, 3,1,-1,2,4, 3,0,-1,1,3, -4,-1,4,3,-2, 8,4,0,0,0, 6,2,0,1,5
-eq_names:       db "EQ FLAT",0, "EQ ROCK",0, "EQ POP",0,0, "EQ JAZZ",0, "EQ CLASS",0, "EQ VOICE",0, "EQ BASS",0, "EQ LOUD",0, "EQ OWN",0,0
+eq_names:       db "EQ FLAT",0,0,0, "EQ ROCK",0,0,0, "EQ POP",0,0,0,0, "EQ JAZZ",0,0,0, "EQ CLASS",0,0
+                db "EQ VOICE",0,0, "EQ BASS",0,0,0, "EQ LOUD",0,0,0, "EQ OWN",0,0,0,0
+eq_lab:         db " 60",0, "250",0, " 1K",0, " 4K",0, "12K",0
+eq_hz:          db "60 HZ",0,0,0, "250 HZ",0,0, "1 KHZ",0,0,0, "4 KHZ",0,0,0, "12 KHZ",0,0
+; the band of each cell of the equalizer picture (FF: none)
+band_cell:      db #FF,#FF,#FF,#FF,0,0,0,#FF,1,1,1,#FF,2,2,2,#FF,3,3,3,#FF,4,4,4,#FF
+eq_party:       db 0,58,66              ; a line of each part
+knob_v:         db #3C,#7E,#FF,#FF,#FF,#7E,#3C
+knob_h:         db #3C,#7E,#FF,#FF,#FF,#FF,#7E,#3C
+bitmask:        db #80,#40,#20,#10,#08,#04,#02,#01
 
 ; level 0..31 -> lit segments 0..20
 seg_of:         db 0,1,1,2,3,3,4,5,5,6,6,7,8,8,9,10,10,11,12,12,13,14,14,15,15,16,17,17,18,19,19,20
@@ -1894,6 +3855,10 @@ pat_knob:       db #00,#3C,#7E,#FF,#FF,#7E,#3C,#00
 pat_hline:      db #00,#00,#00,#FF,#00,#00,#00,#00
 pat_vol_on:     db #00,#7E,#7E,#7E,#7E,#7E,#7E,#00
 pat_vol_off:    db #00,#00,#00,#00,#00,#00,#7E,#00
+pat_close:      db #00,#42,#24,#18,#18,#24,#42,#00
+pat_up:         db #00,#10,#38,#7C,#FE,#00,#00,#00
+pat_down:       db #00,#00,#00,#FE,#7C,#38,#10,#00
+pat_arrow:      db #80,#C0,#E0,#F0,#F8,#E0,#B0,#18
 icons:          db #00,#46,#4E,#5E,#5E,#4E,#46,#00   ; |<
                 db #00,#12,#36,#7E,#7E,#36,#12,#00   ; <<
                 db #00,#20,#30,#38,#3C,#38,#30,#20   ; >
@@ -1909,9 +3874,10 @@ palette_msx:    db #00,#00, #00,#00, #11,#06, #33,#07, #17,#01, #27,#03, #51,#01
                 db #71,#01, #73,#03, #61,#06, #64,#06, #11,#04, #65,#02, #55,#05, #77,#07
 
         include "digits.inc"
+        include "tables.inc"
 
 ;------------------------------------------------------------------------------
-; variables
+; variables with a starting value
 slot:           db 0
 token:          db 0
 code:           db 0
@@ -1923,6 +3889,13 @@ gen_shown:      db #FF
 loading:        db 0
 vol_shown:      db #FF
 eq_preset:      db 0
+eq_shown:       db #FF
+eq_open:        db 0
+eq_sel:         db 0
+eq_drag:        db #FF
+eqbal:          db 50
+view:           db 0
+hold:           db 60
 mode_shown:     db #FF
 knob_pos:       db 0
 fmt_started:    db 0
@@ -1945,17 +3918,62 @@ have_list:      db 0
 ent_p:          dw 0
 row_no:         db 0
 ent_type:       db 0
-ent_size:       dw 0
 tmp16:          dw 0
-numbuf:         ds 8
-linebuf:        ds 64
-path:           ds 64
-argbuf:         ds 128
-cellcache:      ds (NBARS+2)*10,#FF
-font:           ds 96*8
-st:             ds 224
-viz:            ds V_COPY
-args:           ds 512
-reply:          ds 2049
+colfn:          dw scope_colrow
+plot_inv:       db 0
+sp_ys:          dw 0
+sp_prev:        db 0
+sp_cur:         db 0
+sp_x:           db 0
+vs_x:           db 0
+er_b:           db 0
+er_cc:          db 0
+cr_y0:          db 0
+cr_last:        db #FF
+er_band:        db 0
+fe_p:           dw 0
+tt_text:        dw 0
+tt_cell:        dw 0
+tt_wc:          dw 0
+tk_turn:        dw 0
+tr_k:           db 0
+tr_n:           db 0
+ms_port:        db 0
+ms_probe:       db 0
+ms_fn:          db 0
+ms_dx:          db 0
+ms_dy:          db 0
+ms_x:           db 128
+ms_y:           db 96
+ms_shown_x:     db #FF
+ms_shown_y:     db #FF
+ms_prev:        db 0
+ms_try:         db 0
+ms_rest:        db 0                    ; bit 0 / 1: port 1 / 2 gave 0,0
 progend:
-        assert progend < #4000
+
+; buffers (not in the file; cleared at the start)
+REPLY_MAX       equ 1024
+bss_start       equ (progend + 7) & #FFF8
+font            equ bss_start           ; 96 x 8, aligned to 8 (the tickers count on it)
+vizbuf          equ font + 96*8         ; the area: 10 x 192
+rowcol          equ vizbuf + 1920       ; colours of one area row
+tkbuf           equ rowcol + 192        ; one ticker row
+tk_title        equ tkbuf + 240
+tk_artist       equ tk_title + TSIZE
+tk_list         equ tk_artist + TSIZE
+tk_end          equ tk_list + TSIZE
+scope_old       equ tk_end              ; the trace on screen (64 y values)
+cellcache       equ scope_old + 64      ; (NBARS + 2) x 10 bar cells
+st              equ cellcache + (NBARS+2)*10
+viz             equ st + 224
+args            equ viz + V_COPY        ; 256
+reply           equ args + 256          ; REPLY_MAX + 1
+linebuf         equ reply + REPLY_MAX + 1
+path            equ linebuf + 64
+argbuf          equ path + 64           ; 128
+numbuf          equ argbuf + 128
+eqg             equ numbuf + 8          ; the equalizer screen's gains
+eqcols          equ eqg + 8             ; 3 x 24 colours of its parts
+bss_end         equ eqcols + 72
+        assert bss_end < #4000
