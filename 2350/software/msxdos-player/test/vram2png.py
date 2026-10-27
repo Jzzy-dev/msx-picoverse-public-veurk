@@ -10,6 +10,9 @@ def p3(r, g, b):
 PAL = [p3(0, 0, 0), p3(0, 0, 0), p3(1, 1, 3), p3(2, 2, 6), p3(3, 6, 7), p3(7, 7, 7), p3(4, 4, 5), p3(0, 4, 1),
        p3(2, 7, 2), p3(7, 7, 1), p3(7, 4, 0), p3(7, 1, 1), p3(6, 2, 6), p3(2, 2, 3), p3(0, 0, 2), p3(5, 5, 6)]
 v = open(sys.argv[1], 'rb').read()
+if len(v) >= 0x4000 + 32:          # the palette the program set (the harness saves it)
+    pv = v[0x4000:0x4020]
+    PAL = [p3((pv[2 * i] >> 4) & 7, pv[2 * i + 1] & 7, pv[2 * i] & 7) for i in range(16)]
 im = Image.new('RGB', (256, 192))
 px = im.load()
 for ty in range(24):

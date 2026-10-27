@@ -33,3 +33,51 @@ for y in range(H):
 print('scope_col:')
 for i in range(0, H, 16):
     print('        db ' + ','.join('#%02X' % v for v in cols[i:i + 16]))
+
+# full screen: big bars, 20 cells (40 segments): level 0..31 -> lit segments
+print('fs_segof:')
+print('        db ' + ','.join('%d' % round(l * 40 / 31) for l in range(32)))
+GREEN_, YELLOW_, ORANGE_, RED_, CYAN_, BLUE_, WHITE_ = 8, 9, 10, 11, 4, 3, 5
+segs = []
+for sgm in range(40):
+    fg = GREEN_ if sgm < 22 else YELLOW_ if sgm < 30 else ORANGE_ if sgm < 35 else RED_
+    segs.append(fg * 16 + NAVY)
+print('fs_segcol:')
+for i in range(0, 40, 10):
+    print('        db ' + ','.join('#%02X' % v for v in segs[i:i + 10]))
+# mirror: cyan to white
+segs = []
+for sgm in range(20):
+    fg = BLUE_ if sgm < 6 else CYAN_ if sgm < 16 else WHITE_
+    segs.append(fg * 16 + NAVY)
+print('mir_segcol:')
+print('        db ' + ','.join('#%02X' % v for v in segs))
+# plasma: a sine 0..63
+import math
+print('sin64:')
+sv = [int(round(31.5 + 31.5 * math.sin(i * 2 * math.pi / 256))) for i in range(256)]
+for i in range(0, 256, 16):
+    print('        db ' + ','.join('%d' % v for v in sv[i:i + 16]))
+# ordered dither: f of 8 pixels set, two line phases
+order = [0, 4, 2, 6, 1, 5, 3, 7]
+def dpat(f, ph):
+    b = 0
+    for k in range(f):
+        b |= 0x80 >> ((order[k] + ph * 1) % 8)
+    return b
+print('dither:')
+print('        db ' + ','.join('#%02X' % dpat(f, 0) for f in range(8)))
+print('        db ' + ','.join('#%02X' % dpat(f, 4) for f in range(8)))
+# a colour wheel of 48 steps (RGB 0..7): the plasma's palette turns round it
+wheel = []
+for i in range(48):
+    h = i / 48.0
+    r = max(0, min(1, abs(h * 6 - 3) - 1)); g = max(0, min(1, 2 - abs(h * 6 - 2))); b = max(0, min(1, 2 - abs(h * 6 - 4)))
+    wheel += [int(round(r * 7)), int(round(g * 7)), int(round(b * 7))]
+print('wheel:')
+for i in range(0, 48 * 3, 24):
+    print('        db ' + ','.join('%d' % v for v in wheel[i:i + 24]))
+# brightness 0..7: v * b / 7
+print('bright:')
+for b in range(8):
+    print('        db ' + ','.join('%d' % (v * b // 7) for v in range(8)))

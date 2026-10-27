@@ -67,7 +67,7 @@ While playing: `SPACE` pause, `N` next, `P` previous, `S` stop, `+`/`-` volume, 
 
 ### PICOAMP.COM (MSX2, MSX-DOS)
 
-A full-screen player in a Winamp/MUBScope style, with a 24-band spectrum analyser, peak dots, VU meters, an oscilloscope, an equalizer screen with sliders and balance, mouse support, and long titles and names that scroll like a news ticker. It needs an MSX2 and engine 0.8 or newer. `PICOAMP` or `PICOAMP /MUSIC`. Keys: cursor keys to browse, `Enter` play, `BS` parent folder, `SPACE` pause, `S` stop, `N`/`P` next/previous, `+`/`=`/`-` volume, `,`/`.` 10 seconds back/forward, `H` shuffle, `R` repeat, `V` spectrum/oscilloscope, `G` equalizer, `E` preset, `ESC` quit. Sources and details: `2350/software/msxdos-player/README.md`.
+A full-screen player in a Winamp/MUBScope style, with a 24-band spectrum analyser, peak dots, VU meters, an oscilloscope, an equalizer screen with sliders and balance, four full screen pictures (bars, mirror, waterfall, plasma), favourites (the same RADIOFAV.M3U as PicoPlay), a help page, mouse support, 6-pixel text and long names that scroll like a news ticker. It needs an MSX2 and engine 0.8 or newer. `PICOAMP` or `PICOAMP /MUSIC`. Keys: cursor keys to browse, `Enter` play, `BS` parent folder, `SPACE` pause, `S` stop, `N`/`P` next/previous, `+`/`=`/`-` volume, `,`/`.` 10 seconds back/forward, `H` shuffle, `R` repeat, `V` spectrum/oscilloscope, `G` equalizer, `E` preset, `Z` full screen, `F`/`D` add/remove a favourite, `?` help, `ESC` quit. Sources and details: `2350/software/msxdos-player/README.md`.
 
 ## 5. PicoPlay (SymbOS)
 

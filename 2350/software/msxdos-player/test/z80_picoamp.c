@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "z80.h"
+#include "ff.h"
 
 void pva_init(uint8_t *arena, size_t arena_size);
 uint8_t pva_mem_read(uint16_t addr);
@@ -41,12 +42,15 @@ extern uint32_t host_audio_frames, host_audio_underruns;
 static uint8_t mem[65536];
 static unsigned long prof[65536], prof_next;       // PC samples (PICOAMP_PROF)
 static int prof_on;
-static unsigned long rd_ram, wr_ram, busy_cyc;                // the Z80's RAM traffic
+static unsigned long rd_ram, wr_ram, busy_cyc;
+static uint16_t cnt_addr[16]; static unsigned long cnt_n[16]; static int cnt_k;   // PICOAMP_COUNT                // the Z80's RAM traffic
 static uint8_t vram[0x4000];
 static uint16_t vaddr;
 static bool vlatch;
 static uint8_t vfirst;
 static uint8_t page1 = 0x00;
+static uint8_t pal[32], pal_i, pal_hi;      // the palette (R#16, port 9Ah)
+static int pal_set;
 static z80 cpu;
 static unsigned long next_ms_cyc, next_frame_cyc;
 static const char *keys;
@@ -98,6 +102,13 @@ static void pout(z80 *z, uint8_t p, uint8_t v)
 {
     (void)z;
     if (p == 0x98) { vram[vaddr & 0x3FFF] = v; vaddr++; vwrites++; vlatch = false; }
+    else if (p == 0x9A)
+    {
+        pal[pal_i * 2 + pal_hi] = v;
+        pal_set = 1;
+        if (pal_hi) pal_i = (pal_i + 1) & 15;
+        pal_hi ^= 1;
+    }
     else if (p == 0x99)
     {
         if (!vlatch) { vfirst = v; vlatch = true; }
@@ -105,6 +116,7 @@ static void pout(z80 *z, uint8_t p, uint8_t v)
         {
             vlatch = false;
             if (!(v & 0x80)) vaddr = (uint16_t)(vfirst | ((v & 0x3F) << 8));
+            else if ((v & 0x3F) == 16) { pal_i = vfirst & 15; pal_hi = 0; }
         }
     }
 }
@@ -130,6 +142,20 @@ static void load_font(const char *path)
         n++;
     }
     fclose(f);
+}
+
+// MSX-DOS 2 file handles on the card image (through the engine's FatFs)
+static FIL fh[4];
+static int fh_used[4];
+static void dos_path(uint16_t p, char *out, size_t n)
+{
+    char t[128]; int i = 0;
+    while (mem[p] && i < 127) t[i++] = (char)mem[p++];
+    t[i] = 0;
+    const char *q = t;
+    if (q[0] && q[1] == ':') q += 2;
+    snprintf(out, n, "0:%s", q);
+    for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
 }
 
 static void ret(void) { cpu.pc = mem[cpu.sp] | (mem[cpu.sp + 1] << 8); cpu.sp += 2; }
@@ -183,6 +209,40 @@ static int run(unsigned long max_cyc)
                         }
                         cpu.l = cpu.a;
                         break;
+                    case 0x43: case 0x44:   // _OPEN / _CREATE: DE = path -> B = handle
+                    {
+                        char path[160]; int h;
+                        dos_path((uint16_t)(cpu.d << 8 | cpu.e), path, sizeof path);
+                        for (h = 0; h < 4 && fh_used[h]; h++) ;
+                        BYTE mode = cpu.c == 0x44 ? (FA_CREATE_ALWAYS | FA_WRITE | FA_READ) : (FA_READ | FA_WRITE);
+                        if (h == 4 || f_open(&fh[h], path, mode) != FR_OK) { cpu.a = 0xD7; break; }    // .NOFIL
+                        fh_used[h] = 1; cpu.b = (uint8_t)h; cpu.a = 0;
+                        printf("  [DOS %s %s]\n", cpu.c == 0x44 ? "create" : "open", path);
+                        break;
+                    }
+                    case 0x45:                  // _CLOSE
+                        if (cpu.b < 4 && fh_used[cpu.b]) { f_close(&fh[cpu.b]); fh_used[cpu.b] = 0; }
+                        cpu.a = 0;
+                        break;
+                    case 0x48: case 0x49:       // _READ / _WRITE: B, DE = buffer, HL = bytes
+                    {
+                        UINT n = 0, want = (UINT)(cpu.h << 8 | cpu.l);
+                        uint16_t d = (uint16_t)(cpu.d << 8 | cpu.e);
+                        static uint8_t tmp[65536];
+                        if (cpu.b >= 4 || !fh_used[cpu.b]) { cpu.a = 0xC2; break; }
+                        if (cpu.c == 0x48) { f_read(&fh[cpu.b], tmp, want, &n); memcpy(&mem[d], tmp, n); cpu.a = n ? 0 : 0xC7; }
+                        else { memcpy(tmp, &mem[d], want); f_write(&fh[cpu.b], tmp, want, &n); cpu.a = n == want ? 0 : 0xC1; }
+                        cpu.h = (uint8_t)(n >> 8); cpu.l = (uint8_t)n;
+                        break;
+                    }
+                    case 0x6B:                  // _GENV: PROGRAM
+                    {
+                        const char *v = "A:\\PICOAMP.COM";
+                        uint16_t d = (uint16_t)(cpu.d << 8 | cpu.e);
+                        memcpy(&mem[d], v, strlen(v) + 1);
+                        cpu.a = 0;
+                        break;
+                    }
                     default: printf("[BDOS %02X]\n", cpu.c);
                 }
                 ret();
@@ -248,6 +308,7 @@ static int run(unsigned long max_cyc)
                 cpu.cyc += 400;
                 continue;
         }
+        for (int k = 0; k < cnt_k; k++) if (cpu.pc == cnt_addr[k]) cnt_n[k]++;
         if (prof_on && cpu.cyc >= prof_next) { prof[cpu.pc]++; prof_next = cpu.cyc + 97; }
         if (mem[cpu.pc] == 0x76)    // HALT: a main loop pass ended
         {
@@ -282,6 +343,8 @@ int main(int argc, char **argv)
     keys = argv[4];
     mouse_script(getenv("PICOAMP_MOUSE"));
     prof_on = getenv("PICOAMP_PROF") != NULL;
+    { const char *c = getenv("PICOAMP_COUNT"); int n;
+      while (c && *c && cnt_k < 16 && sscanf(c, "%hx%n", &cnt_addr[cnt_k], &n) == 1) { cnt_k++; c += n; if (*c == ',') c++; } }
     size_t al = strlen(a);
     mem[0x80] = (uint8_t)(al ? al + 1 : 0);
     mem[0x81] = ' ';
@@ -306,6 +369,7 @@ int main(int argc, char **argv)
            host_audio_underruns);
     printf("[RAM: %.0f reads, %.0f writes a second; busy %.0f%% (not in HALT)]\n",
            rd_ram / (cpu.cyc / (double)HZ), wr_ram / (cpu.cyc / (double)HZ), 100.0 - 100.0 * busy_cyc / cpu.cyc);
+    for (int k = 0; k < cnt_k; k++) printf("[%04X entered %lu times]\n", cnt_addr[k], cnt_n[k]);
     if (prof_on)
     {
         FILE *pf = fopen(getenv("PICOAMP_PROF"), "w");
@@ -327,6 +391,7 @@ int main(int argc, char **argv)
     }
     f = fopen(argv[6], "wb");
     fwrite(vram, 1, sizeof vram, f);
+    if (pal_set) fwrite(pal, 1, sizeof pal, f);     // the palette after VRAM
     fclose(f);
     return 0;
 }

@@ -12,6 +12,10 @@ PICOAMP only copies the data and draws it.
 |---|---|
 | ![Scope](images/picoamp_scope.png) | ![Equalizer](images/picoamp_equalizer.png) |
 
+| Full screen (Z): bars, mirror, waterfall, plasma | Help (?) |
+|---|---|
+| ![Full screen](images/picoamp_fullscreen.png) | ![Help](images/picoamp_help.png) |
+
 ## Running it
 
 ```
@@ -34,7 +38,9 @@ The engine is found by itself in any slot, as PVTEST and PicoPlay do.
 | List | The folder or radio list, with the path, the number of entries and page arrows |
 | Bottom row | Control icons, SHF / REP (green when on), EQ, volume |
 
-A title, artist, station or file name that is longer than its place stands
+Titles, artists, the format line, the path and the list are in 6-pixel text
+(42 characters a screen row; the MSX font is drawn for 6-pixel cells). A title,
+artist, station or file name that is longer than its place still stands
 still for a second and then scrolls like a news ticker, round and round. One
 text moves at a time (the title first, then the artist, then the chosen list
 entry), so the rest of the screen stays smooth. Moving through the list gives
@@ -62,7 +68,34 @@ PICOAMP shows "LOADING THE LIST...".
 | V | Spectrum / oscilloscope |
 | G | Equalizer screen |
 | E | Next equalizer preset (Flat, Rock, Pop, Jazz, Classic, Voice, Bass, Loud) |
+| Z | Full screen pictures |
+| F | Add the chosen station (or the one that plays) to the favourites |
+| D or DEL | Remove the chosen station from the favourites (in Internet radio/Favourites) |
+| ? or / | The help page with all the keys (any key closes it) |
 | ESC / Q | Quit to MSX-DOS (the music keeps playing) |
+
+### Favourites
+
+The favourites are `RADIOFAV.M3U` in the root of the card, the same file
+PicoPlay writes; the engine reads it for Internet radio/Favourites. PICOAMP
+writes it through MSX-DOS 2 (Nextor), on the drive it was started from (the
+`PROGRAM` environment item), else A:. A message in the path line says what
+happened ("Added to the favourites", "Already a favourite", ...).
+
+### Full screen
+
+Four pictures, made from the engine's spectrum and levels:
+
+| Picture | What it is |
+|---------|------------|
+| Bars | 24 bars of 20 cells (40 steps), green to red, with peaks |
+| Mirror | The bars from the middle up, and their reflection down |
+| Waterfall | The spectrum as a line of colours, one line a picture, top to bottom and round again; a white line marks the newest |
+| Plasma | A plasma (four sines) drawn once; its 12 colours turn round a colour wheel, faster when the music is louder, brighter with the bass |
+
+Left/Right, V or a click: the next picture. Z, ESC, Enter, BS or the right
+button: back. The title is at the top, the picture's name and the time at the
+bottom. The playback keys keep working.
 
 ### Equalizer screen
 
@@ -99,6 +132,8 @@ A mouse in either port is used as soon as it moves. An arrow appears.
   the middle). Clicking the preset name picks the next one, the right button
   closes the screen.
 * **Close box** in the title bar: quit.
+* **Help page:** a click closes it. **Full screen:** a click is the next
+  picture, the right button goes back.
 
 An empty port (or a joystick) is not taken for a mouse: a mouse is used only
 after it has reported standing still once.
@@ -122,8 +157,14 @@ after it has reported standing still once.
   in RAM, in the order of the pattern table, so each row of cells goes to the
   VDP in one run. The scope takes its old trace off and puts the new one on,
   then sends the buffer. A change on the equalizer redraws only that slider.
-* Tickers shift the font into a row buffer and send only the patterns; the
-  colours stay.
+* 6-pixel text is put together in a row buffer (a guard cell on each side)
+  and sent as the cells' patterns. A ticker, when it gets its turn, draws
+  its text round and round into 8 strips shifted 0-7 pixels, one strip a
+  pass during its still second; then each step only copies 8 bytes a cell
+  from the right strip to the VDP.
+* The waterfall writes 32 colour bytes a line (the patterns are all set);
+  the plasma's colours are palette entries, so it changes 12 palette entries
+  a picture and nothing in VRAM.
 * The engine computes the data on core 1 of the RP2350: a 512-point FFT plus a
   second FFT at a quarter of the rate for the low bands. It updates about 50
   times a second. See `pvaudio/pva_viz.c` and the `PVA_VIZ_*` offsets in
@@ -137,8 +178,9 @@ python3 gen_tables.py > tables.inc      # scope and buffer tables (already gener
 sjasmplus --nologo --msg=war --raw=PICOAMP.COM picoamp.asm
 ```
 
-PICOAMP.COM is about 8.5 KB; with its buffers it uses memory up to about 3920h
-(page 1 has to stay free for the engine).
+PICOAMP.COM is about 13 KB (page 0, below 4000h: page 1 is switched to the
+engine). Its buffers are in page 2, from 8000h to about AC60h; the program
+says so and stops when MSX-DOS leaves less room.
 
 ### Tests
 
@@ -163,7 +205,11 @@ how quickly each key was answered, and how busy the Z80 is and how much it
 reads and writes its RAM. On a 3.58 MHz Z80 a pass takes about 1.1 frames
 with the spectrum (the Z80 is idle 75% of the time), about 1.5 with the
 oscilloscope; equalizer changes are answered in 1-3 frames.
-`PICOAMP_PROF=file` writes a profile (program counter samples).
+`PICOAMP_PROF=file` writes a profile (program counter samples),
+`PICOAMP_COUNT="addr,..."` counts how often addresses are run. The harness
+also answers the MSX-DOS 2 file calls (open, create, read, write, close and
+`PROGRAM`) on the card image, through the engine's own FatFs, and saves the
+palette after VRAM so the plasma's picture shows its real colours.
 
 Keeping the Z80 idle matters on the cartridge: in MSX-DOS the main RAM is
 the cartridge's 1 MB mapper, in PSRAM behind the same RP2350 cache the
@@ -183,5 +229,5 @@ layout.
 
 ## Ideas for later
 
-An MSX1 version, 6-pixel text for longer titles without scrolling, a
-favourites key for radio stations, and a peak-hold setting for the spectrum.
+An MSX1 version, more full screen pictures (a big oscilloscope, stars that
+jump with the bass), a peak-hold setting for the spectrum.

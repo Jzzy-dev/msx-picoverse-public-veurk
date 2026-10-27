@@ -11,9 +11,18 @@ int host_disk_open(const char *path, uint32_t create_sectors);
 int main(int argc, char **argv)
 {
     static FATFS fs;
-    if (argc < 4 || (argc - 2) % 2) { printf("usage: fatput card.img /DST local ...\n"); return 2; }
+    if (argc < 4 || ((argc - 2) % 2 && strcmp(argv[2], "-cat"))) { printf("usage: fatput card.img /DST local ... | -cat /NAME\n"); return 2; }
     if (host_disk_open(argv[1], 0)) { printf("no image %s\n", argv[1]); return 2; }
     if (f_mount(&fs, "0:", 1)) { printf("no FAT\n"); return 2; }
+    if (!strcmp(argv[2], "-cat"))               // fatput card.img -cat /NAME: print a file
+    {
+        FIL f; char b[512]; UINT n; char p[300];
+        snprintf(p, sizeof p, "0:%s", argv[3]);
+        if (f_open(&f, p, FA_READ)) { printf("no %s\n", p); return 1; }
+        while (!f_read(&f, b, sizeof b, &n) && n) fwrite(b, 1, n, stdout);
+        f_close(&f);
+        return 0;
+    }
     for (int i = 2; i + 1 < argc; i += 2)
     {
         FILE *in = fopen(argv[i + 1], "rb");

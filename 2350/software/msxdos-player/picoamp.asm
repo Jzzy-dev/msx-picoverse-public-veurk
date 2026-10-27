@@ -13,7 +13,8 @@
 ;       Space pause/play, S stop, N next, P previous, + (or =) / - volume,
 ;       , / . 10 seconds back / on, H shuffle, R repeat,
 ;       V spectrum / oscilloscope, G equalizer screen, E next preset,
-;       ESC or Q quit (the music keeps playing: the cartridge plays it).
+;       Z full screen pictures, F / D (DEL) add / remove a favourite,
+;       ? or / the help page, ESC or Q quit (the music keeps playing).
 ; Equalizer screen: Left/Right choose a band (or the balance), Up/Down set
 ;       it, 0 back to the middle, E next preset, G / ESC / Enter close.
 ; Mouse (either port): click a list entry to select it, click it again to
@@ -72,6 +73,7 @@ C_SEEK   equ #26
 C_VOLUME equ #27
 C_MODE   equ #28
 C_EQ     equ #2A
+C_EINFO  equ #13
 C_BAL    equ #2B
 M_REPEAT equ #01
 M_SHUF   equ #02
@@ -149,6 +151,11 @@ GAP      equ 4              ; spaces between the end and the start again
 
 ;------------------------------------------------------------------------------
 start:  ld sp,(#0006)
+        ld hl,(#0006)           ; the buffers in page 2 and the stack must fit
+        ld de,bss_end+512
+        or a
+        sbc hl,de
+        jp c,nomemory
         call bss_init
         call find
         jp c,notfound
@@ -209,14 +216,25 @@ mainloop:
         jr z,.same
         ld (hl),a
         call fetch_status
-        call draw_info
+        call info_any
 .same:  ld a,(loading)
         or a
         call nz,check_loading
         call ticker_run
+        call msg_run
         call mouse
         call keys
         jr mainloop
+
+; the status changed: what shows it now
+info_any:
+        ld a,(help_on)
+        or a
+        ret nz
+        ld a,(fs_on)
+        or a
+        jp nz,fs_info
+        jp draw_info
 
 bss_init:
         ld hl,bss_start
@@ -236,6 +254,9 @@ bss_init:
         ld bc,(NBARS+2)*4       ; and bar_raw
         ld a,#FF
         call memset
+        call bars_normal
+        ld hl,t6buf
+        ld (t6_base),hl
         ld a,#FF
         ld (tk_title+T_ROW),a
         ld (tk_artist+T_ROW),a
@@ -979,6 +1000,12 @@ draw_view:
         ret z
         xor a
         ld (viz_new),a
+        ld a,(help_on)
+        or a
+        ret nz
+        ld a,(fs_on)
+        or a
+        jp nz,fs_draw
         ld a,(eq_open)
         or a
         jp nz,draw_vu
@@ -1001,6 +1028,7 @@ show_view:
         ld a,(view)
         or a
         jr nz,.scope
+        call bars_normal
         ld hl,bar_raw           ; every bar cell drawn again
         ld bc,NBARS*2
         ld a,#FF
@@ -1084,8 +1112,8 @@ bars_from:
         add hl,de
         ld a,(hl)
         ld (pk_level),a
-        ld a,b
-        inc a                   ; column 1..24
+        ld a,(bp_col0)          ; column 1..24 (full screen: 4..27)
+        add a,b
         ld (bar_col),a
         jr .draw
 .vu:    ld a,b
@@ -1125,9 +1153,9 @@ bars_from:
         call draw_bar
 .skip:  pop bc
         inc b
-        ld a,b
-        cp NBARS+2
-        jr c,.b
+        ld a,(bp_nbars)
+        cp b
+        jr nz,.b
         ret
 
 idx:    ld e,a                  ; HL += A
@@ -1137,7 +1165,7 @@ idx:    ld e,a                  ; HL += A
 
 ; draw_bar: C = level 0-31, (pk_level), (bar_col), (bar_no)
 draw_bar:
-        ld hl,seg_of
+        ld hl,(bp_segof)
         ld a,c
         call idx
         ld a,(hl)
@@ -1146,7 +1174,7 @@ draw_bar:
         or a
         ld a,#FF
         jr z,.pk                ; nothing: no dot
-        ld hl,seg_of
+        ld hl,(bp_segof)
         ld a,(pk_level)
         call idx
         ld a,(hl)
@@ -1156,9 +1184,11 @@ draw_bar:
         ld a,#FF                ; under the bar: no dot
 .pk:    cp #FF
         jr z,.pk2
-        cp 20
+        ld hl,bp_segs
+        cp (hl)
         jr c,.pk2
-        ld a,19
+        ld a,(hl)
+        dec a
 .pk2:   ld (pk),a
         ; the same as last time: nothing to do
         ld a,(bar_no)
@@ -1187,7 +1217,10 @@ draw_bar:
         ld a,b
         cp #FF
         jr nz,.part
-        ld de,#0900             ; unknown: all of it (D = 9, E = 0)
+        ld a,(bp_cells)         ; unknown: all of it
+        dec a
+        ld d,a
+        ld e,0
         jr .range
 .part:  ld e,a                  ; E = lowest segment, D = highest
         ld d,a
@@ -1204,29 +1237,31 @@ draw_bar:
         dec a
         srl a
 .lo0:   ld e,a
+        ld a,(bp_cells)
+        ld l,a
         ld a,d
         srl a
-        cp 10
+        cp l
         jr c,.hi
-        ld a,9
+        ld a,l
+        dec a
 .hi:    ld d,a
 .range: ld a,e
         ld (cell_hi),a          ; (used as the first cell)
         ld a,d
         ld (cell_top),a
-        ; the cache of this bar's cells
+        ; the cache of this bar's cells: bar * cells
+        ld hl,(bp_cache)
+        ld a,(bp_cells)
+        ld e,a
+        ld d,0
         ld a,(bar_no)
-        ld l,a
-        ld h,0
-        add hl,hl
-        ld e,l
-        ld d,h
-        add hl,hl
-        add hl,hl
-        add hl,de               ; *10
-        ld de,cellcache
-        add hl,de
-        ld (cache_p),hl
+        or a
+        jr z,.c0
+.c1:    add hl,de
+        dec a
+        jr nz,.c1
+.c0:    ld (cache_p),hl
         ld a,(cell_hi)
         ld b,a                  ; cell 0 = bottom
         jr .c
@@ -1283,6 +1318,8 @@ draw_bar:
 
 ; bar_cell: C = code, B = cell (0 bottom)
 bar_cell:
+        ld a,b
+        ld (bm_cell),a
         ; patterns: rows 0-2 upper, 4-6 lower
         ld a,c
         and #0A                 ; upper lit or peak
@@ -1307,7 +1344,7 @@ bar_cell:
         ld a,b
         add a,a
         inc a                   ; upper segment
-        ld hl,seg_col
+        ld hl,(bp_segcol)
         call idx
         ld a,(hl)
         bit 3,c
@@ -1319,7 +1356,7 @@ bar_cell:
         ld (cellclr+3),a
         ld a,b
         add a,a
-        ld hl,seg_col
+        ld hl,(bp_segcol)
         call idx
         ld a,(hl)
         bit 2,c
@@ -1329,13 +1366,38 @@ bar_cell:
         ld (cellclr+5),a
         ld (cellclr+6),a
         ld (cellclr+7),a
-        ld a,15
+        ld a,(bp_bottom)
         sub b
         ld d,a                  ; row 15 - cell
         ld a,(bar_col)
         ld e,a
+        push bc
         ld ix,cellpat
         ld iy,cellclr
+        call put_cell2
+        pop bc
+        ld a,(bp_mirror)        ; and upside down below the middle
+        or a
+        ret z
+        ld ix,cellpat
+        ld iy,cellpat2
+MI = 0
+        dup 8
+        ld a,(ix+7-MI)
+        ld (iy+MI),a
+        ld a,(ix+15-MI)
+        ld (iy+8+MI),a
+MI = MI + 1
+        edup
+        ld a,(bp_mirror)
+        ld d,a
+        ld a,(bm_cell)
+        add a,d
+        ld d,a
+        ld a,(bar_col)
+        ld e,a
+        ld ix,cellpat2
+        ld iy,cellclr2
         jp put_cell2
 
 ;------------------------------------------------------------------------------
@@ -2351,7 +2413,7 @@ draw_info:
         ld hl,linebuf
         ld b,21
         ld c,GREEN*16+NAVY
-        call put_str
+        call text6s
         call draw_seek
         call draw_state
         call draw_modes
@@ -2473,13 +2535,15 @@ draw_seek:
         ret z
         push af
         ld a,(hl)
+        cp #FF
+        jr z,.nk                ; nothing drawn yet (all redrawn)
         inc a
         ld e,a
         ld d,4
         ld ix,pat_track
         ld a,GREY*16+NAVY
         call put_cell
-        pop af
+.nk:    pop af
         ld (knob_pos),a
         inc a
         ld e,a
@@ -2597,7 +2661,7 @@ draw_path:
         ld hl,path
         ld b,24
         ld c,YELLOW*16+NAVY
-        call put_str
+        call text6s
         ld de,linebuf
         ld hl,(count)
         call fmt_u16
@@ -2704,7 +2768,7 @@ draw_list:
         ld hl,linebuf
         ld b,30
         ld c,A_NORM
-        call put_str
+        call text6s
         jr .next
 .chosen:
         ld de,(row_cell)
@@ -2831,7 +2895,9 @@ check_loading:
         ld a,C_DOPEN
         ld bc,1
         call cmd
-        jp z,got_folder
+        jr nz,.failed
+        call got_folder
+        jp draw_state           ; no longer "loading"
 .failed:
         ld hl,txt_listfail
         call show_path_msg
@@ -2906,10 +2972,24 @@ ticker_text:
         ld de,(tt_cell)
         ld bc,(tt_wc)
         push ix
-        call put_str
+        call text6s
         pop ix
-        ld a,(ix+T_W)
-        cp (ix+T_LEN)
+        ; longer than its place (len * 6 > width * 8)?
+        ld l,(ix+T_LEN)
+        ld h,0
+        ld e,l
+        ld d,h
+        add hl,hl
+        add hl,de
+        add hl,hl               ; *6
+        ld e,(ix+T_W)
+        ld d,0
+        ex de,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl               ; width * 8
+        or a
+        sbc hl,de
         jr nc,.still
         ld (ix+T_ACT),1
         jp tk_take
@@ -2937,6 +3017,8 @@ tk_take:
         ld hl,(JIFFY)
         ld (ix+T_START),l
         ld (ix+T_START+1),h
+        xor a
+        ld (tk_built),a
         ret
 
 tk_home:                        ; IX back at its start
@@ -2953,6 +3035,10 @@ tk_home:                        ; IX back at its start
         jp tk_render
 
 ticker_run:
+        ld a,(fs_on)
+        ld hl,help_on
+        or (hl)
+        ret nz
         ld hl,(tk_turn)
         ld a,h
         or l
@@ -2962,6 +3048,16 @@ ticker_run:
         ld a,(ix+T_ACT)
         or a
         jr z,.next
+        ld hl,(JIFFY)           ; at most every other interrupt
+        ld de,(tk_due)
+        or a
+        sbc hl,de
+        bit 7,h
+        ret nz
+        ld hl,(JIFFY)
+        inc hl
+        inc hl
+        ld (tk_due),hl
         ld hl,(JIFFY)
         ld e,(ix+T_START)
         ld d,(ix+T_START+1)
@@ -2972,7 +3068,10 @@ ticker_run:
         ld d,0
         or a
         sbc hl,de
-        ret c                   ; the still second
+        jp c,tk_build_one       ; the still second: meanwhile its strips
+        push hl
+        call tk_build_one
+        pop hl
         ld d,h                  ; offset = time * 3 / 4 (45 pixels a second)
         ld e,l
         add hl,hl
@@ -2982,13 +3081,7 @@ ticker_run:
         srl h
         rr l
         push hl
-        ld a,(ix+T_LEN)
-        add a,GAP
-        ld l,a
-        ld h,0
-        add hl,hl
-        add hl,hl
-        add hl,hl
+        call tk_cycle
         ex de,hl
         pop hl
         or a
@@ -3026,50 +3119,331 @@ ticker_run:
         ld hl,(JIFFY)
         ld (ix+T_START),l
         ld (ix+T_START+1),h
+        xor a
+        ld (tk_built),a
         ret
 .find:  ld ix,tk_list           ; nobody's turn: look from the title on
         jr .next
 
-; tk_render: IX = ticker, HL = pixel offset
+; tk_cycle: IX = ticker -> HL = (len + GAP) * 6, the pixels of one round
+tk_cycle:
+        ld a,(ix+T_LEN)
+        add a,GAP
+        ld l,a
+        ld h,0
+        ld e,l
+        ld d,h
+        add hl,hl
+        add hl,de
+        add hl,hl
+        ret
+
+; tk_render: IX = ticker, HL = pixel offset: the text and, after the gap,
+; its start again; patterns only (the colours stay)
 tk_render:
+        ld a,(tk_built)         ; its 8 strips are ready: copy the window
+        cp 8
+        jr nz,.nostrip
+        push hl
+        ld hl,(tk_turn)
+        push ix
+        pop de
+        or a
+        sbc hl,de
+        pop hl
+        jp z,tk_strip_out
+.nostrip:
+        ld (t6_off),hl
+        ; the row buffer still holds this ticker a few pixels back: shift it
+        push hl
+        ld hl,(t6_owner)
+        push ix
+        pop de
+        or a
+        sbc hl,de
+        pop hl
+        jr nz,.full
+        ld de,(t6_have)
+        or a
+        sbc hl,de
+        jr c,.full
+        jr z,.full
+        ld a,h
+        or a
+        jr nz,.full
+        ld a,l
+        cp 8
+        jr nc,.full
+        ld (t6_d),a
+        call tk_cycle
+        ld (t6_cycle),hl
+        call tk_args
+        jp text6_shift
+.full:  call tk_cycle
+        ld (t6_cycle),hl
+        call tk_args
+        ld (t6_owner),ix
+        jp text6_keep
+
+; tk_strip_out: IX = ticker, HL = offset: strip (offset & 7), from cell
+; offset / 8 (+ its guard cell)
+tk_strip_out:
         ld a,l
         and 7
         ld b,a
-        ld a,7
-        sub b
-        ld (.jr+1),a          ; the shift: skip 7 - s of the 7 'add hl,hl'
         srl h
         rr l
         srl h
         rr l
         srl h
         rr l
-        ld a,l
-        ld (tr_k),a
-        ld a,(ix+T_LEN)
-        add a,GAP
-        ld (tr_n),a
-        ld de,tkbuf
-        ld b,(ix+T_W)
-.cell:  push bc
-        ld a,(tr_k)
-        call tk_glyph
-        push bc
-        ld a,(tr_k)
-        inc a
-        ld hl,tr_n
-        cp (hl)
-        jr c,.k2
+        inc hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld de,tkstrip
+        add hl,de
+        ld de,(tk_copy)
+        inc b
+        jr .m
+.a:     add hl,de
+.m:     djnz .a
+        push hl
+        ld d,(ix+T_ROW)
+        ld e,(ix+T_COL)
+        call cell_addr
+        call vwrite
+        pop hl
+        ld a,(ix+T_W)
+        add a,a
+        add a,a
+        add a,a
+        ld b,a
+        ld c,VDP_D
+        otir
+        ei
+        ret
+
+; tk_build_one: IX = the ticker with the turn: the next of its 8 strips, the
+; text (round and round) shifted 0-7 pixels left, with a guard cell in front
+tk_build_one:
+        ld a,(tk_built)
+        cp 8
+        ret nc
+        or a
+        jr nz,.go
+        ; the size of a strip: (round + width * 8) / 8 + 2 cells
+        call tk_cycle
+        ld (tk_cyc),hl
+        ld e,(ix+T_W)
+        ld d,0
+        ex de,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,de
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        inc hl
+        inc hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld (tk_copy),hl
+.go:    ld a,(tk_built)
+        ld b,a
+        ld hl,tkstrip
+        ld de,(tk_copy)
+        inc b
+        jr .m
+.a:     add hl,de
+.m:     djnz .a
+        ld (t6_base),hl
+        ld bc,(tk_copy)
         xor a
-.k2:    ld (tr_k),a
-        call tk_glyph
-        push bc
-        pop iy
-        pop bc
-.ln:    ld a,(bc)
+        call memset
+        ld hl,(tk_copy)
+        ld (t6_lim),hl
+        ld hl,0
+        ld (t6_from),hl
+        push ix
+        pop hl
+        ld de,T_TEXT
+        add hl,de
+        ld (t6_text),hl
+        ld hl,(tk_cyc)          ; (t6_cycle is anybody's between the strips)
+        ld (t6_cycle),hl
+        ld a,(tk_built)
+        ld e,a
+        ld d,0
+        ld hl,8
+        or a
+        sbc hl,de               ; x = 8 - shift
+.p:     push hl
+        call t6_pass
+        pop hl
+        ld de,(t6_cycle)
+        add hl,de
+        ld de,(t6_lim)
+        push hl
+        or a
+        sbc hl,de
+        pop hl
+        jr c,.p
+        ld hl,t6buf
+        ld (t6_base),hl
+        ld hl,tk_built
+        inc (hl)
+        ret
+
+tk_args:                        ; HL, DE, B, C for text6 from ticker IX
+        ld hl,(t6_off)
+        ld (t6_have),hl
+        push ix
+        pop hl
+        ld de,T_TEXT
+        add hl,de
+        ld d,(ix+T_ROW)
+        ld e,(ix+T_COL)
+        ld b,(ix+T_W)
+        ld c,0
+        ret
+
+;------------------------------------------------------------------------------
+; 6-pixel text: 42 characters a screen row. The machine's font is drawn for
+; 6-pixel cells already (40 columns), so its characters are put 6 pixels
+; apart into a row buffer, which then goes out as the cells' patterns.
+
+; text6s: HL = text, DE = cell, B = width in cells, C = colour (from the start)
+text6s: push hl
+        ld hl,0
+        ld (t6_off),hl
+        ld (t6_cycle),hl
+        pop hl
+        ; fall through
+text6:  push hl                 ; the buffer no longer holds a ticker
+        ld hl,0
+        ld (t6_owner),hl
+        pop hl
+text6_keep:
+; text6: HL = text, DE = cell, B = width (1-32 cells), C = colour or 0 (only
+; the patterns), (t6_off) = pixels left of the start, (t6_cycle) = 0, or the
+; distance at which the text starts again (a ticker)
+        ld (t6_text),hl
+        ld (t6_cell),de
+        ld a,b
+        ld (t6_w),a
+        ld a,c
+        ld (t6_col),a
+        ; clear the buffer: a guard cell on each side
+        ld l,b
+        ld h,0
+        inc hl
+        inc hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld b,h
+        ld c,l
+        ld hl,t6buf
+        xor a
+        call memset
+        ; the right edge, in buffer pixels: (width + 1) * 8
+        ld a,(t6_w)
+        ld l,a
+        ld h,0
+        inc hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld (t6_lim),hl
+        ld hl,0
+        ld (t6_from),hl         ; every character
+        ld hl,8                 ; x of the first character (guard cell = 0-7)
+        ld de,(t6_off)
+        or a
+        sbc hl,de
+        push hl
+        call t6_pass
+        pop hl
+        ld de,(t6_cycle)
+        ld a,d
+        or e
+        jr z,t6_out
+        add hl,de
+        call t6_pass
+t6_out: ld de,(t6_cell)
+        call cell_addr
+        push hl
+        call vwrite
+        ld hl,t6buf+8
+        ld a,(t6_w)
+        add a,a
+        add a,a
+        add a,a                 ; 32 cells: 0 = 256 for otir
+        ld b,a
+        ld c,VDP_D
+        otir
+        ei
+        pop hl
+        ld a,(t6_col)
+        or a
+        ret z
+        ld a,h
+        add a,#20
         ld h,a
-        ld l,(iy+0)
-.jr:    jr .sh                  ; displacement patched
+        call vwrite
+        ld a,(t6_w)
+        ld c,a
+        ld a,(t6_col)
+.cc:    ld b,8
+.cl:    out (VDP_D),a
+        djnz .cl
+        dec c
+        jr nz,.cc
+        ei
+        ret
+
+; text6_shift: as text6 (patterns only), the buffer holding the same text
+; (t6_d) pixels further right: it moves left, and only the characters that
+; reach into the strip that comes in on the right are drawn
+text6_shift:
+        ld (t6_text),hl
+        ld (t6_cell),de
+        ld a,b
+        ld (t6_w),a
+        xor a
+        ld (t6_col),a
+        ; shift: the 7 - d of the 7 'add hl,hl' are skipped
+        ld a,(t6_d)
+        ld c,a
+        ld a,7
+        sub c
+        ld (.jr+1),a
+        ld a,(t6_w)
+        inc a
+        ld (t6_n),a             ; cells that take bits from the next one
+        ld de,t6buf
+        ld c,8                  ; lines
+.ln:    push de
+        ld a,(t6_n)
+        ld b,a
+.cl:    ld a,(de)
+        ld h,a
+        push de
+        ld a,e
+        add a,8
+        ld e,a
+        jr nc,.nc
+        inc d
+.nc:    ld a,(de)
+        ld l,a
+        pop de
+.jr:    jr .sh
 .sh:    add hl,hl
         add hl,hl
         add hl,hl
@@ -3079,61 +3453,1245 @@ tk_render:
         add hl,hl
         ld a,h
         ld (de),a
+        ld a,e
+        add a,8
+        ld e,a
+        jr nc,.nc2
+        inc d
+.nc2:   djnz .cl
+        xor a                   ; the last guard cell
+        ld (de),a
+        pop de
         inc de
-        inc bc
-        inc iy
-        ld a,c
-        and 7
+        dec c
         jr nz,.ln
-        pop bc
-        djnz .cell
-        ld d,(ix+T_ROW)
-        ld e,(ix+T_COL)
-        call cell_addr
-        call vwrite
-        ld a,(ix+T_W)
-        add a,a
-        add a,a
-        add a,a
-        ld b,a
-        ld c,VDP_D
-        ld hl,tkbuf
-        otir
-        ei
-        ret
-
-; tk_glyph: A = position in the text (and gap) -> BC = its glyph
-tk_glyph:
-        push de
-        ld c,' '
-        cp (ix+T_LEN)
-        jr nc,.ch
-        push ix
-        pop hl
+        ; the characters that reach the new strip: x + 6 > lim - d
+        ld a,(t6_w)
+        ld l,a
+        ld h,0
+        inc hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld (t6_lim),hl
+        ld a,(t6_d)
+        add a,6
         ld e,a
         ld d,0
+        or a
+        sbc hl,de
+        ld (t6_from),hl
+        ld hl,8
+        ld de,(t6_off)
+        or a
+        sbc hl,de
+        push hl
+        call t6_pass
+        pop hl
+        ld de,(t6_cycle)
         add hl,de
-        ld de,T_TEXT
+        call t6_pass
+        ld hl,(t6_off)
+        ld (t6_have),hl
+        jp t6_out
+
+; t6_pass: HL = x of the first character (signed, buffer pixels)
+t6_pass:
+        ld (t6_x),hl
+        ld hl,(t6_text)
+        ld (t6_p),hl
+.ch:    ld hl,(t6_p)
+        ld a,(hl)
+        or a
+        ret z
+        ld (t6_ch),a
+        inc hl
+        ld (t6_p),hl
+        ld hl,(t6_x)
+        bit 7,h
+        jr nz,.next             ; left of the guard cell: not seen
+        ld de,(t6_from)
+        or a
+        sbc hl,de
+        jr c,.next              ; drawn already (a shifted ticker)
         add hl,de
-        ld c,(hl)
-.ch:    ld a,c
+        ld de,(t6_lim)
+        or a
+        sbc hl,de
+        ret nc                  ; past the right edge: done
+        add hl,de
+        ld a,(t6_ch)
+        cp ' '+1
+        call nc,t6_glyph        ; (a space has nothing to draw)
+.next:  ld hl,(t6_x)
+        ld de,6
+        add hl,de
+        ld (t6_x),hl
+        jr .ch
+
+; t6_glyph: A = character, HL = x in the buffer
+t6_glyph:
         sub 32
         jr nc,.a
         xor a
 .a:     cp 96
         jr c,.b
         ld a,'?'-32
-.b:     ld l,a
+.b:     push hl
+        ld l,a
         ld h,0
         add hl,hl
         add hl,hl
         add hl,hl
         ld de,font
         add hl,de
+        ex de,hl                ; DE = the glyph
+        pop hl
+        ld a,l
+        and 7
+        ld (t6_s),a
+        ld a,l
+        and #F8
+        ld l,a
+        ld bc,(t6_base)
+        add hl,bc               ; HL = its cell, line 0
+        ld b,8
+.ln:    push bc
+        ld a,(t6_s)
+        ld b,a
+        ld a,(de)
+        inc de
+        ld c,0
+        inc b
+        dec b
+        jr z,.ns
+.sh:    srl a
+        rr c
+        djnz .sh
+.ns:    or (hl)
+        ld (hl),a
+        ld a,c
+        or a
+        jr z,.n2
+        push hl
+        ld bc,8
+        add hl,bc
+        or (hl)
+        ld (hl),a
+        pop hl
+.n2:    inc hl
+        pop bc
+        djnz .ln
+        ret
+
+;------------------------------------------------------------------------------
+; the bars' layout in the main screen: 24 bars and 2 VU meters of 10 cells
+bars_normal:
+        ld hl,seg_of
+        ld (bp_segof),hl
+        ld hl,seg_col
+        ld (bp_segcol),hl
+        ld hl,cellcache
+        ld (bp_cache),hl
+        ld a,10
+        ld (bp_cells),a
+        ld a,20
+        ld (bp_segs),a
+        ld a,15
+        ld (bp_bottom),a
+        xor a
+        ld (bp_mirror),a
+        inc a
+        ld (bp_col0),a
+        ld a,NBARS+2
+        ld (bp_nbars),a
+        ret
+
+bars_reset:                     ; every bar drawn again
+        ld hl,bar_last
+        ld bc,(NBARS+2)*4       ; and bar_raw
+        ld a,#FF
+        call memset
+        ld hl,(bp_cache)
+        ld bc,NBARS*20
+        ld a,#FF
+        jp memset
+
+; clear the whole screen (patterns 0, colours navy)
+cls:    ld hl,#0000
+        ld bc,#1800
+        xor a
+        call vfill
+        ld hl,#2000
+        ld bc,#1800
+        ld a,NAVY*16+NAVY
+        jp vfill
+
+; the main screen again, all of it
+redraw_all:
+        call cls
+        call setpal
+        call bars_normal        ; every bar and VU cell drawn again
+        ld hl,bar_last
+        ld bc,(NBARS+2)*4
+        ld a,#FF
+        call memset
+        ld hl,cellcache
+        ld bc,(NBARS+2)*10
+        ld a,#FF
+        call memset
+        xor a
+        ld (eq_open),a
+        ld a,#FF
+        ld (vol_shown),a
+        ld (mode_shown),a
+        ld (knob_pos),a
+        ld (tk_title+T_ROW),a
+        ld (tk_artist+T_ROW),a
+        ld hl,0
+        ld (tk_turn),hl
+        ld (t6_owner),hl
+        xor a
+        ld (tk_built),a
+        call draw_static
+        call show_view
+        call fetch_status
+        call draw_info
+        call draw_path
+        jp draw_list
+
+;------------------------------------------------------------------------------
+; a message in the path row for two seconds
+msg_show:                       ; HL = text, C = colour
+        ld de,#1201
+        ld b,30
+        call text6s
+        ld a,(hold)
+        add a,a
+        ld e,a
+        ld d,0
+        ld hl,(JIFFY)
+        add hl,de
+        ld (msg_until),hl
+        ld a,1
+        ld (msg_on),a
+        ret
+
+msg_run:
+        ld a,(msg_on)
+        or a
+        ret z
+        ld hl,(JIFFY)
+        ld de,(msg_until)
+        or a
+        sbc hl,de
+        bit 7,h
+        ret nz
+        xor a
+        ld (msg_on),a
+        ld a,(fs_on)
+        ld hl,help_on
+        or (hl)
+        ret nz
+        ld de,#1201             ; the path and the count again
+        ld b,30
+        ld c,NAVY*16+NAVY
+        call fill_row
+        jp draw_path
+
+msg_ok: ld c,GREEN*16+NAVY
+        jr msg_show
+msg_err:
+        ld c,RED*16+NAVY
+        jr msg_show
+
+;------------------------------------------------------------------------------
+; the help page: all the keys, in 6-pixel text over the whole screen
+help_open:
+        ld a,(eq_open)
+        or a
+        call nz,eq_close
+        ld a,1
+        ld (help_on),a
+        call cls
+        ld hl,help_text
+        ld d,0
+.l:     ld a,(hl)
+        cp #FF
+        ret z
+        ld c,a                  ; each line: colour, text, 0
+        inc hl
+        push de
+        push hl
+        ld e,0
+        ld b,32
+        call text6s
+        pop hl
+        pop de
+.z:     ld a,(hl)
+        inc hl
+        or a
+        jr nz,.z
+        inc d
+        jr .l
+
+help_close:
+        xor a
+        ld (help_on),a
+        jp redraw_all
+
+;------------------------------------------------------------------------------
+; full screen pictures (Z): big bars, mirrored bars, a waterfall of the
+; spectrum, a plasma whose colours turn with the music. Left/Right, V or a
+; click: the next one; Z, ESC, Enter, BS or the right button: back.
+FS_BARS   equ 0
+FS_MIRROR equ 1
+FS_FALL   equ 2
+FS_PLASMA equ 3
+FS_N      equ 4
+
+fs_open:
+        ld a,(eq_open)
+        or a
+        call nz,eq_close
+        ld a,1
+        ld (fs_on),a
+        jp fs_setup
+
+fs_close:
+        xor a
+        ld (fs_on),a
+        jp redraw_all
+
+fs_next:
+        ld a,(fs_mode)
+        inc a
+        cp FS_N
+        jr c,fs_set
+        xor a
+        jr fs_set
+fs_prev:
+        ld a,(fs_mode)
+        or a
+        jr nz,.d
+        ld a,FS_N
+.d:     dec a
+fs_set: ld (fs_mode),a
+        ; fall through
+fs_setup:
+        call setpal
+        call cls
+        ld a,#FF
+        ld (fs_shown),a
+        call fs_info
+        ld a,(fs_mode)
+        cp FS_BARS
+        jr z,.bars
+        cp FS_MIRROR
+        jr z,.mir
+        cp FS_FALL
+        jr z,.fall
+        ; the plasma: drawn once, then only its colours change
+        call plasma_draw
+        xor a
+        ld (pl_phase),a
+        ret
+.bars:  ld hl,fs_segof
+        ld (bp_segof),hl
+        ld hl,fs_segcol
+        ld (bp_segcol),hl
+        ld a,20
+        ld (bp_cells),a
+        ld a,40
+        ld (bp_segs),a
+        ld a,21
+        ld (bp_bottom),a
+        xor a
+        ld (bp_mirror),a
+        jr .b2
+.mir:   ld hl,seg_of
+        ld (bp_segof),hl
+        ld hl,mir_segcol
+        ld (bp_segcol),hl
+        ld a,10
+        ld (bp_cells),a
+        ld a,20
+        ld (bp_segs),a
+        ld a,11
+        ld (bp_bottom),a
+        ld a,12
+        ld (bp_mirror),a
+.b2:    ld hl,vizbuf            ; (its cell cache: the picture buffer is free)
+        ld (bp_cache),hl
+        ld a,4
+        ld (bp_col0),a
+        ld a,NBARS
+        ld (bp_nbars),a
+        jp bars_reset
+.fall:  ld hl,#0100             ; rows 1-22: every pixel on, the colour shows
+        ld bc,22*256
+        ld a,#FF
+        call vfill
+        ld a,8
+        ld (fall_y),a
+        ret
+
+; row 0: the title, row 23: the picture's name and the time
+fs_info:
+        ld hl,st+ST_TITLE
+        ld a,(hl)
+        or a
+        jr nz,.t
+        ld hl,txt_notrack
+.t:     ld de,#0000
+        ld b,32
+        ld c,WHITE*16+NAVY
+        call text6s
+        ld de,linebuf
+        ld a,(fs_mode)
+        add a,a
+        add a,a
+        add a,a
+        add a,a                 ; 16 a name
+        ld l,a
+        ld h,0
+        push de
+        ld de,fs_names
+        add hl,de
+        pop de
+        call strcpy
+        ld hl,(st+ST_ELAPS)
+        push de
+        ld de,60
+        call div16              ; HL = minutes, DE = seconds
+        ld a,e
+        pop de
+        push af
+        call fmt_u16
+        ld a,':'
+        ld (de),a
+        inc de
+        pop af
+        call put2
+        xor a
+        ld (de),a
+        ld hl,txt_fshelp
+        call strcpy
+        ld de,#1700
+        ld hl,linebuf
+        ld b,32
+        ld c,WHITE*16+NAVY      ; (white and navy keep their colours in the plasma)
+        jp text6s
+put2:   ld b,'0'-1              ; A (0..99): two digits at DE, DE after them
+.t:     inc b
+        sub 10
+        jr nc,.t
+        add a,'0'+10
+        ld c,a
+        ld a,b
+        ld (de),a
+        inc de
+        ld a,c
+        ld (de),a
+        inc de
+        ret
+
+fs_keys:
+        cp 29
+        jp z,fs_prev
+        cp 28
+        jp z,fs_next
+        cp 27
+        jp z,fs_close
+        cp 13
+        jp z,fs_close
+        cp 8
+        jp z,fs_close
+        and #DF
+        cp 'Z'
+        jp z,fs_close
+        cp 'V'
+        jp z,fs_next
+        cp 'G'
+        ret z
+        cp 'E'
+        jp z,next_eq
+        ld a,b                  ; the playback keys
+        jp keys_common
+
+; a new picture from the engine
+fs_draw:
+        ld a,(viz+V_SEQ)
+        bit 0,a
+        ret nz
+        ld a,(fs_mode)
+        cp FS_FALL
+        jr z,fall_draw
+        cp FS_PLASMA
+        jp z,plasma_colours
+        ld hl,scope_tick        ; the bars (and the mirrored ones): 25 a second
+        inc (hl)
+        bit 0,(hl)
+        ret nz
+        jp draw_bars
+
+; the waterfall: one line of colours a picture (32 columns, 24 bands), a
+; white line under it, top to bottom and round again
+fall_draw:
+        ld a,(fall_y)
+        ld (fl_y),a
+        ld c,0                  ; column
+.c:     ld b,0
+        ld hl,fall_band
+        ld e,c
+        ld d,b
+        add hl,de
+        ld e,(hl)
+        ld hl,viz+V_LEVEL
+        add hl,de
+        ld a,(hl)
+        rrca
+        rrca
+        and #07
+        ld hl,fall_ramp
+        call idx
+        ld a,(hl)
+        call fall_put
+        inc c
+        ld a,c
+        cp 32
+        jr c,.c
+        ld a,(fl_y)             ; the white line under it
+        inc a
+        cp 184
+        jr c,.w
+        ld a,8
+.w:     ld (fl_y),a
+        ld (fall_y),a
+        ld c,0
+.c2:    ld a,WHITE*16+WHITE
+        call fall_put
+        inc c
+        ld a,c
+        cp 32
+        jr c,.c2
+        ret
+
+fall_put:                       ; A = colour byte of column C, line (fl_y)
+        push af
+        ld a,(fl_y)
+        ld h,a
+        and 7
+        ld l,a
+        ld a,h
+        rrca
+        rrca
+        rrca
+        and #1F
+        add a,#20
+        ld h,a                  ; 2000h + row * 256
+        ld a,c
+        add a,a
+        add a,a
+        add a,a
+        or l
+        ld l,a                  ; + column * 8 + line
+        call vwrite
+        pop af
+        out (VDP_D),a
+        ei
+        ret
+
+; the plasma: four sines over the 32 x 176 cell lines, 12 colours of the
+; palette with dithered steps between them
+plasma_draw:
+        ; tables in the picture buffer (256 apart): sine, patterns for even
+        ; and odd lines, colours, each by v = 0..255
+        ld hl,sin64
+        ld de,pl_tab
+        ld bc,256
+        ldir
+        ld c,0                  ; v
+.t:     ld l,c                  ; v * 3 / 8: step 0..11 (wraps), fraction
+        ld h,0
+        ld e,l
+        ld d,h
+        add hl,hl
+        add hl,de
+        ld a,l
+        and #38
+        rrca
+        rrca
+        rrca                    ; (v * 3 / 8) & 7 = the fraction
+        ld e,a
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        ld a,l
+        rrca
+        rrca
+        rrca
+        and #1F
+.w:     cp 12
+        jr c,.w2
+        sub 12
+        jr .w
+.w2:    ld (pl_stepv),a
+        ld b,0
+        ld hl,dither
+        add hl,de
+        ld a,(hl)
+        ld hl,pl_tab+256
+        add hl,bc
+        ld (hl),a               ; even lines
+        ld hl,dither+8
+        add hl,de
+        ld a,(hl)
+        ld hl,pl_tab+512
+        add hl,bc
+        ld (hl),a               ; odd lines
+        ld a,(pl_stepv)         ; the next step's colour over this step's
+        inc a
+        cp 12
+        jr c,.n
+        xor a
+.n:     ld hl,pl_cols
+        call idx
+        ld a,(hl)
+        add a,a
+        add a,a
+        add a,a
+        add a,a
+        ld d,a
+        ld a,(pl_stepv)
+        ld hl,pl_cols
+        call idx
+        ld a,(hl)
+        or d
+        ld hl,pl_tab+768
+        ld b,0
+        add hl,bc
+        ld (hl),a
+        inc c
+        jr nz,.t
+        xor a
+        ld (tk_built),a         ; (the strips were in favbuf)
+        ; rows 1-22: v = S(12c) + S(3y) + S(7c + 2y) + S(5y - 9c)
+        ld a,1
+        ld (pl_row),a
+.row:   ld ix,favbuf            ; patterns of the row
+        ld iy,favbuf+256        ; colours
+        xor a
+        ld (pl_c),a
+.cell:  ld a,(pl_row)
+        add a,a
+        add a,a
+        add a,a
+        ld (pl_y),a             ; y of line 0
+        ld e,a
+        ld a,(pl_c)
+        ld c,a
+        add a,a
+        add a,c
+        add a,a
+        add a,a                 ; 12c
+        ld l,a
+        ld h,pl_tab>>8
+        ld a,(hl)
+        ld (pl_v),a             ; S(12c), the same down the cell
+        ld a,c
+        add a,a
+        add a,a
+        add a,a
+        sub c
+        ld b,a                  ; 7c
+        ld a,e
+        add a,a
+        add a,b
+        ld b,a                  ; B = 7c + 2y
+        ld a,c
+        add a,a
+        add a,a
+        add a,a
+        add a,c
+        ld d,a                  ; 9c
+        ld a,e
+        add a,a
+        add a,a
+        add a,e                 ; 5y
+        sub d
+        ld c,a                  ; C = 5y - 9c
+        ld a,e
+        add a,a
+        add a,e
+        ld d,a                  ; D = 3y
+        ld a,(pl_v)
+        ld e,a                  ; E = S(12c)
+        ld h,pl_tab>>8
+        ld a,4                  ; 4 pairs of lines
+.pair:  ex af,af'
+PL_LINE macro ln
+        ld l,d
+        ld a,(hl)
+        add a,e
+        ld l,b
+        add a,(hl)
+        ld l,c
+        add a,(hl)
+        ld l,a
+        inc h
+        if ln = 2
+        inc h
+        endif
+        ld a,(hl)
+        ld (ix+0),a
+        ld a,h
+        add a,3-ln
+        ld h,a
+        ld a,(hl)
+        ld (iy+0),a
+        ld h,pl_tab>>8
+        inc ix
+        inc iy
+        ld a,d
+        add a,3
+        ld d,a
+        inc b
+        inc b
+        ld a,c
+        add a,5
+        ld c,a
+        endm
+        PL_LINE 1
+        PL_LINE 2
+        ex af,af'
+        dec a
+        jr nz,.pair
+        ld a,(pl_c)
+        inc a
+        ld (pl_c),a
+        cp 32
+        jp c,.cell
+        ; out: the row's patterns and colours
+        ld a,(pl_row)
+        ld h,a
+        ld l,0
+        push hl
+        call vwrite
+        ld hl,favbuf
+        ld b,0
+        ld c,VDP_D
+        otir
+        ei
+        pop hl
+        ld a,h
+        add a,#20
+        ld h,a
+        call vwrite
+        ld hl,favbuf+256
+        ld b,0
+        ld c,VDP_D
+        otir
+        ei
+        ld a,(pl_row)
+        inc a
+        ld (pl_row),a
+        cp 23
+        jp c,.row
+        ret
+
+; the plasma's colours: the wheel turns faster with the level, brighter
+; with the bass
+plasma_colours:
+        ld a,(viz+V_VU)
+        ld b,a
+        ld a,(viz+V_VU+1)
+        add a,b
+        rrca
+        rrca
+        rrca
+        rrca
+        and #0F
+        inc a
+        ld b,a
+        ld a,(pl_phase)
+        add a,b
+        cp 192
+        jr c,.p
+        sub 192
+.p:     ld (pl_phase),a
+        ld a,(viz+V_LEVEL)      ; the bass: the brightest of the lowest bands
+        ld b,a
+        ld a,(viz+V_LEVEL+1)
+        cp b
+        jr c,.b1
+        ld b,a
+.b1:    ld a,(viz+V_LEVEL+2)
+        cp b
+        jr c,.b2
+        ld b,a
+.b2:    ld a,b                  ; 0..31 -> brightness 4..7
+        rrca
+        rrca
+        rrca
+        and #03
+        add a,4
+        cp 8
+        jr c,.b3
+        ld a,7
+.b3:    add a,a
+        add a,a
+        add a,a
+        ld (pl_br),a            ; * 8: the row of 'bright'
+        ld c,0                  ; the colour 0..11
+.c:     ld a,(pl_phase)         ; wheel position (phase / 4 + c * 4) mod 48
+        rrca
+        rrca
+        and #3F
+        ld b,a
+        ld a,c
+        add a,a
+        add a,a
+        add a,b
+.m:     cp 48
+        jr c,.m2
+        sub 48
+        jr .m
+.m2:    ld l,a
+        ld h,0
+        ld e,l
+        ld d,h
+        add hl,hl
+        add hl,de               ; * 3
+        ld de,wheel
+        add hl,de
+        ld a,(hl)               ; R
+        call .sc
+        add a,a
+        add a,a
+        add a,a
+        add a,a
+        ld d,a
+        inc hl
+        ld a,(hl)               ; G
+        call .sc
+        ld e,a
+        inc hl
+        ld a,(hl)               ; B
+        call .sc
+        or d
+        ld d,a                  ; D = 0RRR0BBB, E = 00000GGG
+        push de
+        ld hl,pl_cols
+        ld a,c
+        call idx
+        ld a,(hl)
+        pop de
+        di
+        out (VDP_C),a
+        ld a,16+128
+        out (VDP_C),a
+        ld a,d
+        out (VDP_P),a
+        ld a,e
+        out (VDP_P),a
+        ei
+        inc c
+        ld a,c
+        cp 12
+        jr c,.c
+        ret
+.sc:    push hl                 ; A (0..7) at the brightness
+        push de
+        ld e,a
+        ld a,(pl_br)
+        add a,e
+        ld e,a
+        ld d,0
+        ld hl,bright
+        add hl,de
+        ld a,(hl)
+        pop de
+        pop hl
+        ret
+
+;------------------------------------------------------------------------------
+; favourites: RADIOFAV.M3U in the root of the card (the same file PicoPlay
+; writes; the engine reads it for Internet radio/Favourites)
+FAV_MAX equ 4096
+
+; the drive: the one PICOAMP came from (DOS 2's PROGRAM), else A:
+fav_drive:
+        ld hl,txt_program
+        ld de,linebuf
+        ld b,64
+        ld c,#6B                ; _GENV
+        call BDOS
+        or a
+        ld a,'A'
+        jr nz,.a                ; (an error)
+        ld a,(linebuf+1)
+        cp ':'
+        ld a,'A'
+        jr nz,.a
+        ld a,(linebuf)
+.a:     ld (fav_path),a
+        ret
+
+; the station: the chosen entry when it is one, else the one that plays ->
+; fav_url, fav_name; CF=1 none
+fav_info:
+        call sel_type
+        cp 6
+        ld hl,(sel)
+        jr z,.q
+        ld hl,#FFFF
+.q:     ld a,C_EINFO
+        call cmd_u16
+        scf
+        ret nz
+        ld hl,reply
+        ld de,fav_url
+        ld bc,255
+        call strncpy0
+        ld de,fav_name
+        ld bc,63
+        call strncpy0
+        or a
+        ret
+
+strncpy0:                       ; HL -> DE, at most BC characters, a 0 after; HL after the 0
+.l:     ld a,(hl)
+        inc hl
+        or a
+        jr z,.e
+        ld (de),a
+        inc de
+        dec bc
+        ld a,b
+        or c
+        jr nz,.l
+.s:     ld a,(hl)               ; too long: skip the rest
+        inc hl
+        or a
+        jr nz,.s
+.e:     xor a
+        ld (de),a
+        ret
+
+; fav_load -> HL = bytes in favbuf (0: none), a 0 after them
+fav_load:
+        call fav_drive
+        ld de,fav_path
+        ld a,1                  ; read only
+        ld c,#43                ; _OPEN
+        call BDOS
+        ld hl,0
+        or a
+        jr nz,.e
+        ld a,b
+        ld (fav_fh),a
+        ld de,favbuf
+        ld hl,FAV_MAX
+        ld c,#48                ; _READ
+        call BDOS
+        or a
+        jr z,.r
+        ld hl,0
+.r:     push hl
+        ld a,(fav_fh)
+        ld b,a
+        ld c,#45                ; _CLOSE
+        call BDOS
+        pop hl
+.e:     push hl
+        ld de,favbuf
+        add hl,de
+        ld (hl),0
+        pop hl
+        xor a                   ; the strips were in favbuf
+        ld (tk_built),a
+        ret
+
+; fav_save: HL = bytes -> ZF=1 written
+fav_save:
+        ld (fav_n),hl
+        ld de,fav_path
+        xor a
+        ld b,0
+        ld c,#44                ; _CREATE (a new file over the old one)
+        call BDOS
+        or a
+        ret nz
+        ld a,b
+        ld (fav_fh),a
+        ld de,favbuf
+        ld hl,(fav_n)
+        ld c,#49                ; _WRITE
+        call BDOS
+        push af
+        ld a,(fav_fh)
+        ld b,a
+        ld c,#45
+        call BDOS
+        pop af
+        or a
+        ret
+
+; fav_find: the line equal to fav_url -> HL, ZF=0; ZF=1 not there
+fav_find:
+        ld hl,favbuf
+.line:  ld a,(hl)
+        or a
+        ret z
+        push hl
+        ld de,fav_url
+.c:     ld a,(de)
+        or a
+        jr z,.end
+        cp (hl)
+        jr nz,.diff
+        inc hl
+        inc de
+        jr .c
+.end:   ld a,(hl)
+        or a
+        jr z,.yes
+        cp 13
+        jr z,.yes
+        cp 10
+        jr z,.yes
+.diff:  pop hl
+.s:     ld a,(hl)
+        or a
+        ret z
+        inc hl
+        cp 10
+        jr nz,.s
+        jr .line
+.yes:   pop hl
+        ld a,1
+        or a
+        ret
+
+fav_in_folder:                  ; ZF=1 in Internet radio/Favourites
+        ld hl,path
+        ld de,txt_favpath
+.c:     ld a,(de)
+        cp (hl)
+        ret nz
+        or a
+        ret z
+        inc hl
+        inc de
+        jr .c
+
+; reopen the folder (it is read again), the cursor kept where it can be
+fav_reopen:
+        call fav_in_folder
+        ret nz
+        ld hl,(sel)
+        push hl
+        ld hl,txt_empty
+        ld de,args
+        call strcpy0
+        ld a,C_DOPEN
+        ld bc,1
+        call cmd
+        pop hl
+        ret nz
+        push hl
+        call got_folder         ; (the cursor at 0)
+        pop hl
+        jp move                 ; back to where it was (or the last one)
+
+; F: add the chosen station (or the one that plays)
+fav_add:
+        call fav_info
+        ld hl,txt_favsel
+        jp c,msg_err
+        call fav_load
+        ld (fav_n),hl
+        call fav_find
+        ld hl,txt_favthere
+        jp nz,msg_err
+        ld hl,(fav_n)
+        ld a,h
+        or l
+        jr nz,.nl
+        ld hl,txt_extm3u
+        ld de,favbuf
+        call strcpy
+        jr .add
+.nl:    ld de,favbuf-1          ; a line end after the last line
+        add hl,de
+        ld a,(hl)
+        cp 10
+        jr z,.add
+        cp 13
+        jr z,.add
+        inc hl
+        ld (hl),13
+        inc hl
+        ld (hl),10
+        inc hl
+        ld (hl),0
+.add:   ; room? n + name + url + 20 <= FAV_MAX
+        call fav_end            ; DE = the 0 at the end
+        ex de,hl
+        ld de,favbuf
+        or a
+        sbc hl,de
+        ld de,320
+        add hl,de
+        ld de,FAV_MAX
+        or a
+        sbc hl,de
+        ld hl,txt_favfull
+        jp nc,msg_err
+        call fav_end
+        ld hl,txt_extinf
+        call strcpy
+        ld hl,fav_name
+        call strcpy
+        ld hl,txt_crlf
+        call strcpy
+        ld hl,fav_url
+        call strcpy
+        ld hl,txt_crlf
+        call strcpy
+        ex de,hl
+        ld de,favbuf
+        or a
+        sbc hl,de
+        call fav_save
+        ld hl,txt_favnowrite
+        jp nz,msg_err
+        call fav_reopen
+        ld hl,txt_favadded
+        jp msg_ok
+
+fav_end:                        ; DE = the 0 at the end of favbuf
+        ld de,favbuf
+.l:     ld a,(de)
+        or a
+        ret z
+        inc de
+        jr .l
+
+; D / DEL: remove the chosen station from the favourites
+fav_del:
+        call fav_in_folder
+        ld hl,txt_favwhere
+        jp nz,msg_err
+        call sel_type
+        cp 6
+        ld hl,txt_favwhere
+        jp nz,msg_err
+        call fav_info
+        ld hl,txt_favwhere
+        jp c,msg_err
+        call fav_load
+        ld (fav_n),hl
+        call fav_find
+        jr nz,.found
+        ld hl,txt_favnot
+        jp msg_err
+.found: ; HL = the address line: its end (after the line end) -> fav_e
+        ld (fav_s),hl
+        push hl
+.e:     ld a,(hl)
+        or a
+        jr z,.e2
+        cp 13
+        jr z,.e1
+        cp 10
+        jr z,.e1
+        inc hl
+        jr .e
+.e1:    ld a,(hl)
+        cp 13
+        jr z,.e3
+        cp 10
+        jr nz,.e2
+.e3:    inc hl
+        jr .e1
+.e2:    ld (fav_e),hl
+        pop hl
+        ; the #EXTINF line just before it goes too
+        ld de,favbuf
+        or a
+        sbc hl,de
+        jr z,.cut
+        add hl,de
+        dec hl
+.b1:    ld a,(hl)               ; over the line end before
+        cp 13
+        jr z,.b2
+        cp 10
+        jr nz,.b3
+.b2:    push hl
+        or a
+        sbc hl,de
+        pop hl
+        jr z,.cut
+        dec hl
+        jr .b1
+.b3:    push hl                 ; to the start of that line
+        or a
+        sbc hl,de
+        pop hl
+        jr z,.b4
+        dec hl
+        ld a,(hl)
+        inc hl
+        cp 10
+        jr z,.b4
+        cp 13
+        jr z,.b4
+        dec hl
+        jr .b3
+.b4:    push hl
+        ld de,txt_extinf
+        ld b,7
+.cmp:   ld a,(de)
+        cp (hl)
+        jr nz,.no
+        inc hl
+        inc de
+        djnz .cmp
+        pop hl
+        ld (fav_s),hl
+        jr .cut
+.no:    pop hl
+.cut:   ; move the rest down over [fav_s, fav_e)
+        ld hl,(fav_e)
+        push hl
+        call fav_end
+        ex de,hl
+        pop de
+        or a
+        sbc hl,de
+        inc hl                  ; with the 0
         ld b,h
         ld c,l
-        pop de
-        ret
+        ld hl,(fav_e)
+        ld de,(fav_s)
+        ldir
+        call fav_end
+        ex de,hl
+        ld de,favbuf
+        or a
+        sbc hl,de
+        call fav_save
+        ld hl,txt_favnowrite
+        jp nz,msg_err
+        call fav_reopen
+        ld hl,txt_favremoved
+        jp msg_ok
 
 ;------------------------------------------------------------------------------
 ; the mouse, in either port (found when it first moves); an arrow sprite with
@@ -3216,6 +4774,9 @@ mouse:  ld a,(ms_port)
         jp nz,right_click
         bit 0,b
         jr z,.up
+        ld a,(fs_on)            ; (the full screen has no sliders)
+        or a
+        ret nz
         ld a,(eq_open)          ; held: dragging an equalizer slider
         or a
         ret z
@@ -3328,6 +4889,12 @@ ms_sprite:
         ret
 
 right_click:
+        ld a,(help_on)
+        or a
+        jp nz,help_close
+        ld a,(fs_on)
+        or a
+        jp nz,fs_close
         ld a,(eq_open)
         or a
         jp nz,eq_close
@@ -3335,6 +4902,12 @@ right_click:
 
 ; left_click: what is under the pointer
 left_click:
+        ld a,(help_on)
+        or a
+        jp nz,help_close
+        ld a,(fs_on)
+        or a
+        jp nz,fs_next
         ld a,(ms_x)
         rrca
         rrca
@@ -3597,12 +5170,25 @@ keys:   ld c,#06
         or a
         ret z
         ld b,a
+        ld a,(help_on)
+        or a
+        jp nz,help_close        ; any key closes the help page
+        ld a,(fs_on)
+        or a
+        ld a,b
+        jp nz,fs_keys
         ld a,(eq_open)
         or a
         ld a,b
         jp nz,eq_keys
         cp 27
         jp z,quit
+        cp 127
+        jp z,fav_del
+        cp '?'
+        jp z,help_open
+        cp '/'
+        jp z,help_open
         cp 30
         jr nz,.k1
         ld hl,-1
@@ -3623,6 +5209,18 @@ keys:   ld c,#06
         jp z,activate
         cp 8
         jp z,parent
+        cp 'F'
+        jp z,fav_add
+        cp 'f'
+        jp z,fav_add
+        cp 'D'
+        jp z,fav_del
+        cp 'd'
+        jp z,fav_del
+        cp 'Z'
+        jp z,fs_open
+        cp 'z'
+        jp z,fs_open
         ; fall through
 
 ; the keys of both screens: A = key
@@ -3662,6 +5260,8 @@ keys_common:
         jp z,eq_toggle
         cp 'V'
         jp z,toggle_view
+        cp 'Z'
+        jp z,fs_open
         ret
 
 vol_up: ld a,(st+ST_VOL)
@@ -3786,6 +5386,13 @@ quit:   call restore_screen
 
 notfound:
         ld de,txt_notfound
+        ld c,#09
+        call BDOS
+        ld c,0
+        jp BDOS
+
+nomemory:
+        ld de,txt_nomemory
         ld c,#09
         call BDOS
         ld c,0
@@ -3952,8 +5559,55 @@ txt_gclose:     db "G:CLOSE",0
 txt_empty:      db 0
 txt_bye:        db "PicoAmp: the music plays on.",13,10,"$"
 txt_notfound:   db "No PicoVerse Audio Engine found (flash LoadROM -p1).",13,10,"$"
+txt_nomemory:   db "Not enough memory for PicoAmp.",13,10,"$"
 txt_noanswer:   db "The engine does not answer.",13,10,"$"
 label_bars:     db 0,6,12,17,21,#FF
+help_text:
+        db #53,"  PICOAMP - THE KEYS",0
+        db #5E,0
+        db #5E,"Up/Down    choose     Enter  play/open",0
+        db #5E,"Left/Right page       BS     parent",0
+        db #5E,"Space      pause      S      stop",0
+        db #5E,"N / P      next/prev  , / .  -10s/+10s",0
+        db #5E,"+ = / -    volume     H / R  shuffle/rep",0
+        db #5E,"V          scope      G      equalizer",0
+        db #5E,"E          EQ preset  Z      full screen",0
+        db #5E,"F          favourite+ D, DEL favourite-",0
+        db #5E,"? or /     this page  ESC Q  quit",0
+        db #5E,0
+        db #4E,"Equalizer: Left/Right band, Up/Down gain,",0
+        db #4E,"           0 middle, G or ESC closes",0
+        db #4E,"Full screen: Left/Right or V next picture,",0
+        db #4E,"             Z or ESC back",0
+        db #4E,"Favourites: F adds the chosen station (or",0
+        db #4E,"  the one that plays), D removes it (in",0
+        db #4E,"  Internet radio/Favourites)",0
+        db #4E,"Mouse: click to choose, again to play;",0
+        db #4E,"       the right button goes back",0
+        db #5E,0
+        db #6E,"                 press a key",0
+        db #FF
+txt_program:    db "PROGRAM",0
+txt_favpath:    db "/Internet radio/Favourites",0
+txt_extm3u:     db "#EXTM3U",13,10,0
+txt_extinf:     db "#EXTINF:-1,",0
+txt_crlf:       db 13,10,0
+txt_favsel:     db "Choose (or play) a station first",0
+txt_favthere:   db "Already a favourite",0
+txt_favfull:    db "RADIOFAV.M3U is full (4 KB)",0
+txt_favnowrite: db "Cannot write RADIOFAV.M3U",0
+txt_favadded:   db "Added to the favourites",0
+txt_favwhere:   db "Choose it in Internet radio/Favourites",0
+txt_favnot:     db "Not in RADIOFAV.M3U",0
+txt_favremoved: db "Removed from the favourites",0
+txt_fshelp:     db "   </>: next  Z: back",0
+fs_names:       db "BARS       ",0,0,0,0,0
+                db "MIRROR     ",0,0,0,0,0
+                db "WATERFALL  ",0,0,0,0,0
+                db "PLASMA     ",0,0,0,0,0
+fall_band:      db 0,0,1,2,3,3,4,5,6,6,7,8,9,9,10,11,12,12,13,14,15,15,16,17,18,18,19,20,21,21,22,23
+fall_ramp:      db NAVY*17,BLUE_D*17,BLUE*17,MAGENTA*17,RED*17,ORANGE*17,YELLOW*17,WHITE*17
+pl_cols:        db 2,3,4,6,7,8,9,10,11,12,13,15
 
 eq_tab:         db 0,0,0,0,0, 5,2,-2,3,5, -1,3,4,2,-1, 3,1,-1,2,4, 3,0,-1,1,3, -4,-1,4,3,-2, 8,4,0,0,0, 6,2,0,1,5
 eq_names:       db "EQ FLAT",0,0,0, "EQ ROCK",0,0,0, "EQ POP",0,0,0,0, "EQ JAZZ",0,0,0, "EQ CLASS",0,0
@@ -4039,6 +5693,19 @@ cache_p:        dw 0
 cellcol:        db 0
 cellpat:        ds 8
 cellclr:        ds 8
+cellpat2:       ds 8
+cellclr2:       ds 8
+bm_cell:        db 0
+; the bars' layout (bars_normal / the full screen sets it)
+bp_segof:       dw seg_of
+bp_segcol:      dw seg_col
+bp_cache:       dw 0
+bp_cells:       db 10
+bp_segs:        db 20
+bp_bottom:      db 15
+bp_mirror:      db 0
+bp_col0:        db 1
+bp_nbars:       db NBARS+2
 count:          dw 0
 sel:            dw 0
 top:            dw 0
@@ -4066,8 +5733,27 @@ tt_text:        dw 0
 tt_cell:        dw 0
 tt_wc:          dw 0
 tk_turn:        dw 0
-tr_k:           db 0
-tr_n:           db 0
+t6_off:         dw 0
+t6_cycle:       dw 0
+t6_text:        dw 0
+t6_cell:        dw 0
+t6_w:           db 0
+t6_col:         db 0
+t6_lim:         dw 0
+t6_x:           dw 0
+t6_p:           dw 0
+t6_s:           db 0
+t6_ch:          db 0
+t6_from:        dw 0
+t6_owner:       dw 0
+t6_have:        dw 0
+t6_d:           db 0
+t6_n:           db 0
+t6_base:        dw 0
+tk_built:       db 0
+tk_copy:        dw 0
+tk_cyc:         dw 0
+tk_due:         dw 0
 ms_port:        db 0
 ms_probe:       db 0
 ms_fn:          db 0
@@ -4080,16 +5766,39 @@ ms_shown_y:     db #FF
 ms_prev:        db 0
 ms_try:         db 0
 ms_rest:        db 0                    ; bit 0 / 1: port 1 / 2 gave 0,0
+help_on:        db 0
+fs_on:          db 0
+fs_mode:        db 0
+fs_shown:       db 0
+fall_y:         db 8
+fl_y:           db 0
+pl_row:         db 0
+pl_pp:          dw 0
+pl_y:           db 0
+pl_v:           db 0
+pl_frac:        db 0
+pl_stepv:       db 0
+pl_c:           db 0
+pl_phase:       db 0
+pl_br:          db 0
+msg_on:         db 0
+msg_until:      dw 0
+fav_path:       db "A:\\RADIOFAV.M3U",0
+fav_fh:         db 0
+fav_n:          dw 0
+fav_s:          dw 0
+fav_e:          dw 0
 progend:
 
-; buffers (not in the file; cleared at the start)
+; buffers (not in the file; cleared at the start). They are in page 2: page
+; 1 is switched to the engine now and then, page 0 holds the program.
 REPLY_MAX       equ 1024
-bss_start       equ (progend + 7) & #FFF8
-font            equ bss_start           ; 96 x 8, aligned to 8 (the tickers count on it)
+bss_start       equ #8000
+font            equ bss_start           ; 96 x 8
 vizbuf          equ font + 96*8         ; the area: 10 x 192
 rowcol          equ vizbuf + 1920       ; colours of one area row
-tkbuf           equ rowcol + 192        ; one ticker row
-tk_title        equ tkbuf + 240
+t6buf           equ rowcol + 192        ; one row of 6-pixel text: 32 + 2 cells
+tk_title        equ t6buf + 34*8
 tk_artist       equ tk_title + TSIZE
 tk_list         equ tk_artist + TSIZE
 tk_end          equ tk_list + TSIZE
@@ -4107,5 +5816,13 @@ eqg             equ numbuf + 8          ; the equalizer screen's gains
 eqcols          equ eqg + 8             ; 3 x 24 colours of its parts
 bar_last        equ eqcols + 72         ; (NBARS + 2) x (lit segments, peak) drawn
 bar_raw         equ bar_last + (NBARS+2)*2  ; (level, peak) from the engine, drawn
-bss_end         equ bar_raw + (NBARS+2)*2
-        assert bss_end < #4000
+tkstrip         equ bar_raw + (NBARS+2)*2  ; a ticker's 8 shifted strips, 82 cells each
+favbuf          equ tkstrip                 ; (shared: favourites, the plasma's rows)
+pl_tab          equ vizbuf                  ; the plasma's tables (free in the full screen)
+        assert (pl_tab & #FF) = 0
+fav_url         equ tkstrip + 8*82*8
+fav_name        equ fav_url + 256
+bss_end         equ fav_name + 64
+        assert 8*82*8 >= FAV_MAX + 1
+        assert progend < #4000
+        assert bss_end < #B000
