@@ -14,7 +14,8 @@
 ;       , / . 10 seconds back / on, H shuffle, R repeat,
 ;       V spectrum / oscilloscope, G equalizer screen, E next preset,
 ;       Z full screen pictures, F / D (DEL) add / remove a favourite,
-;       ? or / the help page, ESC or Q quit (the music keeps playing).
+;       / or J search the station directory, ? the help page,
+;       ESC or Q quit (the music keeps playing).
 ; Equalizer screen: Left/Right choose a band (or the balance), Up/Down set
 ;       it, 0 back to the middle, E next preset, G / ESC / Enter close.
 ; Mouse (either port): click a list entry to select it, click it again to
@@ -74,6 +75,9 @@ C_VOLUME equ #27
 C_MODE   equ #28
 C_EQ     equ #2A
 C_EINFO  equ #13
+C_SEARCH equ #14
+E_NOWIFI equ #0A
+SRCH_MAX equ 30
 C_BAL    equ #2B
 M_REPEAT equ #01
 M_SHUF   equ #02
@@ -2897,8 +2901,22 @@ check_loading:
         call cmd
         jr nz,.failed
         call got_folder
-        jp draw_state           ; no longer "loading"
+        call draw_state         ; no longer "loading"
+        ld a,(srch_wait)
+        or a
+        ret z
+        xor a
+        ld (srch_wait),a
+        ld hl,(count)           ; only ".."
+        dec hl
+        ld a,h
+        or l
+        ret nz
+        ld hl,txt_srchnone
+        jp msg_err
 .failed:
+        xor a
+        ld (srch_wait),a
         ld hl,txt_listfail
         call show_path_msg
         jp draw_state
@@ -3706,6 +3724,109 @@ msg_err:
         jr msg_show
 
 ;------------------------------------------------------------------------------
+; search the station directory (/ or J): the text is typed in the path line;
+; Enter asks the engine, which opens Internet radio/Search/<text> with the
+; stations whose name has it
+srch_open:
+        ld a,1
+        ld (srch_on),a
+        xor a
+        ld (msg_on),a
+        jp srch_draw
+
+srch_close:
+        xor a
+        ld (srch_on),a
+        ld de,#1201
+        ld b,30
+        ld c,NAVY*16+NAVY
+        call fill_row
+        jp draw_path
+
+srch_draw:                      ; "Search: text_"
+        ld hl,txt_search
+        ld de,linebuf
+        call strcpy
+        ld hl,srch_text
+        call strcpy
+        ld a,'_'
+        ld (de),a
+        inc de
+        xor a
+        ld (de),a
+        ld de,#1201
+        ld hl,linebuf
+        ld b,30
+        ld c,WHITE*16+BLUE
+        jp text6s
+
+; srch_keys: A = key
+srch_keys:
+        cp 27
+        jp z,srch_close
+        cp 13
+        jr z,srch_go
+        cp 8
+        jr nz,.ch
+        ld a,(srch_len)         ; BS: the last character goes
+        or a
+        ret z
+        dec a
+        ld (srch_len),a
+        jr .end
+.ch:    cp ' '
+        ret c
+        cp 127
+        ret nc
+        ld b,a
+        ld a,(srch_len)
+        cp SRCH_MAX
+        ret nc
+        ld e,a
+        ld d,0
+        ld hl,srch_text
+        add hl,de
+        ld (hl),b
+        inc a
+        ld (srch_len),a
+.end:   ld a,(srch_len)
+        ld e,a
+        ld d,0
+        ld hl,srch_text
+        add hl,de
+        ld (hl),0
+        jp srch_draw
+
+srch_go:
+        ld a,(srch_len)
+        or a
+        jp z,srch_close
+        call srch_close
+        ld hl,srch_text
+        ld de,args
+        call strcpy0
+        ld a,(srch_len)
+        inc a
+        ld c,a
+        ld b,0
+        ld a,C_SEARCH
+        call cmd
+        ret c
+        cp E_BUSY
+        jr nz,.no
+        ld a,1
+        ld (loading),a
+        ld (srch_wait),a
+        jp draw_state
+.no:    cp E_NOWIFI
+        ld hl,txt_srchwifi
+        jp z,msg_err
+        or a
+        ret z
+        ld hl,txt_srchfail
+        jp msg_err
+
+;------------------------------------------------------------------------------
 ; the help page: all the keys, in 6-pixel text over the whole screen
 help_open:
         ld a,(eq_open)
@@ -3716,7 +3837,10 @@ help_open:
         call cls
         ld hl,help_text
         ld d,0
-.l:     ld a,(hl)
+.l:     ld a,d
+        cp 24
+        ret nc                  ; (the screen has 24 rows)
+        ld a,(hl)
         cp #FF
         ret z
         ld c,a                  ; each line: colour, text, 0
@@ -3735,20 +3859,19 @@ help_open:
         inc d
         jr .l
 
-help_close:
+help_close:                     ; (help_text: 24 lines at most, one a row)
         xor a
         ld (help_on),a
         jp redraw_all
 
 ;------------------------------------------------------------------------------
-; full screen pictures (Z): big bars, mirrored bars, a waterfall of the
-; spectrum, a plasma whose colours turn with the music. Left/Right, V or a
+; full screen pictures (Z): big bars, mirrored bars, a plasma whose colours
+; turn with the music. Left/Right, V or a
 ; click: the next one; Z, ESC, Enter, BS or the right button: back.
 FS_BARS   equ 0
 FS_MIRROR equ 1
-FS_FALL   equ 2
-FS_PLASMA equ 3
-FS_N      equ 4
+FS_PLASMA equ 2
+FS_N      equ 3
 
 fs_open:
         ld a,(eq_open)
@@ -3789,8 +3912,6 @@ fs_setup:
         jr z,.bars
         cp FS_MIRROR
         jr z,.mir
-        cp FS_FALL
-        jr z,.fall
         ; the plasma: drawn once, then only its colours change
         call plasma_draw
         xor a
@@ -3828,13 +3949,6 @@ fs_setup:
         ld a,NBARS
         ld (bp_nbars),a
         jp bars_reset
-.fall:  ld hl,#0100             ; rows 1-22: every pixel on, the colour shows
-        ld bc,22*256
-        ld a,#FF
-        call vfill
-        ld a,8
-        ld (fall_y),a
-        ret
 
 ; row 0: the title, row 23: the picture's name and the time
 fs_info:
@@ -3925,8 +4039,6 @@ fs_draw:
         bit 0,a
         ret nz
         ld a,(fs_mode)
-        cp FS_FALL
-        jr z,fall_draw
         cp FS_PLASMA
         jp z,plasma_colours
         ld hl,scope_tick        ; the bars (and the mirrored ones): 25 a second
@@ -3934,73 +4046,6 @@ fs_draw:
         bit 0,(hl)
         ret nz
         jp draw_bars
-
-; the waterfall: one line of colours a picture (32 columns, 24 bands), a
-; white line under it, top to bottom and round again
-fall_draw:
-        ld a,(fall_y)
-        ld (fl_y),a
-        ld c,0                  ; column
-.c:     ld b,0
-        ld hl,fall_band
-        ld e,c
-        ld d,b
-        add hl,de
-        ld e,(hl)
-        ld hl,viz+V_LEVEL
-        add hl,de
-        ld a,(hl)
-        rrca
-        rrca
-        and #07
-        ld hl,fall_ramp
-        call idx
-        ld a,(hl)
-        call fall_put
-        inc c
-        ld a,c
-        cp 32
-        jr c,.c
-        ld a,(fl_y)             ; the white line under it
-        inc a
-        cp 184
-        jr c,.w
-        ld a,8
-.w:     ld (fl_y),a
-        ld (fall_y),a
-        ld c,0
-.c2:    ld a,WHITE*16+WHITE
-        call fall_put
-        inc c
-        ld a,c
-        cp 32
-        jr c,.c2
-        ret
-
-fall_put:                       ; A = colour byte of column C, line (fl_y)
-        push af
-        ld a,(fl_y)
-        ld h,a
-        and 7
-        ld l,a
-        ld a,h
-        rrca
-        rrca
-        rrca
-        and #1F
-        add a,#20
-        ld h,a                  ; 2000h + row * 256
-        ld a,c
-        add a,a
-        add a,a
-        add a,a
-        or l
-        ld l,a                  ; + column * 8 + line
-        call vwrite
-        pop af
-        out (VDP_D),a
-        ei
-        ret
 
 ; the plasma: four sines over the 32 x 176 cell lines, 12 colours of the
 ; palette with dithered steps between them
@@ -4889,6 +4934,9 @@ ms_sprite:
         ret
 
 right_click:
+        ld a,(srch_on)
+        or a
+        jp nz,srch_close
         ld a,(help_on)
         or a
         jp nz,help_close
@@ -4902,6 +4950,9 @@ right_click:
 
 ; left_click: what is under the pointer
 left_click:
+        ld a,(srch_on)          ; a click ends the typing
+        or a
+        jp nz,srch_close
         ld a,(help_on)
         or a
         jp nz,help_close
@@ -5170,6 +5221,10 @@ keys:   ld c,#06
         or a
         ret z
         ld b,a
+        ld a,(srch_on)
+        or a
+        ld a,b
+        jp nz,srch_keys         ; typing a search
         ld a,(help_on)
         or a
         jp nz,help_close        ; any key closes the help page
@@ -5188,7 +5243,7 @@ keys:   ld c,#06
         cp '?'
         jp z,help_open
         cp '/'
-        jp z,help_open
+        jp z,srch_open
         cp 30
         jr nz,.k1
         ld hl,-1
@@ -5221,6 +5276,10 @@ keys:   ld c,#06
         jp z,fs_open
         cp 'z'
         jp z,fs_open
+        cp 'J'
+        jp z,srch_open
+        cp 'j'
+        jp z,srch_open
         ; fall through
 
 ; the keys of both screens: A = key
@@ -5564,7 +5623,6 @@ txt_noanswer:   db "The engine does not answer.",13,10,"$"
 label_bars:     db 0,6,12,17,21,#FF
 help_text:
         db #53,"  PICOAMP - THE KEYS",0
-        db #5E,0
         db #5E,"Up/Down    choose     Enter  play/open",0
         db #5E,"Left/Right page       BS     parent",0
         db #5E,"Space      pause      S      stop",0
@@ -5573,10 +5631,13 @@ help_text:
         db #5E,"V          scope      G      equalizer",0
         db #5E,"E          EQ preset  Z      full screen",0
         db #5E,"F          favourite+ D, DEL favourite-",0
-        db #5E,"? or /     this page  ESC Q  quit",0
+        db #5E,"/ or J     search     ?      this page",0
+        db #5E,"ESC Q      quit",0
         db #5E,0
         db #4E,"Equalizer: Left/Right band, Up/Down gain,",0
         db #4E,"           0 middle, G or ESC closes",0
+        db #4E,"Search: type a part of a station's name,",0
+        db #4E,"  Enter; BS deletes, ESC stops",0
         db #4E,"Full screen: Left/Right or V next picture,",0
         db #4E,"             Z or ESC back",0
         db #4E,"Favourites: F adds the chosen station (or",0
@@ -5584,7 +5645,6 @@ help_text:
         db #4E,"  Internet radio/Favourites)",0
         db #4E,"Mouse: click to choose, again to play;",0
         db #4E,"       the right button goes back",0
-        db #5E,0
         db #6E,"                 press a key",0
         db #FF
 txt_program:    db "PROGRAM",0
@@ -5600,13 +5660,14 @@ txt_favadded:   db "Added to the favourites",0
 txt_favwhere:   db "Choose it in Internet radio/Favourites",0
 txt_favnot:     db "Not in RADIOFAV.M3U",0
 txt_favremoved: db "Removed from the favourites",0
+txt_search:     db "Search: ",0
+txt_srchnone:   db "No stations found",0
+txt_srchwifi:   db "Search: no WiFi (the ESP) for the directory",0
+txt_srchfail:   db "Search: the engine is too old (0.9 or newer)",0
 txt_fshelp:     db "   </>: next  Z: back",0
 fs_names:       db "BARS       ",0,0,0,0,0
                 db "MIRROR     ",0,0,0,0,0
-                db "WATERFALL  ",0,0,0,0,0
                 db "PLASMA     ",0,0,0,0,0
-fall_band:      db 0,0,1,2,3,3,4,5,6,6,7,8,9,9,10,11,12,12,13,14,15,15,16,17,18,18,19,20,21,21,22,23
-fall_ramp:      db NAVY*17,BLUE_D*17,BLUE*17,MAGENTA*17,RED*17,ORANGE*17,YELLOW*17,WHITE*17
 pl_cols:        db 2,3,4,6,7,8,9,10,11,12,13,15
 
 eq_tab:         db 0,0,0,0,0, 5,2,-2,3,5, -1,3,4,2,-1, 3,1,-1,2,4, 3,0,-1,1,3, -4,-1,4,3,-2, 8,4,0,0,0, 6,2,0,1,5
@@ -5767,11 +5828,13 @@ ms_prev:        db 0
 ms_try:         db 0
 ms_rest:        db 0                    ; bit 0 / 1: port 1 / 2 gave 0,0
 help_on:        db 0
+srch_on:        db 0
+srch_wait:      db 0
+srch_len:       db 0
+srch_text:      ds SRCH_MAX+1
 fs_on:          db 0
 fs_mode:        db 0
 fs_shown:       db 0
-fall_y:         db 8
-fl_y:           db 0
 pl_row:         db 0
 pl_pp:          dw 0
 pl_y:           db 0

@@ -3,7 +3,7 @@
 PICOAMP is a full-screen MP3/WAV and internet radio player for MSX-DOS. It
 looks like a mix of Winamp and the MUBScope player. It needs an **MSX2** and a
 PicoVerse 2350 cartridge running the PicoPlay firmware (Audio Engine 0.8 or
-newer). The engine does the decoding, the equalizer and the sound analysis.
+newer; 0.9 for the station search). The engine does the decoding, the equalizer and the sound analysis.
 PICOAMP only copies the data and draws it.
 
 ![PICOAMP playing](images/picoamp_playing.png)
@@ -12,7 +12,7 @@ PICOAMP only copies the data and draws it.
 |---|---|
 | ![Scope](images/picoamp_scope.png) | ![Equalizer](images/picoamp_equalizer.png) |
 
-| Full screen (Z): bars, mirror, waterfall, plasma | Help (?) |
+| Full screen (Z): bars, mirror, plasma | Help (?) |
 |---|---|
 | ![Full screen](images/picoamp_fullscreen.png) | ![Help](images/picoamp_help.png) |
 
@@ -71,7 +71,8 @@ PICOAMP shows "LOADING THE LIST...".
 | Z | Full screen pictures |
 | F | Add the chosen station (or the one that plays) to the favourites |
 | D or DEL | Remove the chosen station from the favourites (in Internet radio/Favourites) |
-| ? or / | The help page with all the keys (any key closes it) |
+| / or J | Search the station directory by name |
+| ? | The help page with all the keys (any key closes it) |
 | ESC / Q | Quit to MSX-DOS (the music keeps playing) |
 
 ### Favourites
@@ -82,15 +83,26 @@ writes it through MSX-DOS 2 (Nextor), on the drive it was started from (the
 `PROGRAM` environment item), else A:. A message in the path line says what
 happened ("Added to the favourites", "Already a favourite", ...).
 
+### Search
+
+`/` or `J` opens a line in the place of the path: type a part of a station's
+name (any case), BS deletes, Enter searches, ESC (or a click) stops. The
+engine asks the Radio Browser directory for MP3 stations whose name has the
+text, most listened first, and opens them as Internet radio/Search/<text>
+(".." goes to the directory's home; "More stations..." at the end of a long
+list). "No stations found" when there are none. It needs the cartridge's
+WiFi (ESP-01) and engine 0.9.
+
+![Search](images/picoamp_search.png)
+
 ### Full screen
 
-Four pictures, made from the engine's spectrum and levels:
+Three pictures, made from the engine's spectrum and levels:
 
 | Picture | What it is |
 |---------|------------|
 | Bars | 24 bars of 20 cells (40 steps), green to red, with peaks |
 | Mirror | The bars from the middle up, and their reflection down |
-| Waterfall | The spectrum as a line of colours, one line a picture, top to bottom and round again; a white line marks the newest |
 | Plasma | A plasma (four sines) drawn once; its 12 colours turn round a colour wheel, faster when the music is louder, brighter with the bass |
 
 Left/Right, V or a click: the next picture. Z, ESC, Enter, BS or the right
@@ -162,8 +174,7 @@ after it has reported standing still once.
   its text round and round into 8 strips shifted 0-7 pixels, one strip a
   pass during its still second; then each step only copies 8 bytes a cell
   from the right strip to the VDP.
-* The waterfall writes 32 colour bytes a line (the patterns are all set);
-  the plasma's colours are palette entries, so it changes 12 palette entries
+* The plasma's colours are palette entries, so it changes 12 palette entries
   a picture and nothing in VRAM.
 * The engine computes the data on core 1 of the RP2350: a 512-point FFT plus a
   second FFT at a quarter of the rate for the low bands. It updates about 50
@@ -178,7 +189,7 @@ python3 gen_tables.py > tables.inc      # scope and buffer tables (already gener
 sjasmplus --nologo --msg=war --raw=PICOAMP.COM picoamp.asm
 ```
 
-PICOAMP.COM is about 13 KB (page 0, below 4000h: page 1 is switched to the
+PICOAMP.COM is about 13.5 KB (page 0, below 4000h: page 1 is switched to the
 engine). Its buffers are in page 2, from 8000h to about AC60h; the program
 says so and stops when MSX-DOS leaves less room.
 

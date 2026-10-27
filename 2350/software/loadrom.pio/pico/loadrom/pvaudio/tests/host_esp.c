@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "../pva_internal.h"
 
 // ---------------- configuration (tests change these) ----------------
@@ -197,6 +198,13 @@ static void api(conn_t *c, const char *path)
         const char *p;
         if ((p = strstr(q, "country=")) && (p == q || p[-1] == '&')) sscanf(p + 8, "%63[^&]", country);
         if ((p = strstr(q, "tag="))) sscanf(p + 4, "%63[^&]", tag);
+        char name[64] = "";
+        if ((p = strstr(q, "name=")) && (p == q || p[-1] == '&')) sscanf(p + 5, "%63[^&]", name);
+        for (char *s2 = name, *d = name; ; )
+        {
+            if (*s2 == '%' && s2[1] && s2[2]) { char h[3] = { s2[1], s2[2], 0 }; *d++ = (char)strtol(h, NULL, 16); s2 += 3; }
+            else if (!(*d++ = *s2++)) break;
+        }
         // undo the URL encoding
         for (char *s2 = country, *d = country; ; )
         {
@@ -237,6 +245,16 @@ static void api(conn_t *c, const char *path)
                 if (!strcmp(cj, "C\\u00f4te D'ivoire")) snprintf(cj, sizeof cj, "C\xc3\xb4te D'ivoire");
                 if (country[0] && strcmp(country, cj)) continue;
                 if (tag[0] && !strstr(t->tags, tag)) continue;
+                if (name[0])                    // a part of the name, any case
+                {
+                    char a[200], b2[64];
+                    size_t k;
+                    for (k = 0; t->name[k] && k < sizeof a - 1; k++) a[k] = (char)tolower((unsigned char)t->name[k]);
+                    a[k] = 0;
+                    for (k = 0; name[k] && k < sizeof b2 - 1; k++) b2[k] = (char)tolower((unsigned char)name[k]);
+                    b2[k] = 0;
+                    if (!strstr(a, b2)) continue;
+                }
                 if (n++) bq_put(&b, ",", 1);
                 station_json(&b, t, i);
             }

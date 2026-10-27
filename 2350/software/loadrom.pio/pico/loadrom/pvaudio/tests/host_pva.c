@@ -939,6 +939,30 @@ int main(int argc, char **argv)
         cmd(PVA_C_STOP, NULL, 0);
         run_ms(500);
 
+        printf("[search]\n");
+        CHECK(cmd_str(PVA_C_DIR_SEARCH, "  jAzZ ") == PVA_E_BUSY, "search 'jAzZ': BUSY");
+        WAIT_LIST(10000);
+        CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_DONE && strstr(host_esp_last_api, "name=jAzZ&"), "asked '%s'", host_esp_last_api);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        char sp[80];
+        snprintf(sp, sizeof sp, "%s", (char *)reply + 2);
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(!strcmp(sp, "/Internet radio/Search/jAzZ") && n == 2 && find(n, "Secure Jazz") == 1,
+              "'%s': %d station(s)", sp, n - 1);
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 0) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio"), ".. goes home");
+        CHECK(cmd_str(PVA_C_DIR_SEARCH, "caf\xc3\xa9 aac") == PVA_E_BUSY, "search with a space and UTF-8");
+        WAIT_LIST(10000);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(strstr(host_esp_last_api, "name=caf%C3%A9%20aac&") && n >= 1, "encoded: '%s' (%d)", host_esp_last_api, n - 1);
+        CHECK(cmd_str(PVA_C_DIR_SEARCH, "zzzz") == PVA_E_BUSY, "search 'zzzz'");
+        WAIT_LIST(10000);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_DONE && n == 1, "nothing found: only '..' (%d)", n);
+        CHECK(cmd_str(PVA_C_DIR_SEARCH, "   ") == PVA_E_ARGS, "an empty search: ARGS");
+        cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
+
         printf("[directory troubles]\n");
         host_esp_api_down = true;
         cmd_u16(PVA_C_DIR_ENTER, 0);                // decades

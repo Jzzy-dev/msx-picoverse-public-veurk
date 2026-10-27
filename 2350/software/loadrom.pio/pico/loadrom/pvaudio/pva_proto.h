@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        8
+#define PVA_FW_MINOR        9
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -81,6 +81,9 @@
 #define PVA_C_DIR_ENTER     0x12    // args: u16 index of a folder or ".." entry; reply as DIR_OPEN
 #define PVA_C_ENTRY_INFO    0x13    // args: u16 index of a station (0xFFFF = the stream that plays);
                                     // reply: address (0-terminated), name (0-terminated)
+#define PVA_C_DIR_SEARCH    0x14    // args: text (0-terminated, up to 60): Radio Browser stations whose
+                                    // name has it (any case), as Internet radio/Search/<text>; answers
+                                    // PVA_E_BUSY and opens by itself as DIR_ENTER does (DIR_STATE)
 #define PVA_C_PLAY_INDEX    0x20    // args: u16 index in the open folder
 #define PVA_C_PLAY_PATH     0x21    // args: path
 #define PVA_C_PAUSE         0x22    // toggle pause

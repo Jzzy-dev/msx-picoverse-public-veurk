@@ -530,6 +530,28 @@ static int radio_enter(uint16_t idx)
     }
 }
 
+// DIR_SEARCH: stations whose name has the text, as a station list under the
+// directory's home (".." goes there)
+static int cmd_dir_search(void)
+{
+    char text[64], enc[200], q[260], t[48];
+    size_t n = 0;
+    while (n < sizeof text - 1 && n < PVA_ARGS_SIZE && args[n]) { text[n] = (char)args[n]; n++; }
+    text[n] = 0;
+    char *s = text;
+    while (*s == ' ') s++;
+    n = strlen(s);
+    while (n && s[n - 1] == ' ') s[--n] = 0;
+    if (!*s) return PVA_E_ARGS;
+    if (!pva_dir_available() || !pva_hal_net_present()) return PVA_E_NOWIFI;
+    radio_stop_wait();
+    pva_dir_urlenc(enc, sizeof enc, s);
+    snprintf(q, sizeof q, "name=%s&order=clickcount&reverse=true", enc);
+    snprintf(t, sizeof t, "Search/%.38s", s);
+    pva_log("radio: search %.40s", s);
+    return radio_fetch(V_STATIONS, V_HOME, t, q);
+}
+
 static void reply_dir_header(void)
 {
     set_reply_byte((uint8_t)(dir_count & 0xFF));
@@ -1266,6 +1288,7 @@ static int execute(uint8_t code)
         case PVA_C_DIR_READ:  return cmd_dir_read();
         case PVA_C_DIR_ENTER: return cmd_dir_enter();
         case PVA_C_ENTRY_INFO: return cmd_entry_info();
+        case PVA_C_DIR_SEARCH: return cmd_dir_search();
         case PVA_C_PLAY_INDEX: return cmd_play_index();
         case PVA_C_PLAY_PATH: return cmd_play_path();
         case PVA_C_PLAY_URL:  return cmd_play_url();
