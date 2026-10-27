@@ -28,6 +28,7 @@
 #include "nextor_sunrise.h"
 #include "nextor3.h"
 #include "esp8266p_rom.h"
+#include "picoamp_rom.h"
 #include "fmpac_bios.h"
 #include "opl4_fw.h"
 #include "opl4_fw_22k.h"
@@ -88,7 +89,9 @@ static const char *rom_types[] = {
     "Carnivore2 USB",
     "MegaRAM SD",
     "MegaRAM USB",
-    "Sunrise SD+Mapper+SE-ONE"
+    "Sunrise SD+Mapper+SE-ONE",
+    "Sunrise SD+Mapper+Player",
+    "PicoAmp ROM"
 };
 
 #define ROM_TYPE_SUNRISE 10
@@ -104,6 +107,7 @@ static const char *rom_types[] = {
 #define ROM_TYPE_MEGARAM_USB 20
 #define ROM_TYPE_SEONE_SD 21
 #define ROM_TYPE_PVA_SD 22
+#define ROM_TYPE_PICOAMP 23
 
 #define NEXTOR3_SUNRISE_LABEL "Nextor Sunrise 3.0.0 Beta 2"
 #define NEXTOR3_ROM           ___resources_Nextor_3_0_0_beta2_SunriseIDE_MasterOnly_ROM
@@ -449,7 +453,7 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s1] [-m1] [-r1] [-s2] [-m2] [-r2] [-c1] [-c2] [-e1] [-p1] [-s3] [-4] [-a] [--4mhz] [-w] [-d] [-f] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-r1] [-s2] [-m2] [-r2] [-c1] [-c2] [-e1] [-p1] [-pa] [-s3] [-4] [-a] [--4mhz] [-w] [-d] [-f] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help         Show this help message\n");
@@ -471,6 +475,7 @@ static void print_usage(const char *prog_name) {
     printf("                     very dense songs play without dropouts, at the cost of a duller high end\n");
     printf("  -a, --msx-audio    Build UF2 with the standalone MSX-AUDIO / Y8950 cartridge firmware (MSX-Audio BIOS + 256KB ADPCM sample RAM)\n");
     printf("      --4mhz         (with -a) Clock the emulated Y8950 at 4 MHz instead of the standard 3.579545 MHz\n");
+    printf("  -pa, --picoamp     Build UF2 with the PICOAMP player ROM + PicoVerse Audio Engine (MSX2; no Nextor)\n");
     printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2/-e1/-p1/-s3 only)\n");
     printf("  -d, --dual-psg     Enable secondary PSG emulation on I/O ports 0x10/0x11\n");
     printf("  -f, -fmpac         Enable MSX-MUSIC/YM2413 emulation on I/O ports 0x7C/0x7D\n");
@@ -663,6 +668,7 @@ int main(int argc, char *argv[])
     bool use_sunrise3_sd = false;
     bool use_seone_sd = false;
     bool use_pva_sd = false;
+    bool use_picoamp = false;
     bool use_opl4 = false;
     bool opl4_22khz = false;
     bool use_msx_audio = false;
@@ -697,6 +703,8 @@ int main(int argc, char *argv[])
             use_seone_sd = true;
         } else if ((strcmp(argv[i], "-p1") == 0) || (strcmp(argv[i], "--player-sd") == 0)) {
             use_pva_sd = true;
+        } else if ((strcmp(argv[i], "-pa") == 0) || (strcmp(argv[i], "--picoamp") == 0)) {
+            use_picoamp = true;
         } else if ((strcmp(argv[i], "-s3") == 0) || (strcmp(argv[i], "--sunrise3-sd") == 0)) {
             use_sunrise3_sd = true;
         } else if ((strcmp(argv[i], "-4") == 0) || (strcmp(argv[i], "--opl4") == 0)) {
@@ -962,8 +970,36 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    if (use_picoamp) {
+        // The PICOAMP player (msxdos-player/PICOAMP.ROM) in sub-slot 0 and the
+        // engine in sub-slot 3; -w lets the engine use the ESP-01 (no ESP BIOS:
+        // the MSX side does not talk to it).
+        if (use_nextor || rom_filename) {
+            printf("Option -pa/--picoamp takes no ROM file and no Nextor option.\n");
+            return 1;
+        }
+        uint8_t rom_type = ROM_TYPE_PICOAMP;
+        static char name[MAX_FILE_NAME_LENGTH + 1];     // (the record takes the whole field)
+        memset(name, 0, sizeof name);
+        strncpy(name, use_wifi ? "PicoAmp Player + WiFi" : "PicoAmp Player", MAX_FILE_NAME_LENGTH);
+        if (use_wifi) {
+            rom_type |= ROM_TYPE_WIFI_FLAG;
+            printf("WiFi Support: Enabled (internet radio through the ESP-01)\n");
+        }
+        if ((uint32_t)picoamp_rom_len != 16384u) {
+            printf("Embedded PICOAMP ROM must be 16384 bytes (found %u).\n", (unsigned)picoamp_rom_len);
+            return 1;
+        }
+        printf("ROM Type: %s [Embedded]\n", rom_types[ROM_TYPE_PICOAMP]);
+        printf("ROM Name: %s\n", name);
+        printf("ROM Size: %u bytes\n", (unsigned)picoamp_rom_len);
+        printf("UF2 Output: %s\n", output_filename);
+        create_uf2_file(NULL, picoamp_rom, (uint32_t)picoamp_rom_len, NULL, 0u, rom_type, name, CONFIG_RECORD_SIZE, output_filename);
+        return 0;
+    }
+
     if (use_wifi && !(use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb || use_sunrise3_sd || use_seone_sd || use_pva_sd)) {
-        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2, -m2, -e1, -p1 or -s3.\n");
+        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2, -m2, -e1, -p1, -pa or -s3.\n");
         return 1;
     }
 

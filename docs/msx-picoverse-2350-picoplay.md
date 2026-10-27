@@ -37,6 +37,15 @@ The image holds Nextor 2.1.4 (Sunrise IDE on the microSD card), the 1 MB PSRAM m
 
 The SymbOS disk driver stays on slot `P-1`, and the network daemon still finds Wi-Fi in `P-0`.
 
+### PicoAmp ROM (no Nextor)
+
+```powershell
+.\2350\software\loadrom.pio\tool\dist\loadrom.exe -pa -w -o picoamp_wifi.uf2   # with the ESP-01 Wi-Fi
+.\2350\software\loadrom.pio\tool\dist\loadrom.exe -pa -o picoamp.uf2           # without Wi-Fi
+```
+
+The MSX2 boots straight into PICOAMP: the player is a 16 KB cartridge ROM in sub-slot 0 and the engine is in sub-slot 3 (no Nextor, no mapper, no files needed besides the music). Q returns to the BIOS, which boots on to BASIC while the music keeps playing. In this version the favourites can be played but not changed (F and D need `PICOAMP.COM` under MSX-DOS for now). Integration notes for the Explorer: `docs/msx-picoverse-2350-picoamp-explorer.md`.
+
 ## 3. Music on the card
 
 Put the music anywhere on the first partition, for example `A:\MUSIC\`, with sub-folders and `.M3U` play lists.

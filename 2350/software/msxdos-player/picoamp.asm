@@ -27,7 +27,29 @@
 ;           (digits.inc from gen_digits.py, tables.inc from gen_tables.py)
 ;==============================================================================
 
+    IFDEF ROMBUILD
+; The ROM (PICOAMP.ROM, sjasmplus -DROMBUILD): a 16 KB cartridge ROM at
+; 4000h in the PicoVerse's sub-slot 0, the engine in sub-slot 3 of the same
+; slot. Its INIT copies the program to RAM at 8000h and runs it there (page 1
+; is switched to the engine now and then); keys come from the BIOS. Q returns
+; to the BIOS, which goes on booting (the music plays on).
+RUN_AT  equ #8000
+        org #4000
+        db "AB"
+        dw rom_init
+        dw 0,0,0
+        ds 6,0
+rom_init:
+        ld hl,rom_payload
+        ld de,RUN_AT
+        ld bc,progend-RUN_AT
+        ldir
+        jp start
+rom_payload:
+        DISP RUN_AT
+    ELSE
         org #0100
+    ENDIF
 
 BDOS    equ #0005
 RDSLT   equ #000C
@@ -40,6 +62,10 @@ GTPAD   equ #00DB
 EXPTBL  equ #FCC1
 JIFFY   equ #FC9E
 RAMAD1  equ #F342
+CSRSW   equ #FCA9
+CHSNS   equ #009C
+CHGET   equ #009F
+CHPUT   equ #00A2
 RG1SAV  equ #F3E0
 RG8SAV  equ #FFE7
 CGTABL  equ #0004
@@ -154,15 +180,28 @@ TSIZE    equ T_TEXT+64
 GAP      equ 4              ; spaces between the end and the start again
 
 ;------------------------------------------------------------------------------
-start:  ld sp,(#0006)
+start:
+    IFDEF ROMBUILD
+        ld (rom_sp),sp          ; (Q returns from here to the BIOS)
+        xor a
+        ld (CSRSW),a            ; no text cursor
+    ELSE
+        ld sp,(#0006)
         ld hl,(#0006)           ; the buffers in page 2 and the stack must fit
         ld de,bss_end+512
         or a
         sbc hl,de
         jp c,nomemory
+    ENDIF
         call bss_init
         call find
         jp c,notfound
+        ld a,(RAMAD1)           ; what page 1 shows when the engine is not mapped
+    IFDEF ROMBUILD
+        ld a,(slot)             ; this ROM: the engine's slot, sub-slot 0
+        and #F3
+    ENDIF
+        ld (p1_slot),a
         ld hl,W_DONE
         call rd
         ld (token),a
@@ -171,6 +210,9 @@ start:  ld sp,(#0006)
         call cmd
         jp c,noanswer
         ; the starting folder: the argument, or the root
+    IFDEF ROMBUILD
+        jr .root
+    ENDIF
         ld hl,#0080
         ld de,argbuf
         ld a,(hl)
@@ -310,7 +352,7 @@ eng_copy:
         pop de
         pop hl
         ldir
-        ld a,(RAMAD1)
+        ld a,(p1_slot)
         ld h,#40
         call ENASLT
         ei
@@ -342,7 +384,7 @@ fetch_frame:
         ldir
         ld a,1
         ld (viz_new),a
-.same:  ld a,(RAMAD1)
+.same:  ld a,(p1_slot)
         ld h,#40
         call ENASLT
         ei
@@ -4656,6 +4698,10 @@ fav_reopen:
 
 ; F: add the chosen station (or the one that plays)
 fav_add:
+    IFDEF ROMBUILD
+        ld hl,txt_favrom
+        jp msg_err
+    ENDIF
         call fav_info
         ld hl,txt_favsel
         jp c,msg_err
@@ -4730,6 +4776,10 @@ fav_end:                        ; DE = the 0 at the end of favbuf
 
 ; D / DEL: remove the chosen station from the favourites
 fav_del:
+    IFDEF ROMBUILD
+        ld hl,txt_favrom
+        jp msg_err
+    ENDIF
         call fav_in_folder
         ld hl,txt_favwhere
         jp nz,msg_err
@@ -5316,11 +5366,20 @@ eq_hit: ld a,#FF
         ret
 
 ;------------------------------------------------------------------------------
-keys:   ld c,#06
+keys:
+    IFDEF ROMBUILD
+        call CHSNS              ; (page 0 is the BIOS)
+        ret z
+        call CHGET
+        or a
+        ret z
+    ELSE
+        ld c,#06
         ld e,#FF
         call BDOS
         or a
         ret z
+    ENDIF
         ld b,a
         ld a,(srch_on)
         or a
@@ -5539,31 +5598,35 @@ eq_keys:
 
 quit:   call restore_screen
         ld de,txt_bye
-        ld c,#09
-        call BDOS
-        ld c,0
-        jp BDOS
+        jr bye
 
 notfound:
         ld de,txt_notfound
-        ld c,#09
-        call BDOS
-        ld c,0
-        jp BDOS
+        jr bye
 
 nomemory:
         ld de,txt_nomemory
-        ld c,#09
-        call BDOS
-        ld c,0
-        jp BDOS
+        jr bye
 
 noanswer:
         ld de,txt_noanswer
+        ; fall through
+bye:                            ; DE = "...$": print it, end
+    IFDEF ROMBUILD
+.p:     ld a,(de)
+        cp '$'
+        jr z,.e
+        call CHPUT
+        inc de
+        jr .p
+.e:     ld sp,(rom_sp)          ; back to the BIOS's boot
+        ret
+    ELSE
         ld c,#09
         call BDOS
         ld c,0
         jp BDOS
+    ENDIF
 
 ;------------------------------------------------------------------------------
 ; small helpers
@@ -5753,6 +5816,7 @@ txt_favpath:    db "/Internet radio/Favourites",0
 txt_extm3u:     db "#EXTM3U",13,10,0
 txt_extinf:     db "#EXTINF:-1,",0
 txt_crlf:       db 13,10,0
+txt_favrom:     db "Favourites: the MSX-DOS PICOAMP.COM for now",0
 txt_favsel:     db "Choose (or play) a station first",0
 txt_favthere:   db "Already a favourite",0
 txt_favfull:    db "RADIOFAV.M3U is full (4 KB)",0
@@ -5930,6 +5994,8 @@ ms_y:           db 96
 ms_shown_x:     db #FF
 ms_shown_y:     db #FF
 ms_prev:        db 0
+p1_slot:        db 0
+rom_sp:         dw 0
 ms_try:         db 0
 ms_rest:        db 0                    ; bit 0 / 1: port 1 / 2 gave 0,0
 help_on:        db 0
@@ -5960,11 +6026,19 @@ fav_n:          dw 0
 fav_s:          dw 0
 fav_e:          dw 0
 progend:
+    IFDEF ROMBUILD
+        ENT
+        ds #8000-$,#FF          ; the ROM: 16 KB
+    ENDIF
 
 ; buffers (not in the file; cleared at the start). They are in page 2: page
 ; 1 is switched to the engine now and then, page 0 holds the program.
 REPLY_MAX       equ 1024
+    IFDEF ROMBUILD
+bss_start       equ (progend + 255) & #FF00     ; after the program, in RAM
+    ELSE
 bss_start       equ #8000
+    ENDIF
 font            equ bss_start           ; 96 x 8
 vizbuf          equ font + 96*8         ; the area: 10 x 192
 rowcol          equ vizbuf + 1920       ; colours of one area row
@@ -5995,5 +6069,10 @@ fav_url         equ tkstrip + 8*82*8
 fav_name        equ fav_url + 256
 bss_end         equ fav_name + 64
         assert 8*82*8 >= FAV_MAX + 1
+    IFDEF ROMBUILD
+        assert progend - RUN_AT <= #4000 - (rom_payload - #4000)
+        assert bss_end < #EE00          ; (the stack and the BIOS above)
+    ELSE
         assert progend < #4000
         assert bss_end < #B000
+    ENDIF

@@ -142,14 +142,16 @@ static inline audio_mode_t resolve_audio_mode(uint8_t rom_type, uint8_t base_rom
 
 static inline bool is_system_rom_type(uint8_t base_rom_type)
 {
-    return base_rom_type >= 10u && base_rom_type <= 22u &&
+    return base_rom_type >= 10u && base_rom_type <= 23u &&
            base_rom_type != 12u && base_rom_type != 13u && base_rom_type != 14u;
 }
 
 static inline bool is_embedded_nextor_record(const char *rom_name)
 {
     static const char prefix[] = "Nextor ";
-    return memcmp(rom_name, prefix, sizeof(prefix) - 1u) == 0;
+    static const char picoamp[] = "PicoAmp";        // the PicoAmp ROM (type 23) too
+    return memcmp(rom_name, prefix, sizeof(prefix) - 1u) == 0 ||
+           memcmp(rom_name, picoamp, sizeof(picoamp) - 1u) == 0;
 }
 
 static inline uint8_t decode_base_rom_type(uint8_t rom_type, const char *rom_name)
@@ -2948,6 +2950,95 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_pva_sd)(uint32_t offse
 #undef PVA_DRAIN_WRITES
 }
 
+// -----------------------------------------------------------------------
+// PicoAmp ROM (ROM type 23, loadrom -pa [-w]): the PICOAMP player as a 16 KB
+// cartridge ROM plus the PicoVerse Audio Engine, without Nextor or a mapper.
+// The MSX boots straight into the player; the engine reads the microSD card
+// itself and uses the ESP-01 for internet radio.
+//   sub-slot 0 = PICOAMP.ROM (4000h-7FFFh; its INIT copies it to RAM)
+//   sub-slot 3 = PicoVerse Audio Engine register window (4000h-4FFFh)
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_picoamp)(uint32_t offset, bool wifi_enable)
+{
+    sunrise_wait_for_expanded_bootstrap();
+
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, true, &rom_base, &available_length);
+
+    // the engine's arena: the SRAM cache after the (16 KB) ROM
+    uint32_t arena_start = (rom_cached_size + 7u) & ~7u;
+    if (arena_start + PVA_CORE1_STACK_SIZE + PVA_ARENA_MIN_SIZE > CACHE_SIZE)
+    {
+        while (true) { tight_loop_contents(); }
+    }
+    pva_core1_stack = (uint32_t *)&rom_sram[arena_start];
+    memset(pva_core1_stack, 0xA5, PVA_CORE1_STACK_SIZE);
+    arena_start += PVA_CORE1_STACK_SIZE;
+    pva_init(&rom_sram[arena_start], CACHE_SIZE - arena_start);
+    pva_set_stack((const uint8_t *)pva_core1_stack, PVA_CORE1_STACK_SIZE);
+
+    // the card driver as in the Nextor modes (core 1 polls it); no IDE on the bus
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+    sunrise_sd_set_ide_ctx(&ide);
+    wifi_link_present = wifi_enable;
+    if (wifi_enable)
+        wifi_uart_init_once();             // the UART IRQ hands the engine its bytes
+    multicore_launch_core1_with_stack(core1_pva_task, pva_core1_stack, PVA_CORE1_STACK_SIZE);
+
+    uint8_t subslot_reg = 0x00u;
+    msx_pio_bus_init();
+
+    // writes are applied before every read (see loadrom_sunrise_mapper_pva_sd)
+#define PA_DRAIN_WRITES()                                                       \
+    do {                                                                        \
+        uint16_t waddr;                                                         \
+        uint8_t wdata;                                                          \
+        while (pio_try_get_write(&waddr, &wdata))                               \
+        {                                                                       \
+            if (waddr == 0xFFFFu)                                               \
+                subslot_reg = wdata;                                            \
+            else if (((waddr >> 14) & 3u) == 1u && ((subslot_reg >> 2) & 3u) == 3u) \
+                pva_mem_write(waddr, wdata);                                    \
+        }                                                                       \
+    } while (0)
+
+    while (true)
+    {
+        PA_DRAIN_WRITES();
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            PA_DRAIN_WRITES();
+            uint8_t data = 0xFFu;
+            if (addr == 0xFFFFu)
+                data = (uint8_t)~subslot_reg;
+            else if (((addr >> 14) & 3u) == 1u)
+            {
+                uint8_t sub = (subslot_reg >> 2) & 3u;
+                if (sub == 0u)
+                {
+                    uint32_t rel = addr & 0x3FFFu;
+                    if (rel < available_length)
+                        data = read_rom_byte(rom_base, rel);
+                }
+                else if (sub == 3u)
+                    data = pva_mem_read(addr);
+            }
+            // an expanded slot: every read in it is answered (FFh where nothing is)
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(true, data));
+        }
+    }
+#undef PA_DRAIN_WRITES
+}
+
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)
 {
     uint16_t bank_registers[6] = {0};
@@ -5439,6 +5530,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 22:
             loadrom_sunrise_mapper_pva_sd(ROM_RECORD_SIZE, true, wifi_enabled);
+            break;
+        case 23:
+            loadrom_picoamp(ROM_RECORD_SIZE, wifi_enabled);
             break;
         default:
             break;

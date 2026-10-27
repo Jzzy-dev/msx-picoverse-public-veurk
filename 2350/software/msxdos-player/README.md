@@ -18,6 +18,18 @@ PICOAMP only copies the data and draws it.
 
 ## Running it
 
+Two builds of the same program:
+
+* `PICOAMP.COM` for MSX-DOS 2 / Nextor, with the PicoPlay firmware
+  (`loadrom -p1 -w`).
+* `PICOAMP.ROM`, a 16 KB cartridge ROM, with the PicoAmp firmware
+  (`loadrom -pa -w`): the MSX boots straight into the player, without Nextor.
+  It copies itself to RAM at 8000h and reads the keys through the BIOS; Q
+  goes back to the BIOS (and on to BASIC). Favourites can be played, not yet
+  changed. See `docs/msx-picoverse-2350-picoamp-explorer.md` for putting it in
+  the Explorer.
+
+
 ```
 PICOAMP            start in the root folder of the card
 PICOAMP /MUSIC     start in a folder
@@ -185,9 +197,12 @@ after it has reported standing still once.
 
 ```
 python3 gen_digits.py > digits.inc      # 7-segment digits (already generated)
-python3 gen_tables.py > tables.inc      # scope and buffer tables (already generated)
-sjasmplus --nologo --msg=war --raw=PICOAMP.COM picoamp.asm
+./build.sh                              # tables.inc, PICOAMP.COM, PICOAMP.ROM and
+                                        # loadrom.pio/tool/src/picoamp_rom.h
 ```
+
+`build.sh` runs `sjasmplus --raw=PICOAMP.COM picoamp.asm` and
+`sjasmplus -DROMBUILD --raw=PICOAMP.ROM picoamp.asm`.
 
 PICOAMP.COM is about 13.5 KB (page 0, below 4000h: page 1 is switched to the
 engine). Its buffers are in page 2, from 8000h to about AC60h; the program
