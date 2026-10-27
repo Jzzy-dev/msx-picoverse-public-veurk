@@ -998,3 +998,16 @@ const char *pva_net_host(void) { return host; }
 
 uint8_t pva_net_conn(void) { return conn; }
 uint8_t *pva_net_spare(size_t *size) { *size = spare_size; return spare; }
+
+// take n bytes (4-byte aligned) off the front of the spare RAM
+void *pva_net_spare_take(size_t n)
+{
+    n = (n + 3u) & ~(size_t)3u;
+    uint8_t *p = (uint8_t *)(((uintptr_t)spare + 3u) & ~(uintptr_t)3u);
+    size_t skip = (size_t)(p - spare);
+    if (!spare || spare_size < n + skip) return NULL;
+    spare = p + n;
+    spare_size -= n + skip;
+    memset(p, 0, n);
+    return p;
+}

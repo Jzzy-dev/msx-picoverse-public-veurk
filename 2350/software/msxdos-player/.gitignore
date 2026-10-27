@@ -1,0 +1,3 @@
+test/z80_picoamp
+__pycache__/
+*.bin

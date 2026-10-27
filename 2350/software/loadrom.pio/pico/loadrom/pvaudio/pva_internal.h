@@ -116,6 +116,7 @@ void pva_esp_shorten(pva_esp_slot_t *s, uint32_t ms);
 void pva_esp_io(void);
 uint8_t pva_net_conn(void);     // the stream's ESP connection (0 = none)
 uint8_t *pva_net_spare(size_t *size);   // stream RAM the ring does not use
+void   *pva_net_spare_take(size_t n);   // a piece of it for good (NULL: none left)
 uint8_t pva_dir_conn(void);     // the directory's
 
 // the Radio Browser directory (pva_dir.c)
@@ -186,6 +187,12 @@ void pva_eq_set(const int8_t *gains);           // PVA_EQ_BANDS gains in dB
 void pva_eq_get(int8_t *gains);
 void pva_eq_reset(void);                        // a new track: clear the filter state
 void pva_eq_process(int16_t *stereo, uint32_t frames, uint32_t rate);
+
+// visualisation (pva_viz.c)
+void pva_viz_init(void);
+void pva_viz_feed(const int16_t *stereo, uint32_t frames, uint32_t rate);
+void pva_viz_poll(bool playing);
+void pva_viz_get(uint8_t *levels, uint8_t *peaks, uint8_t *vu_lr);
 
 // helpers
 int  pva_kind_from_name(const char *name);   // PVA_DE_xxx or 0

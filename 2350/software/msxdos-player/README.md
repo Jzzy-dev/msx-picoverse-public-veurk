@@ -1,0 +1,105 @@
+# PICOAMP – MSX-DOS player for the PicoVerse Audio Engine
+
+PICOAMP is a full-screen MP3/WAV and internet radio player for MSX-DOS. It
+looks like a mix of Winamp and the MUBScope player. It needs an **MSX2** and a
+PicoVerse 2350 cartridge running the PicoPlay firmware (Audio Engine 0.8 or
+newer). The engine does the decoding, the equalizer and the sound analysis.
+PICOAMP only copies the data and draws it.
+
+![PICOAMP playing](images/picoamp_playing.png)
+
+## Running it
+
+```
+PICOAMP            start in the root folder of the card
+PICOAMP /MUSIC     start in a folder
+```
+
+The engine is found by itself in any slot, as PVTEST and PicoPlay do.
+
+## Screen
+
+| Area | What it shows |
+|------|---------------|
+| Title bar | State (PLAYING / PAUSED / STOPPED) and position in the playlist |
+| Big digits | Elapsed time |
+| Info lines | Title, artist, then bit rate, sample rate and mono/stereo (or "BUFFERING 40%" for radio) |
+| Seek bar | Position in the track; for radio, how full the buffer is |
+| Spectrum | 24 bars from 60 Hz to 16 kHz on a log scale, 2 dB a step, with falling peak dots |
+| Level | VU meters, left and right |
+| List | The folder or radio list, with the path and the number of entries |
+| Bottom row | Control icons, SHF / REP (green when on), EQ, volume |
+
+The internet radio folders (countries, genres, decades, favourites) work as in
+PicoPlay. While the engine fetches a list from the Radio Browser directory,
+PICOAMP shows "LOADING THE LIST...".
+
+## Keys
+
+| Key | Action |
+|-----|--------|
+| Up / Down | Select |
+| Left / Right | Page up / down |
+| Enter | Open a folder, play a file or a station |
+| BS | Parent folder |
+| Space | Pause / play |
+| S | Stop |
+| N / P | Next / previous track |
+| + / - | Volume |
+| H | Shuffle on/off |
+| R | Repeat on/off |
+| E | Next equalizer preset (Flat, Rock, Pop, Jazz, Classic, Voice, Bass, Loud) |
+| ESC / Q | Quit to MSX-DOS |
+
+## How it works
+
+* SCREEN 4 (MSX2 pattern mode) with the name table set to 0..255 three times.
+  Every screen cell gets a pattern of its own, so the screen works like a
+  bitmap with two colours per 8-pixel row. Text is the MSX font from the BIOS,
+  moved one pixel right. Sprites are not used. The palette is set by the
+  program and restored on exit.
+* Each frame PICOAMP maps the engine into page 1 and copies its
+  visualisation block (`4C00h`: levels, peaks, VU). It does the same for the
+  status block, but only when the engine's display generation has changed.
+  Only the cells that changed are redrawn.
+* The engine computes the data on core 1 of the RP2350: a 512-point FFT plus a
+  second FFT at a quarter of the rate for the low bands. It updates about 50
+  times a second. See `pvaudio/pva_viz.c` and the `PVA_VIZ_*` offsets in
+  `pvaudio/pva_proto.h`. Any MSX program can read this block.
+
+## Building
+
+```
+python3 gen_digits.py > digits.inc      # 7-segment digits (already generated)
+sjasmplus --nologo --msg=war --raw=PICOAMP.COM picoamp.asm
+```
+
+### Test harness
+
+`test/z80_picoamp.c` runs PICOAMP.COM in a Z80 emulator against the host
+build of the Audio Engine (a disk image takes the place of the SD card). It
+emulates BDOS keys, the slot BIOS calls and the VDP, and it saves VRAM.
+`test/vram2png.py` turns the saved VRAM into a picture.
+
+```
+gcc -O2 -w -I<z80 dir> -o test/z80_picoamp test/z80_picoamp.c <z80 dir>/z80.c libpva_host.a -lm
+./test/z80_picoamp PICOAMP.COM card.img "/MUSIC" "}^......}^...." 16 vram.bin font_us.asm
+python3 test/vram2png.py vram.bin screen.png
+```
+
+Each key in the key string is half a second: `{` up, `}` down, `<` left,
+`>` right, `^` Enter, `_` BS, `.` nothing. The harness prints how many frames
+each main loop pass took and how quickly each key was answered. On a 3.58 MHz
+Z80 a pass takes about 2 frames.
+
+## Mock-ups
+
+`mockups/mockup.py` draws the design ideas under the VDP's limits: MSX2
+MUBScope/Winamp (built), an MSX1 version of it, and an MSX2 Synthesaurus-style
+layout.
+
+## Ideas for later
+
+Oscilloscope view (the engine already sends 64 samples), an equalizer
+screen, mouse support, sprite cursors, 6-pixel text for longer titles, and an
+MSX1 version.

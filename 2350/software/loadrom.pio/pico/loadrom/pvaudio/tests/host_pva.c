@@ -787,6 +787,66 @@ int main(int argc, char **argv)
         cmd(PVA_C_STOP, NULL, 0);
     }
 
+    printf("[visualisation]\n");
+    {
+        // straight through pva_viz: a tone lights its band, silence falls back
+        static int16_t tone[2 * 1024];
+        uint8_t lv[PVA_VIZ_BANDS], pk[PVA_VIZ_BANDS], vu[2];
+        const double fr[3] = { 100.0, 1000.0, 8000.0 };
+        int prev_band = -1;
+        bool ok_all = true;
+        for (int k = 0; k < 3; k++)
+        {
+            for (int n = 0; n < 1024; n++)
+            {
+                int16_t v = (int16_t)(16000.0 * sin(2 * M_PI * fr[k] * n / 44100.0));
+                tone[2 * n] = v;
+                tone[2 * n + 1] = (int16_t)(v / 4);
+            }
+            for (int u = 0; u < 15; u++)
+            {
+                pva_viz_feed(tone, 1024, 44100);
+                host_advance_ms(21);
+                pva_viz_poll(true);
+            }
+            pva_viz_get(lv, pk, vu);
+            int best = 0;
+            for (int b = 1; b < PVA_VIZ_BANDS; b++) if (lv[b] > lv[best]) best = b;
+            int far_lv = lv[(best + 12) % PVA_VIZ_BANDS];
+            bool ok = best > prev_band && lv[best] >= 26 && far_lv <= lv[best] - 10 && vu[0] > vu[1];
+            ok_all &= ok;
+            CHECK(ok, "%.0f Hz: band %d at %u (far band %d), VU %u/%u", fr[k], best, lv[best], far_lv, vu[0], vu[1]);
+            prev_band = best;
+        }
+        CHECK(rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_COUNT) == PVA_VIZ_BANDS && !(rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_SEQ) & 1) &&
+              rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_LEVEL + prev_band) == lv[prev_band], "in the window at C00h");
+        int8_t sc[PVA_VIZ_WAVE];
+        int mx = 0;
+        for (int i = 0; i < PVA_VIZ_WAVE; i++) { sc[i] = (int8_t)rd((uint16_t)(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_SCOPE + i)); if (abs(sc[i]) > mx) mx = abs(sc[i]); }
+        CHECK(mx > 20 && mx < 60, "scope samples (largest %d)", mx);
+        uint8_t top = lv[prev_band];
+        for (int u = 0; u < 5; u++) { host_advance_ms(21); pva_viz_poll(false); }
+        pva_viz_get(lv, pk, vu);
+        CHECK(lv[prev_band] == top - 5 && pk[prev_band] == top && vu[0] < 28, "stopped: the bar falls a step each update (%u), the peak holds (%u)",
+              lv[prev_band], pk[prev_band]);
+        for (int u = 0; u < 60; u++) { host_advance_ms(21); pva_viz_poll(false); }
+        pva_viz_get(lv, pk, vu);
+        CHECK(lv[prev_band] == 0 && pk[prev_band] == 0, "then all at 0");
+        // a playing file moves the bars through the engine itself
+        cmd_str(PVA_C_DIR_OPEN, "/MUSIC/Caf\xC3\xA9 del Mar");
+        cmd_u16(PVA_C_PLAY_INDEX, 1);
+        run_ms(2000);
+        int sum = 0;
+        for (int b = 0; b < PVA_VIZ_BANDS; b++) sum += rd((uint16_t)(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_LEVEL + b));
+        uint8_t s0 = rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_SEQ);
+        run_ms(200);
+        uint8_t s1 = rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_SEQ);
+        uint8_t vul = rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_VU), vur = rd(PVA_WIN_BASE + PVA_R_VIZ + PVA_VIZ_VU + 1);
+        CHECK(vul > 15 && vur > 15, "VU in the window while playing: %u %u", vul, vur);
+        CHECK(sum > 0 && (uint8_t)(s1 - s0) >= 10 && (uint8_t)(s1 - s0) <= 22, "playing: bars up (sum %d), %u updates in 200 ms", sum, (uint8_t)(s1 - s0) / 2);
+        cmd(PVA_C_STOP, NULL, 0);
+    }
+
     printf("[internet radio directory]\n");
     {
         // wait for a list: DIR_ENTER said BUSY, DIR_STATE says when it is there

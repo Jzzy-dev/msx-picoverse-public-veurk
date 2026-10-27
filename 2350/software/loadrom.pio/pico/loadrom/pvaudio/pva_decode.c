@@ -661,6 +661,7 @@ int pva_dec_step(void)
     if (n <= 0) return n;
     if ((uint32_t)n > max_frames) n = (int)max_frames;
     pva_eq_process(pcm, (uint32_t)n, rate);
+    pva_viz_feed(pcm, (uint32_t)n, rate);
     apply_gain_and_vu(pcm, (uint32_t)n);
     memcpy(out, pcm, (size_t)n * 4u);
     pva_hal_audio_commit((uint32_t)n, rate);

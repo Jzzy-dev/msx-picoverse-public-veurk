@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        7
+#define PVA_FW_MINOR        8
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -61,6 +61,8 @@
 #define PVA_R_FAULT         0x01Au  // u8  0, 1 = crash (HardFault), 2 = panic (e.g. out of heap)
 #define PVA_R_FAULT_PC      0x01Cu  // u32 program counter of the crash
 #define PVA_R_FAULT_TEXT    0xF00u  // char[64] panic message
+// visualisation, about 50 updates a second while something plays (see PVA_VIZ_xxx)
+#define PVA_R_VIZ           0xC00u
 #define PVA_R_STATUS        0x020u
 #define PVA_STATUS_SIZE     224u
 #define PVA_R_ARGS          0x100u
@@ -182,6 +184,19 @@
 #define PVA_W_DECODE        5
 #define PVA_W_STATUS        6
 #define PVA_W_CARD          7       // microSD for Nextor
+
+// PVA_R_VIZ block: offsets
+#define PVA_VIZ_SEQ         0x00    // u8  odd while it is updated, +2 per update
+#define PVA_VIZ_COUNT       0x01    // u8  bands (PVA_VIZ_BANDS)
+#define PVA_VIZ_TOP         0x02    // u8  highest level (PVA_VIZ_MAX)
+#define PVA_VIZ_LEVEL       0x04    // u8[24] band levels, 60 Hz .. 16 kHz on a log scale, 2 dB a step
+#define PVA_VIZ_PEAK        0x20    // u8[24] peaks (held a moment, then falling)
+#define PVA_VIZ_VU          0x40    // u8[2] left, right peak level 0..31 (2 dB a step)
+#define PVA_VIZ_SCOPE       0x48    // s8[64] the newest samples (mono, every 4th)
+#define PVA_VIZ_FREQ        0x90    // u16[24] centre frequency of each band in Hz (for labels)
+#define PVA_VIZ_BANDS       24
+#define PVA_VIZ_MAX         31
+#define PVA_VIZ_WAVE        64
 
 #define PVA_STATE_STOPPED   0
 #define PVA_STATE_PLAYING   1

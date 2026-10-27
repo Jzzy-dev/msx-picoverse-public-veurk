@@ -107,6 +107,7 @@ void pva_init(uint8_t *arena, size_t size)
     memset((void *)pva_win, 0xFF, PVA_WIN_SIZE);
     memset((void *)&pva_win[PVA_R_ID], 0, 0x100);
     memset((void *)&pva_win[PVA_R_FAULT_TEXT], 0, 64);
+    memset((void *)&pva_win[PVA_R_VIZ], 0, 0x100);
     memcpy((void *)&pva_win[PVA_R_ID], "PVAUDIO", 7);
     pva_win[PVA_R_ID + 8] = PVA_API_VERSION;
     pva_win[PVA_R_ID + 9] = PVA_FW_MAJOR;

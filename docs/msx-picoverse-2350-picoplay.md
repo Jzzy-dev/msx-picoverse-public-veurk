@@ -65,6 +65,10 @@ For a stream the status line shows the time, the buffer fill (`B95%`), the recei
 
 While playing: `SPACE` pause, `N` next, `P` previous, `S` stop, `+`/`-` volume, `L` engine log, `ESC` quit. After you quit, the music keeps playing: the cartridge plays it, not the MSX.
 
+### PICOAMP.COM (MSX2, MSX-DOS)
+
+A full-screen player in a Winamp/MUBScope style, with a 24-band spectrum analyser, peak dots and VU meters. It needs an MSX2 and engine 0.8 or newer. `PICOAMP` or `PICOAMP /MUSIC`. Keys: cursor keys to browse, `Enter` play, `BS` parent folder, `SPACE` pause, `S` stop, `N`/`P` next/previous, `+`/`-` volume, `H` shuffle, `R` repeat, `E` equalizer preset, `ESC` quit. Sources and details: `2350/software/msxdos-player/README.md`.
+
 ## 5. PicoPlay (SymbOS)
 
 Copy `PICOPLAY.EXE` to the SymbOS drive and start it from SymbOS.
@@ -150,6 +154,7 @@ The engine is in page 1 of sub-slot 3, `4000h-4FFFh`. The full definition is `23
 | `4020h` | 224 | status block; byte 0 is odd while it is being updated |
 | `4100h` | 512 | command arguments |
 | `4400h` | 2048 | command reply |
+| `4C00h` | 256 | visualisation (engine 0.8): byte 0 sequence (odd while it changes), 1 band count (24), 2 top level (31), `4C04h` levels, `4C20h` peaks, `4C40h` VU left/right, `4C48h` 64 scope samples (signed), `4C90h` band centres in Hz (u16). About 50 updates a second, 2 dB a step |
 
 Commands: `PING`, `MOUNT`, `LOG`, `DIAG`, `DIR_OPEN path`, `DIR_READ first,count`, `DIR_ENTER index`, `ENTRY_INFO index`, `PLAY_INDEX index`, `PLAY_PATH path`, `PAUSE`, `STOP`, `NEXT`, `PREV`, `SEEK seconds`, `VOLUME 0-100`, `MODE repeat/shuffle`, `EQ g1..g5`, `BALANCE 0-100`, `PLAY_URL url,0,station,0` (also `PLAY_PATH` with a URL).
 
@@ -165,6 +170,7 @@ To send a command, write the arguments, then a new token, then the code. On a la
 
 - Engine: `2350/software/loadrom.pio/pico/loadrom/pvaudio/` (`pva_window.c` runs on core 0; `pva_engine.c`, `pva_decode.c`, `pva_net.c` (streams), `pva_dir.c` (Radio Browser), `pva_esp.c` (the ESP link, shared by the two) and `pva_hal_pico.c` run on core 1; the UART functions are in `loadrom.c`). LoadROM mode: `loadrom_sunrise_mapper_pva_sd()`, ROM type 22.
 - Host test: `pvaudio/tests`, `make run`. It builds a FAT16 image and drives the window as PicoPlay does. It covers folders, real-time playback with no underruns while browsing, tags, VBR, mono, WAV, seek, volume, shuffle, repeat, M3U and a removed card. `tests/host_esp.c` simulates the ESP-01 (its UNAPI protocol, UART speed, DNS and TLS delays) with test radio servers, for streams: ICY titles, pause, dropped connections, a stalled and a slow server, redirects, `.pls`, HTTPS, AAC, 404, unknown hosts, no WiFi, and switching stations. It also serves a small Radio Browser API (countries with UTF-8 names, stations with AAC, HLS, broken and over-long entries mixed in, a 150-station list, a mirror that sends `Content-Length`, servers that are down or slow), for the directory: lists, the filters, mirrors, failures, dropping a fetch, click counting, and fetching while a stream plays without underruns.
+- PICOAMP: `2350/software/msxdos-player/`, with `test/z80_picoamp.c` (a Z80 harness against the engine that also saves the screen).
 - PicoPlay and PVTEST: `2350/software/symbos/picoplay/` (SymbOS C Compiler and sjasmplus). `test/host_app.c` runs PicoPlay's logic against the engine. It covers browsing, paging, playing, seeking, the controls, diagnostics, the station directory (loading, opening by itself, bitrates, playing, failures), a stuck engine and a missing engine. `test/z80_pvtest.c` runs PVTEST.COM in a Z80 emulator.
 - openMSX: `picoplay/emu/` has an openMSX device that runs the engine behind the window, plus an extension with the cartridge's slot layout, for testing PicoPlay under real SymbOS.
 

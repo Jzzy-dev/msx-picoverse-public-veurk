@@ -1475,6 +1475,7 @@ void pva_core1_init(void)
     reply = pva_alloc(PVA_REPLY_SIZE);
     bool dec_ok = pva_dec_init();
     bool net_ok = pva_net_init();
+    pva_viz_init();                     // takes some of the stream RAM; before the directory
     if (net_ok && !pva_dir_init()) pva_log("radio directory: no memory");
     bool hal_ok = pva_hal_audio_init();
     pva_hal_audio_mute(true);
@@ -1581,6 +1582,7 @@ bool pva_core1_poll(void)
         last_hb_ms = now;
         pva_win[PVA_R_HEARTBEAT] = ++hb;
     }
+    pva_viz_poll(state == PVA_STATE_PLAYING && !buffering);
     pva_win[PVA_R_WHERE] = PVA_W_STATUS;
     if (status_dirty || now - last_status_ms >= STATUS_MS)
     {
