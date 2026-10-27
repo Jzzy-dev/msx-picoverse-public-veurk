@@ -37,6 +37,10 @@ extern volatile uint8_t *pva_win;   // the register window (NULL before pva_init
 
 void pva_init(uint8_t *arena, size_t arena_size);
 
+// Before core 1 starts: true when nothing else writes the card (no Nextor),
+// so the engine may change RADIOFAV.M3U itself (FAV_ADD / FAV_DEL).
+void pva_allow_card_writes(bool on);
+
 // Optional: the core 1 stack, pre-filled with 0xA5, so DIAG can report its use.
 void pva_set_stack(const uint8_t *base, size_t size);
 

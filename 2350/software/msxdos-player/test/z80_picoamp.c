@@ -20,15 +20,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include "z80.h"
 #include "ff.h"
 
 void pva_init(uint8_t *arena, size_t arena_size);
+size_t pva_arena_free(void);
 uint8_t pva_mem_read(uint16_t addr);
 void pva_mem_write(uint16_t addr, uint8_t data);
 void pva_core1_init(void);
+void pva_allow_card_writes(bool on);
 bool pva_core1_poll(void);
 int  host_disk_open(const char *path, uint32_t create_sectors);
 void host_advance_ms(uint32_t ms);
@@ -83,17 +86,33 @@ static void sync_engine(void)
     while (cpu.cyc >= next_ms_cyc) { pva_core1_poll(); host_advance_ms(1); next_ms_cyc += CYC_MS; }
 }
 
+static int trace = -1, tr_code;
+static uint8_t tr_args[4];
+static void eng_wr(uint16_t a, uint8_t v)
+{
+    if (trace < 0) trace = getenv("PICOAMP_TRACE") != NULL;
+    if (a >= 0x4100 && a < 0x4104) tr_args[a - 0x4100] = v;
+    if (a == 0x4011) tr_code = v;
+    pva_mem_write(a, v);
+}
+static uint8_t eng_rd(uint16_t a)
+{
+    uint8_t v = pva_mem_read(a);
+    if (trace > 0 && a == 0x4013 && tr_code != 0x11 && tr_code != 0x13)
+        fprintf(stderr, "[%.2f s] cmd %02X args %02X %02X %02X -> %02X\n", cpu.cyc / 3579545.0, tr_code, tr_args[0], tr_args[1], tr_args[2], v);
+    return v;
+}
 static uint8_t rd(void *u, uint16_t a)
 {
     (void)u;
-    if (page1 == ENGINE && a >= 0x4000 && a < 0x8000) { sync_engine(); return pva_mem_read(a); }
+    if (page1 == ENGINE && a >= 0x4000 && a < 0x8000) { sync_engine(); return eng_rd(a); }
     rd_ram++;
     return mem[a];
 }
 static void wr(void *u, uint16_t a, uint8_t v)
 {
     (void)u;
-    if (page1 == ENGINE && a >= 0x4000 && a < 0x8000) { sync_engine(); pva_mem_write(a, v); return; }
+    if (page1 == ENGINE && a >= 0x4000 && a < 0x8000) { sync_engine(); eng_wr(a, v); return; }
     wr_ram++;
     if (a >= 0x100) mem[a] = v;
 }
@@ -158,6 +177,21 @@ static void dos_path(uint16_t p, char *out, size_t n)
     for (char *c = out; *c; c++) if (*c == '\\') *c = '/';
 }
 
+static uint8_t key_code(char k);
+static int rom_mode;            // PICOAMP.ROM: at 4000h, started at its INIT, BIOS keys
+static uint8_t pending_key;
+static uint8_t take_key(void)   // the next key of the script when it is due, else 0
+{
+    uint8_t k = 0;
+    if (keys && *keys && cpu.cyc >= next_key_cyc)
+    {
+        k = key_code(*keys++);
+        next_key_cyc = cpu.cyc + HZ / 2;
+        if (k) { key_frame = frames; answered = 0; }
+    }
+    return k;
+}
+
 static void ret(void) { cpu.pc = mem[cpu.sp] | (mem[cpu.sp + 1] << 8); cpu.sp += 2; }
 
 static uint8_t key_code(char k)
@@ -200,13 +234,7 @@ static int run(unsigned long max_cyc)
                     case 0x02: putchar(cpu.e); break;
                     case 0x09: { uint16_t p = (uint16_t)(cpu.d << 8 | cpu.e); while (mem[p] != '$') putchar(mem[p++]); break; }
                     case 0x06:
-                        cpu.a = 0;
-                        if (keys && *keys && cpu.cyc >= next_key_cyc)
-                        {
-                            cpu.a = key_code(*keys++);
-                            next_key_cyc = cpu.cyc + HZ / 2;
-                            if (cpu.a) { key_frame = frames; answered = 0; }
-                        }
+                        cpu.a = take_key();
                         cpu.l = cpu.a;
                         break;
                     case 0x43: case 0x44:   // _OPEN / _CREATE: DE = path -> B = handle
@@ -248,10 +276,29 @@ static int run(unsigned long max_cyc)
                 ret();
                 cpu.cyc += 300;
                 continue;
+            case 0x009C:                // CHSNS (the ROM): ZF=1 no key
+                if (!rom_mode) break;
+                if (!pending_key) pending_key = take_key();
+                cpu.zf = pending_key == 0;
+                ret();
+                cpu.cyc += 200;
+                continue;
+            case 0x009F:                // CHGET
+                if (!rom_mode) break;
+                cpu.a = pending_key;
+                pending_key = 0;
+                ret();
+                cpu.cyc += 300;
+                continue;
+            case 0x00A2:                // CHPUT
+                if (!rom_mode) break;
+                putchar(cpu.a);
+                ret();
+                continue;
             case 0x000C:                // RDSLT
             {
                 uint16_t a = (uint16_t)(cpu.h << 8 | cpu.l);
-                if (cpu.a == ENGINE) { sync_engine(); cpu.a = pva_mem_read(a); }
+                if (cpu.a == ENGINE) { sync_engine(); cpu.a = eng_rd(a); }
                 else if (a == 0x0004) cpu.a = 0x00;          // CGTABL -> 3000h (fake ROM)
                 else if (a == 0x0005) cpu.a = 0x30;
                 else if (a >= 0x3000 && a < 0x3800) cpu.a = font[a - 0x3000];
@@ -263,7 +310,7 @@ static int run(unsigned long max_cyc)
                 continue;
             }
             case 0x0014:                // WRSLT
-                if (cpu.a == ENGINE) { sync_engine(); pva_mem_write((uint16_t)(cpu.h << 8 | cpu.l), cpu.e); }
+                if (cpu.a == ENGINE) { sync_engine(); eng_wr((uint16_t)(cpu.h << 8 | cpu.l), cpu.e); }
                 cpu.iff1 = cpu.iff2 = false;
                 ret();
                 cpu.cyc += 150;
@@ -331,13 +378,16 @@ int main(int argc, char **argv)
 {
     if (argc < 7) { printf("usage: z80_picoamp PICOAMP.COM image args keys seconds vram.bin [font.asm]\n"); return 2; }
     FILE *f = fopen(argv[1], "rb");
-    size_t n = fread(&mem[0x100], 1, 0xD000, f);
+    size_t al1 = strlen(argv[1]);
+    rom_mode = al1 > 4 && !strcasecmp(argv[1] + al1 - 4, ".ROM");
+    size_t n = fread(&mem[rom_mode ? 0x4000 : 0x100], 1, rom_mode ? 0x4000 : 0xD000, f);
     fclose(f);
     if (argc > 7) load_font(argv[7]);
     if (host_disk_open(argv[2], 0)) { printf("no image\n"); return 2; }
     static uint8_t arena[116 * 1024];
     host_audio_unlimited = false;
     pva_init(arena, sizeof arena);
+    if (rom_mode) pva_allow_card_writes(true);  // as the PicoAmp firmware: no Nextor
     pva_core1_init();
     const char *a = argv[3];
     keys = argv[4];
@@ -359,6 +409,12 @@ int main(int argc, char **argv)
     cpu.pc = 0x100;
     cpu.sp = 0xF000;
     mem[0xF000] = 0; mem[0xF001] = 0;
+    if (rom_mode)                   // the BIOS calls INIT (4002h) with the stack high up
+    {
+        cpu.pc = (uint16_t)(mem[0x4002] | mem[0x4003] << 8);
+        cpu.sp = 0xF37E;
+        mem[0xF37E] = 0; mem[0xF37F] = 0;
+    }
     next_ms_cyc = CYC_MS;
     next_frame_cyc = HZ / 60;
     next_key_cyc = HZ * 3;
@@ -369,6 +425,7 @@ int main(int argc, char **argv)
            host_audio_underruns);
     printf("[RAM: %.0f reads, %.0f writes a second; busy %.0f%% (not in HALT)]\n",
            rd_ram / (cpu.cyc / (double)HZ), wr_ram / (cpu.cyc / (double)HZ), 100.0 - 100.0 * busy_cyc / cpu.cyc);
+    if (trace > 0) printf("[engine arena: %zu bytes free]\n", pva_arena_free());
     for (int k = 0; k < cnt_k; k++) printf("[%04X entered %lu times]\n", cnt_addr[k], cnt_n[k]);
     if (prof_on)
     {

@@ -40,7 +40,7 @@
 
 #define PVA_API_VERSION     1
 #define PVA_FW_MAJOR        0
-#define PVA_FW_MINOR        9
+#define PVA_FW_MINOR        10
 
 #define PVA_WIN_BASE        0x4000u
 #define PVA_WIN_SIZE        0x1000u
@@ -84,6 +84,11 @@
 #define PVA_C_DIR_SEARCH    0x14    // args: text (0-terminated, up to 60): Radio Browser stations whose
                                     // name has it (any case), as Internet radio/Search/<text>; answers
                                     // PVA_E_BUSY and opens by itself as DIR_ENTER does (DIR_STATE)
+#define PVA_C_FAV_ADD       0x15    // args: u16 entry of the open list (0xFFFF = the stream that plays):
+                                    // the station goes into RADIOFAV.M3U; reply: its name. Only where no
+                                    // one else writes the card (PicoAmp ROM): else PVA_E_RDONLY
+#define PVA_C_FAV_DEL       0x16    // args: u16 entry of Internet radio/Favourites: it leaves the file,
+                                    // the folder is read again (PVA_E_RDONLY as FAV_ADD)
 #define PVA_C_PLAY_INDEX    0x20    // args: u16 index in the open folder
 #define PVA_C_PLAY_PATH     0x21    // args: path
 #define PVA_C_PAUSE         0x22    // toggle pause
@@ -111,6 +116,9 @@
 #define PVA_E_STATE         0x08    // not possible in this state
 #define PVA_E_NET           0x09    // network failure (see PVA_ST_NET_ERR)
 #define PVA_E_NOWIFI        0x0A    // no ESP WiFi link in this firmware (-w), or no memory for streams
+#define PVA_E_EXISTS        0x0C    // FAV_ADD: already a favourite
+#define PVA_E_RDONLY        0x0D    // FAV_ADD/DEL: the card is Nextor's to write (MSX-DOS writes the file)
+#define PVA_E_FULL          0x0E    // FAV_ADD: RADIOFAV.M3U would pass 4 KB
 #define PVA_E_BUSY          0x0B    // DIR_ENTER: the list is being fetched; it opens by itself when
                                     // PVA_ST_DIR_STATE turns READY (then DIR_GEN changes)
 

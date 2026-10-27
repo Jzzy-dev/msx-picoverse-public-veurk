@@ -102,6 +102,15 @@ C_MODE   equ #28
 C_EQ     equ #2A
 C_EINFO  equ #13
 C_SEARCH equ #14
+C_FAVADD equ #15
+C_FAVDEL equ #16
+E_UNKNOWN equ #01
+E_NOCARD equ #03
+E_NOTFND equ #04
+E_IO     equ #06
+E_EXISTS equ #0C
+E_RDONLY equ #0D
+E_FULL   equ #0E
 E_NOWIFI equ #0A
 SRCH_MAX equ 30
 C_BAL    equ #2B
@@ -4699,8 +4708,23 @@ fav_reopen:
 ; F: add the chosen station (or the one that plays)
 fav_add:
     IFDEF ROMBUILD
-        ld hl,txt_favrom
-        jp msg_err
+        ; no MSX-DOS: the engine writes the file (engine 0.10)
+        call sel_type
+        cp 6
+        ld hl,(sel)
+        jr z,.q
+        ld hl,#FFFF             ; not a station: the one that plays
+.q:     ld a,C_FAVADD
+        call cmd_u16
+        ret c
+        jr nz,.err
+        call fav_reopen
+        ld hl,txt_favadded
+        jp msg_ok
+.err:   ld hl,txt_favthere
+        cp E_EXISTS
+        jp z,msg_err
+        jp fav_engine_err
     ENDIF
         call fav_info
         ld hl,txt_favsel
@@ -4766,6 +4790,29 @@ fav_add:
         ld hl,txt_favadded
         jp msg_ok
 
+    IFDEF ROMBUILD
+fav_engine_err:                 ; A = the engine's answer to FAV_ADD / FAV_DEL
+        ld hl,txt_favfull
+        cp E_FULL
+        jp z,msg_err
+        ld hl,txt_favnowrite
+        cp E_IO
+        jp z,msg_err
+        cp E_NOCARD
+        jp z,msg_err
+        ld hl,txt_favrom
+        cp E_RDONLY
+        jp z,msg_err
+        ld hl,txt_favold
+        cp E_UNKNOWN
+        jp z,msg_err
+        ld hl,txt_favnot
+        cp E_NOTFND
+        jp z,msg_err
+        ld hl,txt_favsel
+        jp msg_err
+    ENDIF
+
 fav_end:                        ; DE = the 0 at the end of favbuf
         ld de,favbuf
 .l:     ld a,(de)
@@ -4777,8 +4824,21 @@ fav_end:                        ; DE = the 0 at the end of favbuf
 ; D / DEL: remove the chosen station from the favourites
 fav_del:
     IFDEF ROMBUILD
-        ld hl,txt_favrom
-        jp msg_err
+        call fav_in_folder
+        ld hl,txt_favwhere
+        jp nz,msg_err
+        call sel_type
+        cp 6
+        ld hl,txt_favwhere
+        jp nz,msg_err
+        ld hl,(sel)
+        ld a,C_FAVDEL
+        call cmd_u16
+        ret c
+        jr nz,fav_engine_err
+        call fav_reopen
+        ld hl,txt_favremoved
+        jp msg_ok
     ENDIF
         call fav_in_folder
         ld hl,txt_favwhere
@@ -5816,7 +5876,8 @@ txt_favpath:    db "/Internet radio/Favourites",0
 txt_extm3u:     db "#EXTM3U",13,10,0
 txt_extinf:     db "#EXTINF:-1,",0
 txt_crlf:       db 13,10,0
-txt_favrom:     db "Favourites: the MSX-DOS PICOAMP.COM for now",0
+txt_favrom:     db "Favourites: MSX-DOS writes the card here",0
+txt_favold:     db "Favourites: needs engine 0.10 or newer",0
 txt_favsel:     db "Choose (or play) a station first",0
 txt_favthere:   db "Already a favourite",0
 txt_favfull:    db "RADIOFAV.M3U is full (4 KB)",0

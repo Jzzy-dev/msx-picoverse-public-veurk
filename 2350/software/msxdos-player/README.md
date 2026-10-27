@@ -25,8 +25,8 @@ Two builds of the same program:
 * `PICOAMP.ROM`, a 16 KB cartridge ROM, with the PicoAmp firmware
   (`loadrom -pa -w`): the MSX boots straight into the player, without Nextor.
   It copies itself to RAM at 8000h and reads the keys through the BIOS; Q
-  goes back to the BIOS (and on to BASIC). Favourites can be played, not yet
-  changed. See `docs/msx-picoverse-2350-picoamp-explorer.md` for putting it in
+  goes back to the BIOS (and on to BASIC). F and D change the favourites
+  through the engine (below). See `docs/msx-picoverse-2350-picoamp-explorer.md` for putting it in
   the Explorer.
 
 
@@ -90,9 +90,12 @@ PICOAMP shows "LOADING THE LIST...".
 ### Favourites
 
 The favourites are `RADIOFAV.M3U` in the root of the card, the same file
-PicoPlay writes; the engine reads it for Internet radio/Favourites. PICOAMP
-writes it through MSX-DOS 2 (Nextor), on the drive it was started from (the
-`PROGRAM` environment item), else A:. A message in the path line says what
+PicoPlay writes; the engine reads it for Internet radio/Favourites.
+`PICOAMP.COM` writes it through MSX-DOS 2 (Nextor), on the drive it was
+started from (the `PROGRAM` environment item), else A:. `PICOAMP.ROM` has no
+MSX-DOS: it asks the engine to add or remove the station (FAV_ADD / FAV_DEL,
+engine 0.10), which the PicoAmp firmware allows because nobody else writes
+the card there. A message in the path line says what
 happened ("Added to the favourites", "Already a favourite", ...).
 
 ### Search

@@ -961,6 +961,74 @@ int main(int argc, char **argv)
         n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
         CHECK(st[PVA_ST_DIR_STATE] == PVA_DIRS_DONE && n == 1, "nothing found: only '..' (%d)", n);
         CHECK(cmd_str(PVA_C_DIR_SEARCH, "   ") == PVA_E_ARGS, "an empty search: ARGS");
+
+        printf("[favourites by the engine]\n");
+        CHECK(cmd_str(PVA_C_DIR_SEARCH, "jazz") == PVA_E_BUSY, "search 'jazz'");
+        WAIT_LIST(10000);
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        int sj = find(n, "Secure Jazz");
+        CHECK(sj > 0 && cmd_u16(PVA_C_FAV_ADD, (uint16_t)sj) == PVA_E_RDONLY, "FAV_ADD with Nextor's card: RDONLY");
+        pva_allow_card_writes(true);
+        f_unlink("0:/RADIOFAV.M3U");
+        CHECK(cmd_u16(PVA_C_FAV_ADD, (uint16_t)sj) == PVA_OK && !strcmp((char *)reply, "Secure Jazz"), "FAV_ADD: '%s'", reply);
+        CHECK(cmd_u16(PVA_C_FAV_ADD, (uint16_t)sj) == PVA_E_EXISTS, "again: EXISTS");
+        {
+            FIL f; char b[600]; UINT got = 0;
+            CHECK(f_open(&f, "0:/RADIOFAV.M3U", FA_READ) == FR_OK, "RADIOFAV.M3U written");
+            f_read(&f, b, sizeof b - 1, &got); b[got] = 0; f_close(&f);
+            CHECK(!strcmp(b, "#EXTM3U\r\n#EXTINF:-1,Secure Jazz\r\nhttps://secure.test/stream.mp3\r\n"), "the file: '%s'", b);
+        }
+        CHECK(cmd_u16(PVA_C_FAV_ADD, 0xFFFF) == PVA_E_STATE, "FAV_ADD of the stream when none plays: STATE");
+        cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
+        CHECK(cmd_u16(PVA_C_DIR_ENTER, 1) == PVA_OK && !strcmp((char *)reply + 2, "/Internet radio/Favourites"), "Favourites");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        int fj = find(n, "Secure Jazz");
+        CHECK(n == 2 && fj == 1, "the favourite is in the folder (%d)", n - 1);
+        CHECK(cmd_u16(PVA_C_FAV_DEL, (uint16_t)fj) == PVA_OK, "FAV_DEL");
+        cmd_str(PVA_C_DIR_OPEN, "");
+        n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+        CHECK(n == 1, "the folder has only '..' (%d)", n);
+        {
+            FIL f; char b[200]; UINT got = 0;
+            f_open(&f, "0:/RADIOFAV.M3U", FA_READ); f_read(&f, b, sizeof b - 1, &got); b[got] = 0; f_close(&f);
+            CHECK(!strcmp(b, "#EXTM3U\r\n"), "the file: '%s'", b);
+        }
+        {
+            // a file of PicoPlay's with no line end at its end; remove the middle one
+            FIL f; UINT put = 0; char b[400]; UINT got = 0;
+            const char *t = "#EXTM3U\n#EXTINF:-1,One\nhttp://one.test/a\n#EXTINF:-1,Two\nhttp://two.test/b\nhttp://three.test/c";
+            f_open(&f, "0:/RADIOFAV.M3U", FA_CREATE_ALWAYS | FA_WRITE); f_write(&f, t, (UINT)strlen(t), &put); f_close(&f);
+            cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
+            cmd_u16(PVA_C_DIR_ENTER, 1);
+            n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+            int f2 = find(n, "Two");
+            CHECK(n == 4 && f2 == 2 && cmd_u16(PVA_C_FAV_DEL, (uint16_t)f2) == PVA_OK, "FAV_DEL of the middle one (%d)", n - 1);
+            f_open(&f, "0:/RADIOFAV.M3U", FA_READ); f_read(&f, b, sizeof b - 1, &got); b[got] = 0; f_close(&f);
+            CHECK(!strcmp(b, "#EXTM3U\n#EXTINF:-1,One\nhttp://one.test/a\nhttp://three.test/c"), "the file: '%s'", b);
+            cmd_str(PVA_C_DIR_OPEN, "");
+            n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+            CHECK(n == 3, "two left (%d)", n - 1);
+            CHECK(cmd_u16(PVA_C_FAV_ADD, 1) == PVA_E_EXISTS, "a favourite from the favourites: EXISTS");
+            // add one to it: a line end first
+            cmd_str(PVA_C_DIR_SEARCH, "jazz");
+            WAIT_LIST(10000);
+            cmd_str(PVA_C_DIR_OPEN, "");
+            n = list_dir((uint16_t)(reply[0] | (reply[1] << 8)));
+            CHECK(cmd_u16(PVA_C_FAV_ADD, (uint16_t)find(n, "Secure Jazz")) == PVA_OK, "FAV_ADD to that file");
+            f_open(&f, "0:/RADIOFAV.M3U", FA_READ); f_read(&f, b, sizeof b - 1, &got); b[got] = 0; f_close(&f);
+            CHECK(!strcmp(b, "#EXTM3U\n#EXTINF:-1,One\nhttp://one.test/a\nhttp://three.test/c\r\n#EXTINF:-1,Secure Jazz\r\nhttps://secure.test/stream.mp3\r\n"),
+                  "the file: '%s'", b);
+            // a full file
+            f_open(&f, "0:/RADIOFAV.M3U", FA_CREATE_ALWAYS | FA_WRITE);
+            for (int k = 0; k < 4050; k++) f_write(&f, "#", 1, &put);
+            f_write(&f, "\r\n", 2, &put);
+            f_close(&f);
+            CHECK(cmd_u16(PVA_C_FAV_ADD, (uint16_t)find(n, "Secure Jazz")) == PVA_E_FULL, "a full file: FULL");
+        }
+        f_unlink("0:/RADIOFAV.M3U");
+        pva_allow_card_writes(false);
+        cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
         cmd_str(PVA_C_DIR_OPEN, "/Internet radio");
 
         printf("[directory troubles]\n");

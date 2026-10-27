@@ -2983,6 +2983,7 @@ void __no_inline_not_in_flash_func(loadrom_picoamp)(uint32_t offset, bool wifi_e
     arena_start += PVA_CORE1_STACK_SIZE;
     pva_init(&rom_sram[arena_start], CACHE_SIZE - arena_start);
     pva_set_stack((const uint8_t *)pva_core1_stack, PVA_CORE1_STACK_SIZE);
+    pva_allow_card_writes(true);           // no Nextor: the engine may write RADIOFAV.M3U
 
     // the card driver as in the Nextor modes (core 1 polls it); no IDE on the bus
     static sunrise_ide_t ide;

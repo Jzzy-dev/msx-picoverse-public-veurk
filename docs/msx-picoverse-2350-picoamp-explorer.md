@@ -16,8 +16,8 @@ Two parts, both included:
 | The PicoVerse Audio Engine | `2350/software/loadrom.pio/pico/loadrom/pvaudio/` | runs on core 1: MP3/WAV from the microSD card, internet radio and the Radio Browser directory over the ESP-01, equalizer, spectrum/VU/scope data. The MSX talks to it through a 4 KB register window. |
 
 No Nextor, no mapper, no ESP BIOS on the MSX side, and no files on the card
-except the music (and `RADIOFAV.M3U` if there is one; the ROM version reads
-favourites but cannot write them yet - see the end).
+except the music and `RADIOFAV.M3U`, the favourites, which the engine reads
+and writes itself in this mode (see "Favourites" below).
 
 ## The cartridge as the MSX sees it
 
@@ -82,6 +82,7 @@ no header.
 |------|------|------|
 | `pva_init(arena, size)` | 0 | before core 1 starts; `size` ≥ `PVA_ARENA_MIN_SIZE` (96 KB) |
 | `pva_set_stack(stack, PVA_CORE1_STACK_SIZE)` | 0 | the core 1 stack (8 KB) for the crash notes |
+| `pva_allow_card_writes(true)` | 0 | before core 1 starts: nobody else writes the card in this mode, so the engine may change `RADIOFAV.M3U` (FAV_ADD / FAV_DEL). Leave it off wherever Nextor runs |
 | `pva_mem_read(addr)`, `pva_mem_write(addr, data)` | 0 | from the bus loop (both `__not_in_flash`) |
 | `pva_command_pending()` | 1 | core 1 waits for the first command before it starts the engine, so a boot never depends on it |
 | `pva_core1_init()`, then `pva_core1_poll()` in a loop | 1 | `sleep_us(50)` when it returns false (nothing to do), to leave the buses to core 0 |
@@ -125,16 +126,40 @@ no header.
   `symbos/picoplay/emu/` plus an extension with the ROM in sub-slot 0 and the
   device in sub-slot 3 - `symbos/picoplay/emu/PicoVerse_PicoAmp.xml`. Tested
   on the Philips NMS 8245 BIOS: boot into PICOAMP, browse, play, full screen,
-  help, search typing, Q back to the BIOS.
-* The Z80 harness `msxdos-player/test/z80_picoamp.c` runs the MSX-DOS build
-  against the host engine (same program, other start-up and key input).
+  help, search typing, Q back to the BIOS. (openMSX's engine is 0.8, so the
+  favourite keys say they need 0.10 there.)
+* The Z80 harness `msxdos-player/test/z80_picoamp.c` runs `PICOAMP.COM` or
+  `PICOAMP.ROM` (by the file's extension) against the host engine; for the
+  ROM it calls `pva_allow_card_writes(true)` as the firmware does.
+  `PICOAMP_TRACE=1` prints every engine command and its result.
 
-## Favourites in the ROM version (later)
+## Favourites
 
-Reading works now: the engine builds Internet radio/Favourites from
-`RADIOFAV.M3U` itself. Writing is done by `PICOAMP.COM` through MSX-DOS, so
-the ROM says "Favourites: the MSX-DOS PICOAMP.COM for now". Without Nextor
-on the card the engine can safely write the file itself; that needs two
-engine commands (add the chosen or playing station, remove one), after which
-F and D work in the ROM too. Under MSX-DOS the program keeps writing the file
-itself, so Nextor and the engine never write the card at the same time.
+The favourites are `RADIOFAV.M3U` in the root of the card, the same file
+PicoPlay (SymbOS) and `PICOAMP.COM` (MSX-DOS) write. The engine builds
+Internet radio/Favourites from it.
+
+In the ROM version F (add the chosen station, or the one that plays) and D /
+DEL (remove the chosen one, in Internet radio/Favourites) are engine commands
+(engine 0.10):
+
+| Command | Args | Result |
+|---------|------|--------|
+| `FAV_ADD` 15h | u16 entry of the open list, FFFFh = the stream that plays | OK (reply: the name), `E_EXISTS` 0Ch, `E_FULL` 0Eh (the file would pass 4 KB), `E_RDONLY` 0Dh |
+| `FAV_DEL` 16h | u16 entry of Internet radio/Favourites | OK (the folder is read again), `E_NOTFOUND`, `E_RDONLY` |
+
+* The engine only writes when the firmware called
+  `pva_allow_card_writes(true)`; else it answers `E_RDONLY` and the ROM says
+  "Favourites: MSX-DOS writes the card here". So Nextor (whose FAT cache
+  would not know of the change) and the engine never write the card at the
+  same time. Under MSX-DOS, `PICOAMP.COM` keeps writing the file through
+  Nextor.
+* The file is changed in place (appended to, or the rest moved down over the
+  removed lines and the file cut), through the engine's M3U file handle and
+  its 512-byte line buffer: no extra memory.
+* An older engine answers `E_UNKNOWN`; the ROM then says "Favourites: needs
+  engine 0.10 or newer".
+* Tests: the "[favourites by the engine]" section of
+  `pvaudio/tests/host_pva.c` (add, again, the file's bytes, remove, a file
+  of PicoPlay's without a line end at its end, the middle one removed, a full
+  file); the Z80 harness runs PICOAMP.ROM with card writes on.

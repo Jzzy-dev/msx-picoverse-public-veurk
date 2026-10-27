@@ -855,6 +855,33 @@ static void fav_build(void)
     f_close(m3u_file);
 }
 
+// a station's address and name: entry 'idx' of the open list (a station
+// list or the favourites), or the stream that plays (0xFFFF)
+static int station_info(uint16_t idx, char *u, size_t usize, char *nm, size_t nsize)
+{
+    if (idx == 0xFFFF)
+    {
+        if (!pl_count || !pva_dec_is_stream()) return PVA_E_STATE;
+        const char *e = pl_pool + pl_off[pl_order[pl_pos]];
+        const char *sep = strchr(e, STATION_SEP);
+        size_t n = sep ? (size_t)(sep - e) : strlen(e);
+        if (n >= usize) return PVA_E_ARGS;
+        memcpy(u, e, n);
+        u[n] = 0;
+        snprintf(nm, nsize, "%s", given_station[0] ? given_station : info.album);
+    }
+    else
+    {
+        if (!dir_open || idx >= dir_count || dir_ent[idx].type != PVA_DE_URL) return PVA_E_ARGS;
+        const char *n0 = dir_pool + dir_ent[idx].name;
+        snprintf(nm, nsize, "%s", n0);
+        if (vlevel == V_STATIONS) snprintf(u, usize, "%s", pva_dir_url((uint16_t)(idx - 1u)));
+        else if (vlevel == V_FAVS) snprintf(u, usize, "%s", n0 + strlen(n0) + 1);
+        else return PVA_E_ARGS;
+    }
+    return u[0] ? PVA_OK : PVA_E_ARGS;
+}
+
 // ENTRY_INFO: address and name of a station in the open list (0xFFFF = the
 // stream that plays), for PicoPlay's favourites
 static int cmd_entry_info(void)
@@ -862,29 +889,125 @@ static int cmd_entry_info(void)
     uint16_t idx = (uint16_t)(args[0] | (args[1] << 8));
     char u[URL_MAX_LEN + 1];
     char nm[PVA_NAME_MAX + 1];
-    if (idx == 0xFFFF)
-    {
-        if (!pl_count || !pva_dec_is_stream()) return PVA_E_STATE;
-        const char *e = pl_pool + pl_off[pl_order[pl_pos]];
-        const char *sep = strchr(e, STATION_SEP);
-        size_t n = sep ? (size_t)(sep - e) : strlen(e);
-        if (n > URL_MAX_LEN) return PVA_E_ARGS;
-        memcpy(u, e, n);
-        u[n] = 0;
-        snprintf(nm, sizeof nm, "%s", given_station[0] ? given_station : info.album);
-    }
-    else
-    {
-        if (!dir_open || idx >= dir_count || dir_ent[idx].type != PVA_DE_URL) return PVA_E_ARGS;
-        const char *n0 = dir_pool + dir_ent[idx].name;
-        snprintf(nm, sizeof nm, "%s", n0);
-        if (vlevel == V_STATIONS) snprintf(u, sizeof u, "%s", pva_dir_url((uint16_t)(idx - 1u)));
-        else if (vlevel == V_FAVS) snprintf(u, sizeof u, "%s", n0 + strlen(n0) + 1);
-        else return PVA_E_ARGS;
-    }
-    if (!u[0]) return PVA_E_ARGS;
+    int r = station_info(idx, u, sizeof u, nm, sizeof nm);
+    if (r != PVA_OK) return r;
     set_reply_str(u);
     set_reply_str(nm);
+    return PVA_OK;
+}
+
+// ---------------------------------------------------------------- favourites
+// FAV_ADD / FAV_DEL: the engine changes RADIOFAV.M3U itself, but only where
+// the firmware said nobody else writes the card (no Nextor: the PicoAmp
+// ROM). Under MSX-DOS the program writes the file through Nextor instead.
+#define FAV_MAX 4096u               // as PicoPlay: the file stays within 4 KB
+static bool card_writes;
+
+void pva_allow_card_writes(bool on) { card_writes = on; }
+
+// The file is changed in place through m3u_file and the line reader's
+// 512-byte buffer, so the favourites need no memory of their own.
+typedef struct { FSIZE_t s0, e, size; bool found, last_eol; } fav_scan_t;
+
+static FSIZE_t lr_tell(const line_reader_t *lr) { return f_tell(lr->f) - (FSIZE_t)(lr->len - lr->pos); }
+
+// Open RADIOFAV.M3U (mode) and find the line that is exactly 'u': s0 = the
+// start of its #EXTINF line (or of the line), e = after its line end. The
+// file stays open on FR_OK (also when not found); FR_NO_FILE when it is not
+// there.
+static FRESULT fav_scan(const char *u, BYTE mode, fav_scan_t *sc)
+{
+    char fp[PATH_MAX_LEN + 8];
+    memset(sc, 0, sizeof *sc);
+    sc->last_eol = true;
+    fs_refresh();
+    fatfs_path(fp, sizeof fp, FAV_FILE);
+    FRESULT fr = f_open(m3u_file, fp, mode);
+    if (fr != FR_OK) return fr;
+    sc->size = f_size(m3u_file);
+    memset(m3u_lr, 0, sizeof *m3u_lr);
+    m3u_lr->f = m3u_file;
+    char line[URL_MAX_LEN + 8];
+    FSIZE_t start = 0, ext = (FSIZE_t)-1;
+    while (!sc->found && read_line(m3u_lr, line, sizeof line))
+    {
+        if (!strncmp(line, "#EXTINF", 7)) ext = start;
+        else if (!strcmp(line, u)) { sc->found = true; sc->s0 = ext != (FSIZE_t)-1 ? ext : start; sc->e = lr_tell(m3u_lr); }
+        else if (line[0]) ext = (FSIZE_t)-1;
+        start = lr_tell(m3u_lr);
+    }
+    if (sc->size)
+    {
+        BYTE c = 0;
+        UINT got = 0;
+        if (f_lseek(m3u_file, sc->size - 1u) == FR_OK && f_read(m3u_file, &c, 1, &got) == FR_OK && got == 1)
+            sc->last_eol = c == 10 || c == 13;
+    }
+    return FR_OK;
+}
+
+static int fav_fail(FRESULT fr) { last_fr = (uint8_t)fr; f_close(m3u_file); return PVA_E_IO; }
+
+// FAV_ADD: args u16 entry of the open list, 0xFFFF = the stream that plays;
+// reply: the station's name
+static int cmd_fav_add(void)
+{
+    if (!card_writes) return PVA_E_RDONLY;
+    uint16_t idx = (uint16_t)(args[0] | (args[1] << 8));
+    char u[URL_MAX_LEN + 1], nm[PVA_NAME_MAX + 1];
+    int r = station_info(idx, u, sizeof u, nm, sizeof nm);
+    if (r != PVA_OK) return r;
+    if (!mounted && !do_mount()) return PVA_E_NOCARD;
+    fav_scan_t sc;
+    FRESULT fr = fav_scan(u, FA_READ | FA_WRITE | FA_OPEN_ALWAYS, &sc);
+    if (fr != FR_OK) { last_fr = (uint8_t)fr; return PVA_E_IO; }
+    if (sc.found) { f_close(m3u_file); return PVA_E_EXISTS; }
+    char add[URL_MAX_LEN + PVA_NAME_MAX + 32];
+    size_t n = 0;
+    if (!sc.size) n = (size_t)snprintf(add, sizeof add, "#EXTM3U\r\n");
+    else if (!sc.last_eol) n = (size_t)snprintf(add, sizeof add, "\r\n");
+    n += (size_t)snprintf(add + n, sizeof add - n, "#EXTINF:-1,%s\r\n%s\r\n", nm, u);
+    if (sc.size + n > FAV_MAX) { f_close(m3u_file); return PVA_E_FULL; }
+    UINT put = 0;
+    if ((fr = f_lseek(m3u_file, sc.size)) != FR_OK) return fav_fail(fr);
+    if ((fr = f_write(m3u_file, add, (UINT)n, &put)) != FR_OK || put != n) return fav_fail(fr ? fr : FR_DENIED);
+    if ((fr = f_close(m3u_file)) != FR_OK) { last_fr = (uint8_t)fr; return PVA_E_IO; }
+    if (vlevel == V_FAVS) v_build(V_FAVS);
+    pva_log("favourites: + %.40s", nm);
+    set_reply_str(nm);
+    return PVA_OK;
+}
+
+// FAV_DEL: args u16 entry of Internet radio/Favourites; the list is read again
+static int cmd_fav_del(void)
+{
+    if (!card_writes) return PVA_E_RDONLY;
+    uint16_t idx = (uint16_t)(args[0] | (args[1] << 8));
+    if (vlevel != V_FAVS || idx == 0xFFFF) return PVA_E_ARGS;
+    char u[URL_MAX_LEN + 1], nm[PVA_NAME_MAX + 1];
+    int r = station_info(idx, u, sizeof u, nm, sizeof nm);
+    if (r != PVA_OK) return r;
+    if (!mounted && !do_mount()) return PVA_E_NOCARD;
+    fav_scan_t sc;
+    FRESULT fr = fav_scan(u, FA_READ | FA_WRITE, &sc);
+    if (fr == FR_NO_FILE) return PVA_E_NOTFOUND;
+    if (fr != FR_OK) { last_fr = (uint8_t)fr; return PVA_E_IO; }
+    if (!sc.found) { f_close(m3u_file); return PVA_E_NOTFOUND; }
+    // move the rest of the file down over the station's lines, then cut it
+    FSIZE_t from = sc.e, to = sc.s0;
+    while (from < sc.size)
+    {
+        UINT got = 0, put = 0;
+        if ((fr = f_lseek(m3u_file, from)) != FR_OK || (fr = f_read(m3u_file, m3u_lr->buf, sizeof m3u_lr->buf, &got)) != FR_OK) return fav_fail(fr);
+        if (!got) break;
+        if ((fr = f_lseek(m3u_file, to)) != FR_OK || (fr = f_write(m3u_file, m3u_lr->buf, got, &put)) != FR_OK || put != got) return fav_fail(fr ? fr : FR_DENIED);
+        from += got;
+        to += got;
+    }
+    if ((fr = f_lseek(m3u_file, to)) != FR_OK || (fr = f_truncate(m3u_file)) != FR_OK) return fav_fail(fr);
+    if ((fr = f_close(m3u_file)) != FR_OK) { last_fr = (uint8_t)fr; return PVA_E_IO; }
+    v_build(V_FAVS);
+    pva_log("favourites: - %.40s", nm);
     return PVA_OK;
 }
 
@@ -1289,6 +1412,8 @@ static int execute(uint8_t code)
         case PVA_C_DIR_ENTER: return cmd_dir_enter();
         case PVA_C_ENTRY_INFO: return cmd_entry_info();
         case PVA_C_DIR_SEARCH: return cmd_dir_search();
+        case PVA_C_FAV_ADD:   return cmd_fav_add();
+        case PVA_C_FAV_DEL:   return cmd_fav_del();
         case PVA_C_PLAY_INDEX: return cmd_play_index();
         case PVA_C_PLAY_PATH: return cmd_play_path();
         case PVA_C_PLAY_URL:  return cmd_play_url();
