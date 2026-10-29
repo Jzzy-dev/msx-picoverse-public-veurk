@@ -3,7 +3,8 @@
 #   make test FATFS=... MP3=... (see test targets)                   PC tests against the engine
 SCC       ?= scc/bin
 SJASMPLUS ?= sjasmplus
-ENGINE    := ../../loadrom.pio/pico/loadrom/pvaudio
+# the engine: in a PicoVerse tree (assemble.sh), else this repository's engine/
+ENGINE    ?= $(firstword $(wildcard ../../loadrom.pio/pico/loadrom/pvaudio) ../engine)
 LIBPVA    ?= libpva_host.a
 FATFS     ?= $(ENGINE)/../lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src
 

@@ -44,7 +44,7 @@ The SymbOS disk driver stays on slot `P-1`, and the network daemon still finds W
 .\2350\software\loadrom.pio\tool\dist\loadrom.exe -pa -o picoamp.uf2           # without Wi-Fi
 ```
 
-The MSX2 boots straight into PICOAMP: the player is a 16 KB cartridge ROM in sub-slot 0 and the engine is in sub-slot 3 (no Nextor, no mapper, no files needed besides the music). Q returns to the BIOS, which boots on to BASIC while the music keeps playing. F and D add and remove favourites here too: with no Nextor in this mode the engine writes `RADIOFAV.M3U` itself (engine 0.10). Integration notes for the Explorer: `docs/msx-picoverse-2350-picoamp-explorer.md`.
+The MSX2 boots straight into PICOAMP: the player is a 32 KB cartridge ROM (two 16 KB banks: the program, its clock page) in sub-slot 0 and the engine is in sub-slot 3 (no Nextor, no mapper, no files needed besides the music). Q returns to the BIOS, which boots on to BASIC while the music keeps playing. F and D add and remove favourites here too: with no Nextor in this mode the engine writes `RADIOFAV.M3U` itself (engine 0.10). Integration notes for the Explorer: `docs/msx-picoverse-2350-picoamp-explorer.md`.
 
 ## 3. Music on the card
 
