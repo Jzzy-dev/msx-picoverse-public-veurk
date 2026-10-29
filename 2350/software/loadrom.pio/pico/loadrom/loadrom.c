@@ -2972,7 +2972,7 @@ void __no_inline_not_in_flash_func(loadrom_picoamp)(uint32_t offset, bool wifi_e
     uint32_t available_length;
     prepare_sunrise_mapper_rom_source(offset, true, &rom_base, &available_length);
 
-    // the engine's arena: the SRAM cache after the (16 KB) ROM
+    // the engine's arena: the SRAM cache after the ROM (16 KB banks: PICOAMP and its pages)
     uint32_t arena_start = (rom_cached_size + 7u) & ~7u;
     if (arena_start + PVA_CORE1_STACK_SIZE + PVA_ARENA_MIN_SIZE > CACHE_SIZE)
     {
@@ -2995,6 +2995,7 @@ void __no_inline_not_in_flash_func(loadrom_picoamp)(uint32_t offset, bool wifi_e
     multicore_launch_core1_with_stack(core1_pva_task, pva_core1_stack, PVA_CORE1_STACK_SIZE);
 
     uint8_t subslot_reg = 0x00u;
+    uint8_t rom_bank = 0u;                  // the 16 KB bank of the ROM in page 1 (6000h-67FFh, as ASCII16)
     msx_pio_bus_init();
 
     // writes are applied before every read (see loadrom_sunrise_mapper_pva_sd)
@@ -3008,6 +3009,8 @@ void __no_inline_not_in_flash_func(loadrom_picoamp)(uint32_t offset, bool wifi_e
                 subslot_reg = wdata;                                            \
             else if (((waddr >> 14) & 3u) == 1u && ((subslot_reg >> 2) & 3u) == 3u) \
                 pva_mem_write(waddr, wdata);                                    \
+            else if ((waddr & 0xF800u) == 0x6000u && ((subslot_reg >> 2) & 3u) == 0u) \
+                rom_bank = wdata & 3u;                                          \
         }                                                                       \
     } while (0)
 
@@ -3026,7 +3029,7 @@ void __no_inline_not_in_flash_func(loadrom_picoamp)(uint32_t offset, bool wifi_e
                 uint8_t sub = (subslot_reg >> 2) & 3u;
                 if (sub == 0u)
                 {
-                    uint32_t rel = addr & 0x3FFFu;
+                    uint32_t rel = ((uint32_t)rom_bank << 14) | (addr & 0x3FFFu);
                     if (rel < available_length)
                         data = read_rom_byte(rom_base, rel);
                 }

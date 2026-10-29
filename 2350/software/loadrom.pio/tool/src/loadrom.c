@@ -986,8 +986,8 @@ int main(int argc, char *argv[])
             rom_type |= ROM_TYPE_WIFI_FLAG;
             printf("WiFi Support: Enabled (internet radio through the ESP-01)\n");
         }
-        if ((uint32_t)picoamp_rom_len != 16384u) {
-            printf("Embedded PICOAMP ROM must be 16384 bytes (found %u).\n", (unsigned)picoamp_rom_len);
+        if ((uint32_t)picoamp_rom_len % 16384u || !picoamp_rom_len || picoamp_rom_len > 65536u) {
+            printf("Embedded PICOAMP ROM must be 16, 32, 48 or 64 KB (found %u bytes).\n", (unsigned)picoamp_rom_len);
             return 1;
         }
         printf("ROM Type: %s [Embedded]\n", rom_types[ROM_TYPE_PICOAMP]);
