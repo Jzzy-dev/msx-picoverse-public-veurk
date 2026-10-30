@@ -82,6 +82,7 @@ add_executable(loadrom
     pvaudio/pva_cfg.c
     pvaudio/pva_clock.c
     pvaudio/pva_news.c
+    pvaudio/pva_news_cat.c
     pvaudio/pva_hal_pico.c
     )
 
